@@ -23,8 +23,8 @@ if [ ! -f "$CFG" ]; then
   else
     echo "==> Could not auto-detect a LAN IP. Scaffolding with loopback bind…"
     uv run python -m taskpaw_v3.bootstrap agent --preset moomoo
-    echo "    NOTE: a Hub on another machine can't reach 127.0.0.1 — edit bind_host"
-    echo "          in $CFG to this Mac's LAN IP, then register it on the Hub."
+    echo "    NOTE: a Hub on another machine can't reach 127.0.0.1 — 打开 TaskPaw → 设置"
+    echo "          → 网络与访问 and turn on LAN access, then register it on the Hub."
   fi
 else
   echo "==> Existing config found, leaving it untouched: $CFG"

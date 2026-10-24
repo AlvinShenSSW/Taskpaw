@@ -675,10 +675,38 @@ def plan(h, film_id, worker_id, *, revision=1):
             raise
 
 
+def ensure_route(h, film_id, worker_id, revision):
+    """P2-1 C10: a compute claim needs an open route to the claiming worker."""
+    route = h.store.film_route(h.operator, film_id, revision)
+    if route is not None:
+        return
+    controller, h.store.controller_id = h.store.controller_id, worker_id
+    try:  # the store opens `local` routes for its controller only (OD7 hardening)
+        h.store.route_film(
+            h.operator,
+            h.meta(),
+            m.RouteOpen(
+                route_id=identity(),
+                film_id=film_id,
+                input_revision=revision,
+                worker_id=worker_id,
+                kind="local",
+                expected_pin_version=0,
+                reason="test",
+            ),
+        )
+    except m.WorkflowError as exc:  # e.g. a disabled worker: the claim says why
+        if exc.code not in ("precondition_failed", "route_claimed"):
+            raise
+    finally:
+        h.store.controller_id = controller
+
+
 def claim_compute(h, film_id, worker, auth, *, name="restore"):
     job = stage(h, film_id, name)
     if name == "restore":
         plan(h, film_id, worker.worker_id, revision=job.input_revision)
+    ensure_route(h, film_id, worker.worker_id, job.input_revision)
     command = m.ClaimRequest(
         job_id=job.job_id,
         expected_version=job.version,
@@ -849,6 +877,37 @@ def test_current_profile_limits_resolution_even_with_operator_enabled_worker(h):
     with pytest.raises(m.WorkflowError, match="precondition_failed"):
         claim_compute(h, film_id, worker, worker_auth)
     assert rows(h, "attempts") == []
+
+
+@pytest.mark.parametrize(
+    "limit, size, ok",
+    [
+        ((3840, 2160), (3840, 2160), True),  # P2-5 R3: a re-verified profile takes 4K
+        ((3840, 2160), (1920, 1080), True),
+        ((1920, 1080), (1920, 1080), True),
+        ((1920, 1080), (3840, 2160), False),  # approved at 1080p: the claim refuses
+    ],
+)
+def test_the_claim_rechecks_every_probe_against_the_approved_max(h, limit, size, ok):
+    film_id, _, _, auth = film(h, intake=False)
+
+    def probed(data):
+        data["readiness"]["media_probes"][0].update(width=size[0], height=size[1])
+
+    manifest = input_manifest(film_id, change=probed)
+    h.store.put_input_manifest(
+        auth,
+        h.meta(),
+        m.InputManifestPut(film_id=film_id, expected_version=1, manifest=manifest),
+    )
+    worker, worker_auth = compute_worker(h, max_width=limit[0], max_height=limit[1])
+    if ok:
+        claim_compute(h, film_id, worker, worker_auth)
+        assert len(rows(h, "attempts")) == 1
+    else:
+        with pytest.raises(m.WorkflowError, match="precondition_failed"):
+            claim_compute(h, film_id, worker, worker_auth)
+        assert rows(h, "attempts") == []
 
 
 def test_gpu_failure_without_stop_is_unknown_and_expiry_keeps_owner(h):

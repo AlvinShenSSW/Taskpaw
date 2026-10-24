@@ -503,3 +503,38 @@ def test_field_descriptions_state_the_new_names():
     assert "<name>-破解.zh.srt" in av and "<name>_restored.zh.srt" in av
     assert "deleted" in av
     assert "delete its old .srt files first" in av
+
+
+# ── #303: the workflow names an LTX restore 无码; the monitor only recognises it ──
+def test_ltx_output_and_staging_names_are_wu_ma(tmp_path):
+    out = str(tmp_path / "out")
+    v = tmp_path / "in" / "SDAB-312.mp4"
+    assert output_path_for(out, v, ltx=True).name == "SDAB-312-无码.mp4"
+    assert staging_path_for(out, v, ltx=True).name == "SDAB-312-无码.tmp.mp4"
+    assert output_path_for(out, v).name == "SDAB-312-破解.mp4"  # non-LTX: unchanged
+    assert J.zh_target_for(output_path_for(out, v, ltx=True)).name == (
+        "SDAB-312-无码.zh.srt"
+    )
+
+
+def test_restored_output_for_accepts_the_wu_ma_name(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    v = tmp_path / "in" / "a.mp4"
+    (out / "a-无码.tmp.mp4").write_bytes(b"partial")  # staging is never "done"
+    assert restored_output_for(str(out), v) is None
+    (out / "a-无码.mp4").write_bytes(b"ltx")
+    assert restored_output_for(str(out), v) == out / "a-无码.mp4"
+
+
+def test_plan_queue_and_plan_subs_count_a_wu_ma_output_as_restored(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4", "b.mp4")
+    (out / "a-无码.mp4").write_bytes(b"ltx")
+    pending, done, collisions = plan_queue(str(inp), str(out))
+    assert [p.name for p in pending] == ["b.mp4"] and done == 1
+    plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
+    assert [p.name for p in plan.subs_only] == ["a.mp4"]
+    assert plan.media[inp / "a.mp4"] == out / "a-无码.mp4"

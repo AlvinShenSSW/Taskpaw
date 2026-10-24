@@ -9,11 +9,14 @@ own CAS) per item, with a result for each.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from . import board
 from . import energy as en
 from . import models as m
+from . import scheduler as sc
 from .exec_restore import needs_restore
 from .local_gpu import FULL_HD, max_resolution
 from .local_runtime import LocalRuntime
@@ -79,10 +82,82 @@ def machines(rt: LocalRuntime) -> list[dict[str, Any]]:
     ]
 
 
-def choices(rt: LocalRuntime) -> dict[str, Any]:
+def remote_machines(rt: LocalRuntime) -> list[dict[str, Any]]:
+    """P2-4 R5/R6: every verified, non-revoked GPU worker; 本机 never (OD1)."""
+    found = []
+    for worker in rt.store.list_workers(rt.operator):
+        if (
+            worker.worker_id == rt.identity.worker_id
+            or worker.enrollment_state != "verified"
+            or worker.admission_state == "revoked"
+        ):
+            continue
+        probe = worker.capability.probed if worker.capability else None
+        found.append(
+            {
+                "id": worker.worker_id,
+                "name": worker.name,
+                "gpu": probe.gpu_model if probe else None,
+                "vram_mib": probe.vram_mib if probe else None,
+                "reason": "",
+            }
+        )
+    return found
+
+
+def choices(rt: LocalRuntime, *, remote: bool = False) -> dict[str, Any]:
     return {
         "tiers": [{"value": tier, "label": TIER_LABELS[tier]} for tier in TIERS],
-        "machines": machines(rt),
+        "machines": remote_machines(rt) if remote else machines(rt),
+    }
+
+
+def _clock_text(at: datetime, now: datetime) -> str:
+    local, today = at.astimezone(), now.astimezone()
+    if local.date() == today.date():
+        return local.strftime("%H:%M")
+    return f"{local.month}月{local.day}日 {local.strftime('%H:%M')}"
+
+
+def _energy(wh: float | None) -> str | None:
+    return None if wh is None else f"约 {wh / 1000:.1f} 度"
+
+
+def routing_view(
+    preview: sc.Preview, names: Mapping[str, str], now: datetime
+) -> dict[str, Any]:
+    """R5: one tier's 自动 (its device, finish, energy and the reason line
+    「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, or why it would wait) and each
+    device's own finish or eligibility reason (预计: advisory)."""
+    auto: dict[str, Any]
+    if preview.machine is None and preview.waiting is None and preview.reason:
+        auto = {"waiting": None, "text": preview.reason}  # §9 CX2: 无需 GPU
+    elif preview.machine is None or preview.finish_at is None:
+        auto = {"waiting": preview.waiting}
+    else:
+        name = names.get(preview.machine, "")
+        text = f"预计 {_clock_text(preview.finish_at, now)} 在 {name} 完成"
+        energy = _energy(preview.energy_wh)
+        auto = {
+            "machine": {"id": preview.machine, "name": name},
+            "finish_at": board.iso(preview.finish_at),
+            "energy_wh": preview.energy_wh,
+            "text": f"{text} · {energy}" if energy else text,
+        }
+    return {
+        "auto": auto,
+        "devices": [
+            {
+                "id": d.worker_id,
+                "name": d.name,
+                "gpu": d.gpu_model,
+                "vram_mib": d.vram_mib or None,
+                "finish_at": board.iso(d.finish_at) if d.finish_at else None,
+                "energy_wh": d.energy_wh,
+                "reason": d.reason,
+            }
+            for d in preview.devices
+        ],
     }
 
 
@@ -133,8 +208,26 @@ def media_totals(manifest: m.InputManifest) -> dict[str, Any]:
     }
 
 
-def plan_list(rt: LocalRuntime) -> dict[str, Any]:
+def plan_list(
+    rt: LocalRuntime,
+    *,
+    remote: Mapping[str, Any] | None = None,
+    hold: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """`remote`: the routing pass's live inputs (`live`, `now`,
+    `controller_id`, `controller_free_bytes`, `live_since`) in remote mode;
+    each film then gets `routing[tier]` from `scheduler.preview` and its
+    recommendation names no machine (自动). None: single machine, unchanged.
+    `hold`: films in 片源丢失, previewed as the pass sees them (#304 IR6)."""
     op, lookup = rt.operator, rt.lookup
+    snapshot = stages = None
+    names: dict[str, str] = {}
+    if remote is not None:
+        from .routing import gpu_stages
+
+        snapshot = rt.store.routing_snapshot(op, hold)
+        stages = gpu_stages(rt.store, op, snapshot, rt.executors)
+        names = {w.worker_id: w.name for w in snapshot.workers}
     unplanned = rt.store.list_unplanned(op)
     films = {film.film_id: film for film in rt.store.film_board(op)}
     history = _history(rt, films)
@@ -164,6 +257,15 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
         )
         poster = board.cover(rt, None, manifest, item.film_id)
         full = board.jacket(rt, None, manifest)
+        routed = None
+        if remote is not None and snapshot is not None:
+            tiers: tuple[str | None, ...] = TIERS if needs else (None,)
+            routed = {
+                (tier or "none"): routing_view(view, names, remote["now"])
+                for tier, view in sc.preview(
+                    snapshot, item.film_id, tiers, gpu_stages=stages, **remote
+                ).items()
+            }
         entries.append(
             {
                 "film_id": item.film_id,
@@ -194,15 +296,24 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
                 "recommendation": {
                     "ltx_model": rec.ltx_model,
                     "ltx_reason": rec.ltx_reason,
-                    "machine": rec.machine,
-                    "machine_reason": rec.machine_reason,
+                    # P2-4 R5: 自动 in remote mode (the select's first option)
+                    "machine": None if remote is not None else rec.machine,
+                    "machine_reason": "自动（推荐）"
+                    if remote is not None
+                    else rec.machine_reason,
                 },
+                "routing": routed,
                 "prediction": en.predict(
                     rates, rec.machine, totals["resolution"], totals["duration_ms"]
                 ),
             }
         )
-    return {"plans": entries, "default_tier": default, "choices": choices(rt)}
+    return {
+        "plans": entries,
+        "default_tier": default,
+        "choices": choices(rt, remote=remote is not None),
+        "remote": remote is not None,
+    }
 
 
 def _manifest(rt: LocalRuntime, film_id: str, revision: int) -> m.InputManifest:
@@ -224,17 +335,21 @@ def _snapshot(actors: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def confirm_plans(
-    rt: LocalRuntime, items: list[dict[str, Any]]
+    rt: LocalRuntime, items: list[dict[str, Any]], *, remote: bool = False
 ) -> list[dict[str, Any]]:
-    """Confirm each `{film_id, input_revision, ltx_model, machine}`; one result each."""
+    """Confirm each `{film_id, input_revision, ltx_model, machine}`; one result
+    each. P2-4 R6: `machine` None is 自动; in remote mode only None or a
+    verified, non-revoked GPU worker is accepted (本机 never, OD1)."""
     op = rt.operator
-    allowed = {machine["id"] for machine in machines(rt)}
+    allowed = {
+        machine["id"] for machine in (remote_machines(rt) if remote else machines(rt))
+    }
     films = {film.film_id: film for film in rt.store.film_board(op)}
     results = []
     for item in items:
         film_id = item["film_id"]
         try:
-            if item["machine"] not in allowed:
+            if item["machine"] is not None and item["machine"] not in allowed:
                 raise m.WorkflowError("invalid_machine")
             manifest = _manifest(rt, film_id, item["input_revision"])
             needs = needs_restore(manifest)

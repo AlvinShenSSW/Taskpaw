@@ -4,6 +4,12 @@ One thread claims ready compute stages, runs them through their executor inside
 a per-attempt kill-on-close Job, and resolves the attempt only after the Job has
 settled. GPU stages share the agent's process-wide `gpu_lease` with manual
 Jasna / subtitle tasks (C5).
+
+P2-1 (#292): a compute claim needs an open route to this worker, which the
+dispatcher opens itself (kind `local`) right before it claims (C10). In
+remote mode the controller's GPU takes no restore that needs it, whatever
+workers are verified (OD1); ASR runs here under the shared `gpu_lease`
+(OD7, #298), as do stages that need no GPU (C12).
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
@@ -29,16 +36,21 @@ from .executors import (
     ComputeStage,
     ExecOutcome,
     JobContext,
+    Progress,
     StageExecutor,
     classify_exception,
     failed_kind,
+    needs_gpu,
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
+from .scheduler import remote_mode
+from .store_core import parse_time
 from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
     from .finalize import Finalizer
+    from .source_watch import SourceWatch
 
 log = logging.getLogger("taskpaw.workflow.dispatch")
 
@@ -49,6 +61,13 @@ POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
 RENEW_SECONDS = 3600.0
 NO_4K_DEVICE = "没有可接 4K 的设备"
+REMOTE_GPU = "等待 GPU 设备"  # OD7: a remote worker restores
+NO_GPU_DEVICE = "没有可用的 GPU 设备"  # ... and none is verified right now
+NO_ASR = "本机未配置 WhisperJAV"  # OD7 R11: remote mode, no ASR executor here
+# OD7 (#298 R2): only restore goes to a GPU worker; ASR and translate run here
+REMOTE_STAGES = frozenset({"restore"})
+LOCAL_ROUTE = "本机"
+TAKE_OVER = "转本机"
 
 
 class Lease(Protocol):
@@ -101,11 +120,6 @@ class ReturnContext:
     processes: OwnedJob | None = None
 
 
-def _needs_gpu(executor: StageExecutor, manifest: m.InputManifest) -> bool:
-    decide = getattr(executor, "needs_gpu", None)
-    return bool(decide(manifest)) if callable(decide) else executor.uses_gpu
-
-
 @dataclass
 class _Unsettled:
     """A Job that did not settle in time: owner and GPU stay held (C4)."""
@@ -142,6 +156,56 @@ _TRANSIENT = failed_kind("transient")
 
 def _kinds(attempt: Any) -> set[str]:
     return {evidence.kind for evidence in attempt.evidence}
+
+
+@dataclass
+class StageRun:
+    """One executor run: its outcome, the attempt's Job (None: none could be
+    made, nothing was launched) and whether that Job settled in time."""
+
+    outcome: ExecOutcome
+    processes: OwnedJob | None
+    settled: bool
+
+
+def run_stage(
+    executor: StageExecutor,
+    job: m.PendingComputeJob,
+    manifest: m.InputManifest,
+    workdir: Path,
+    cancel: threading.Event,
+    *,
+    on_launch: Callable[[str], None],
+    progress: Progress,
+    stop_settle: float,
+    on_processes: Callable[[OwnedJob], None] | None = None,
+) -> StageRun:
+    """P2-3 §4: the run section shared by the controller's and a worker's
+    dispatcher — a kill-on-close Job, the attempt's work folder, the
+    executor, an exception classified, a stop as `cancelled`, then terminate
+    and settle. No renewal: the caller keeps its own around this call."""
+    processes: OwnedJob | None = None
+    try:
+        # Setup after the claim fails like a stage, never leaving it claimed (R2).
+        processes = OwnedJob(on_launch=on_launch)
+        if on_processes is not None:
+            on_processes(processes)
+        workdir.mkdir(parents=True, exist_ok=True)
+        outcome = executor.run(
+            JobContext(job, manifest, workdir, cancel, processes, progress)
+        )
+    except (
+        Exception
+    ) as exc:  # setup error / executor bug: needs-attention; a held file: transient
+        log.exception("workflow stage %s failed", job.stage)
+        outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
+    if cancel.is_set() and not outcome.ok:
+        outcome = ExecOutcome.failed("cancelled", "已停止")
+    settled = True
+    if processes is not None:  # None: nothing was launched, nothing to settle
+        processes.terminate()  # descendants left behind by a finished primary
+        settled = processes.settle(stop_settle)
+    return StageRun(outcome, processes, settled)
 
 
 def should_retry(attempts: Sequence[Any]) -> bool:
@@ -181,8 +245,14 @@ class LocalDispatcher:
             [LocalRuntime, m.PendingComputeJob, str, ExecOutcome], None
         ]
         | None = None,
+        remote_enabled: bool = False,
+        sources: SourceWatch | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        # P3 E1 (#304): films whose INBOX source vanished are never dispatched
+        self.sources = sources
+        # P2-2 IR1: `workflow.remote_workers`; off, every stage runs here
+        self.remote_enabled = remote_enabled
         # PWR-2: the agent's power sampler, read late (it starts after the host)
         self.power = power or power_estimate.get_sampler
         self.workflow_log = workflow_log or WorkflowLog(None)  # U1e: 日志 rows
@@ -438,9 +508,13 @@ class LocalDispatcher:
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
+        remote: tuple[str, ...] | None = None  # read once, at the first compute job
+        remote_read = False
         for job in jobs:
             if self.paused:  # a pause arrived while admission was blocked
                 return self._paused_exit()
+            if self.sources is not None and self.sources.check(job.film_id):
+                continue  # 片源丢失: the board says why; 重新检查 lets it go on
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )
@@ -455,15 +529,35 @@ class LocalDispatcher:
                 ran = self._execute_step(job, manifest, step, auth)
             else:  # only compute stages are listed besides the component steps
                 executor = rt.executors.get(cast(ComputeStage, job.stage))
+                if not remote_read:
+                    remote, remote_read = (
+                        remote_mode(
+                            rt.store.list_workers(rt.operator),
+                            rt.identity.worker_id,
+                            enabled=self.remote_enabled,
+                        ),
+                        True,
+                    )
+                if executor is None and job.stage == "asr" and remote is not None:
+                    waiting[job.film_id] = NO_ASR  # OD7: only this machine transcribes
+                    continue
                 if executor is None or rt.gpu is None:
                     waiting[job.film_id] = (
                         rt.reason if rt.gpu is None else "没有可用的执行器"
                     )
                     continue
+                if (
+                    remote is not None
+                    and job.stage in REMOTE_STAGES
+                    and needs_gpu(executor, manifest)
+                ):  # OD7: restore never on this GPU; IR5: name who runs it
+                    who = "、".join(remote[:3]) or NO_GPU_DEVICE
+                    waiting[job.film_id] = f"{REMOTE_GPU}：{who}"
+                    continue
                 if not fits(manifest, executor.max_resolution(vram)):
                     waiting[job.film_id] = NO_4K_DEVICE
                     continue
-                gpu = _needs_gpu(executor, manifest)
+                gpu = needs_gpu(executor, manifest)
                 name = self._name(job, manifest)
                 if gpu and not self._acquire(job, name):
                     gpu_waited = True  # keep the queue place, look further (E7)
@@ -488,6 +582,54 @@ class LocalDispatcher:
         elif not gpu_waited:
             self._leave_queue()
         return False
+
+    def _ensure_route(self, job: m.PendingComputeJob) -> bool:
+        """C10: an open route to this worker before the claim.
+
+        Without one the controller opens its own (`local`). Another worker's
+        route is taken over only while unclaimed: the dispatcher reaches here
+        only for a stage it runs itself (translate, a stage that needs no GPU,
+        or any stage outside remote mode)."""
+        rt = self.runtime
+        own = rt.identity.worker_id
+        try:
+            route = rt.store.film_route(rt.operator, job.film_id, job.input_revision)
+            if route is not None and route.worker_id == own:
+                return True
+            if route is not None:
+                try:
+                    rt.store.withdraw_route(
+                        rt.operator,
+                        rt.meta(),
+                        m.RouteWithdraw(
+                            route_id=route.route_id,
+                            expected_version=route.version,
+                            reason=TAKE_OVER,
+                        ),
+                    )
+                except m.WorkflowError as exc:
+                    if exc.code != "route_claimed":
+                        raise
+                    worker = rt.store.get_worker(rt.operator, route.worker_id).worker
+                    self._reason = f"已派往 {worker.name}"
+                    return False
+            rt.store.route_film(
+                rt.operator,
+                rt.meta(),
+                m.RouteOpen(
+                    route_id=_new_id(),
+                    film_id=job.film_id,
+                    input_revision=job.input_revision,
+                    worker_id=own,
+                    kind="local",
+                    expected_pin_version=0,
+                    reason=LOCAL_ROUTE,
+                ),
+            )
+            return True
+        except m.WorkflowError as exc:
+            self._reason = f"领取失败：{exc}"
+            return False
 
     def _set_waiting(self, waiting: dict[str, str]) -> None:
         with self._lock:
@@ -546,6 +688,9 @@ class LocalDispatcher:
         if self.paused:  # re-checked at the claim, after any blocking lease wait
             self._release_if_holding()
             self._reason = "paused"
+            return False
+        if not self._ensure_route(job):
+            self._release_if_holding()
             return False
         tools = executor.tools(job)  # U1 P4': the planned tier, read once
         attempt = AttemptFile(
@@ -611,34 +756,30 @@ class LocalDispatcher:
             daemon=True,
         )
         renewer.start()
+
+        def held(processes: OwnedJob) -> None:
+            running.processes = processes
+
         try:
-            # Setup after the claim fails like a stage, never leaving it claimed (R2).
-            running.processes = OwnedJob(on_launch=launched)
-            workdir = rt.work_dir / attempt.attempt_id
-            workdir.mkdir(parents=True, exist_ok=True)
-            outcome = executor.run(
-                JobContext(
-                    job, manifest, workdir, self.cancel, running.processes, progress
-                )
+            result = run_stage(
+                executor,
+                job,
+                manifest,
+                rt.work_dir / attempt.attempt_id,
+                self.cancel,
+                on_launch=launched,
+                progress=progress,
+                stop_settle=self.stop_settle,
+                on_processes=held,
             )
-        except (
-            Exception
-        ) as exc:  # setup error / executor bug: needs-attention; a held file: transient
-            log.exception("workflow stage %s failed", job.stage)
-            outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
         finally:
             stop_renew.set()
             renewer.join()  # no renewal may land after resolution reads the version (R1)
-        if self.cancel.is_set() and not outcome.ok:
-            outcome = ExecOutcome.failed("cancelled", "已停止")
-        processes = running.processes
-        if processes is not None:  # None: nothing was launched, nothing to settle
-            processes.terminate()  # descendants left behind by a finished primary
-            if not processes.settle(self.stop_settle):
-                self._unsettled = _Unsettled(running, outcome)
-                self._reason = "停止未确认：任务进程仍在运行"
-                return True
-        self._resolve(running, outcome)
+        if not result.settled:
+            self._unsettled = _Unsettled(running, result.outcome)
+            self._reason = "停止未确认：任务进程仍在运行"
+            return True
+        self._resolve(running, result.outcome)
         return True
 
     def _finish_unsettled(self) -> bool:
@@ -689,37 +830,16 @@ class LocalDispatcher:
         rt = self.runtime
         try:
             current = rt.open_assignment(running.assignment_id)
-            kind = (
-                SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
-            )
-            owner = running.owner
             rt.store.resolve_assignment(
                 rt.operator,
                 rt.meta(),
-                m.AssignmentResolution(
-                    assignment_id=running.assignment_id,
-                    attempt_id=running.attempt.attempt_id,
-                    expected_version=current.version,
-                    reason=outcome.message or ("完成" if outcome.ok else "失败"),
-                    operation_id=running.attempt.operation_id,
-                    local_owner=None
-                    if owner is None
-                    else owner.model_copy(
-                        update={
-                            "state": "stopped",
-                            "evidence": rt.evidence("native_owner_stopped"),
-                        }
-                    ),
-                    evidence=(
-                        rt.evidence(
-                            kind,
-                            outcome.message or None,
-                            payload_digest=outcome.result_digest,
-                            timing=outcome.timing,
-                            energy=self._energy(running),  # PWR-2, every attempt
-                        ),
-                    ),
-                    outcome="succeeded" if outcome.ok else "failed",
+                resolution(
+                    rt,
+                    current,
+                    running.attempt.operation_id,
+                    outcome,
+                    running.owner,
+                    self._energy(running),  # PWR-2, every attempt
                 ),
             )
             # IR03: the store now holds the attempt's energy; a board read
@@ -747,7 +867,7 @@ class LocalDispatcher:
             return
         try:
             job, name = running.job, running.name or running.job.film_id
-            started = datetime.fromisoformat(running.started_at)
+            started = parse_time(running.started_at)
             duration = (datetime.now(timezone.utc) - started).total_seconds()
             self.workflow_log.stage(
                 name, job.stage, ok=outcome.ok, duration=duration, note=outcome.message
@@ -882,16 +1002,61 @@ class LocalDispatcher:
         return True
 
     def _retry_if_due(self, job_id: str) -> None:
-        """C6: bounded automatic retry by `should_retry`; interruptions never count."""
-        rt = self.runtime
-        if not should_retry(rt.store.list_attempts(rt.operator, job_id)):
-            return
-        stage = rt.store.get_stage(rt.operator, job_id)
-        if stage.status == "failed":
-            rt.store.retry_stage(
-                rt.operator,
-                rt.meta(),
-                m.StageRetry(
-                    job_id=job_id, expected_version=stage.version, reason="自动重试"
-                ),
-            )
+        retry_if_due(self.runtime, job_id)
+
+
+def retry_if_due(rt: LocalRuntime, job_id: str) -> None:
+    """C6: bounded automatic retry by `should_retry`; interruptions never
+    count. Shared by the controller's dispatcher and a remote finish (P2-3)."""
+    if not should_retry(rt.store.list_attempts(rt.operator, job_id)):
+        return
+    stage = rt.store.get_stage(rt.operator, job_id)
+    if stage.status == "failed":
+        rt.store.retry_stage(
+            rt.operator,
+            rt.meta(),
+            m.StageRetry(
+                job_id=job_id, expected_version=stage.version, reason="自动重试"
+            ),
+        )
+
+
+def resolution(
+    rt: LocalRuntime,
+    current: m.AssignmentRecord,
+    operation_id: str,
+    outcome: ExecOutcome,
+    owner: m.LocalOwnerEvidence | None,
+    energy: m.AttemptEnergy | None,
+) -> m.AssignmentResolution:
+    """The resolving command of a settled attempt: its owner stopped (made
+    by the controller), its outcome's evidence with the ledger digest, the
+    restore timing and the energy (PWR-2). Shared by both dispatch paths."""
+    kind = (
+        SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
+    )
+    return m.AssignmentResolution(
+        assignment_id=current.assignment_id,
+        attempt_id=current.attempt_id,
+        expected_version=current.version,
+        reason=outcome.message or ("完成" if outcome.ok else "失败"),
+        operation_id=operation_id,
+        local_owner=None
+        if owner is None
+        else owner.model_copy(
+            update={
+                "state": "stopped",
+                "evidence": rt.evidence("native_owner_stopped"),
+            }
+        ),
+        evidence=(
+            rt.evidence(
+                kind,
+                outcome.message or None,
+                payload_digest=outcome.result_digest,
+                timing=outcome.timing,
+                energy=energy,
+            ),
+        ),
+        outcome="succeeded" if outcome.ok else "failed",
+    )

@@ -158,8 +158,13 @@ def run_from_config(
             )
             return 1
     store = HubStore(resolved_db)
-    run_hub(config, store, block=True, config_path=path)
-    return 0
+    from taskpaw_v3.core import restart
+    from taskpaw_v3.hub.server.settings import effective_hub_config
+
+    # #299 R15: the UI's settings are store overrides over hub.yaml
+    effective = effective_hub_config(config, store)
+    run_hub(effective, store, block=True, config_path=path, yaml_config=config)
+    return restart.exit_code(0)
 
 
 def main() -> int:

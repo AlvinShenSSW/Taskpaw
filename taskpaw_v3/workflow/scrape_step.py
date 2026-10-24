@@ -1,8 +1,8 @@
 """M01-P1 scrape: Miko full post-processing of a return package, as a T01 final.
 
 The return package is staged privately (videos hard-linked, the Chinese subtitle
-copied as `<video>.srt`, old NFO/images left out), MDCX304's one-shot
-`postprocess_one` runs in its own environment inside the attempt's kill-on-close
+copied as `<video>.srt`, old NFO/images left out; a Japanese subtitle is never
+staged), MDCX304's one-shot `postprocess_one` runs in its own environment inside the attempt's kill-on-close
 Job, and its verified output becomes the film's FinalManifest. Contract:
 docs/specs/2026-10-20-media-workflow-m01-p1-{design,interface}.md.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -20,7 +21,7 @@ from typing import Any, Literal
 
 from . import file_identity
 from . import models as m
-from .exec_restore import ffprobe_command, probe_video
+from .exec_restore import ffprobe_command, is_ltx_name, is_restored_name, probe_video
 from .executors import SUCCEEDED_KIND, ErrorClass, ExecOutcome
 from .local_dispatch import ReturnContext
 from .local_runtime import LocalRuntime
@@ -30,6 +31,7 @@ from .stage_results import sha256_file
 FORCED_TABLE_VERSION = 1  # must match mdcx.cmd.postprocess_one
 CLI_VERSION = "postprocess_one/1"
 SCHEMA = 1
+log = logging.getLogger(__name__)
 _ITEM_NS = uuid.UUID("7e3b9a41-2c6d-4f08-8a51-6d2c0b9e4f17")
 _VOLATILE = frozenset({"success.txt", "remain.txt"})  # interactive Miko rewrites
 _ROLES = {
@@ -110,6 +112,9 @@ class LocalScrapeStep:
     # ── steps ──────────────────────────────────────────────────────────
     def _run(self, context: ReturnContext) -> ExecOutcome:
         rt, job = context.runtime, context.job
+        _discard_placement(
+            rt.output_dir / f".placing-{job.film_id}", rt.identity.work_root_id
+        )
         handoff, handoff_sha = self._handoff(rt, job)
         tools = next(  # what was claimed, never recomputed (D10)
             a.tool_versions
@@ -124,7 +129,7 @@ class LocalScrapeStep:
             path.mkdir(parents=True, exist_ok=True)
         self._copy_config(dirs["config"], tools.config_digest)
         package = package_dir(rt, job.film_id, job.input_revision)
-        videos, japanese = self._stage(handoff, package, dirs["in"])
+        videos = self._stage(handoff, package, dirs["in"])
         request = {
             "schema": SCHEMA,
             "attempt_id": context.attempt_id,
@@ -135,28 +140,96 @@ class LocalScrapeStep:
             json.dumps(request, ensure_ascii=False), encoding="utf-8"
         )
         result, result_sha = self._launch(context, attempt, dirs["config"])
-        film_dir = dirs["out"] / result["film_dir"]
         files = self._verify(dirs["out"], result)
-        files += self._place_japanese(japanese, package, film_dir, dirs["out"], files)
         final = self._final(
             context, tools, handoff, handoff_sha, result, result_sha, files, attempt
         )
-        film = rt.store.get_film(rt.operator, job.film_id).film
-        rt.store.put_final_manifest(
-            rt.scrape_auth,
-            rt.meta(),
-            m.FinalManifestPut(
-                expected_version=film.version,
-                film_id=job.film_id,
-                attempt_id=context.attempt_id,
-                manifest=final,
-            ),
-        )
+        final = self._place(context, final)
         shutil.rmtree(dirs["in"], ignore_errors=True)
         for old in base.iterdir() if base.is_dir() else ():
             if old.name != context.attempt_id:  # superseded attempts
                 shutil.rmtree(old, ignore_errors=True)
         return ExecOutcome.succeeded("刮削完成", result_digest=final.manifest_hash)
+
+    def _place(self, context: ReturnContext, final: m.FinalManifest) -> m.FinalManifest:
+        """Stage without consuming sources; publish only a complete, recorded package."""
+        from .finalize import Finalizer, _rmdir_empty
+
+        rt = context.runtime
+        source = rt.final_dir(final)
+        staging = rt.output_dir / f".placing-{context.job.film_id}"
+        _discard_placement(staging, rt.identity.work_root_id)
+        members = Finalizer._cleanup_manifest(
+            "workcopy", final.manifest_hash, final.items
+        ).members
+        try:
+            staging.mkdir(parents=True)
+            for member in members:
+                origin, dest = (
+                    source / member.relative_path,
+                    staging / member.relative_path,
+                )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(origin, dest)
+                except OSError:  # cross-volume or no hard links (ReFS/exFAT)
+                    shutil.copyfile(origin, dest)
+                    if (
+                        dest.stat().st_size != member.size_bytes
+                        or sha256_file(dest, context.cancel) != member.sha256
+                    ):
+                        raise _Failure(
+                            "needs_attention",
+                            f"成品复制校验失败：{member.relative_path}",
+                        )
+            suffix, target = 1, rt.output_dir / source.name
+            while target.exists():
+                suffix += 1
+                target = rt.output_dir / f"{source.name} ({suffix})"
+            data = final.model_dump(mode="json")
+            data.update(output_relative_path=target.name, output_directory=str(target))
+            data["items"] = [
+                item.model_copy(
+                    update={
+                        "native_identity": file_identity.native(
+                            staging / item.relative_path, item.source_root_id
+                        )
+                    }
+                ).model_dump(mode="json")
+                for item in final.items
+            ]
+            data["manifest_hash"] = m.manifest_digest(data)
+            final = m.FinalManifest.model_validate(data)
+            # This candidate is not active until scrape succeeds. A crash here
+            # leaves only this film's staging for its next attempt to discard.
+            film = rt.store.get_film(rt.operator, context.job.film_id).film
+            rt.store.put_final_manifest(
+                rt.scrape_auth,
+                rt.meta(),
+                m.FinalManifestPut(
+                    expected_version=film.version,
+                    film_id=context.job.film_id,
+                    attempt_id=context.attempt_id,
+                    manifest=final,
+                ),
+            )
+            staging.rename(target)  # Windows refuses even an empty colliding directory.
+        except Exception:
+            _discard_placement(staging, rt.identity.work_root_id)
+            raise
+        # Only a complete, recorded package can consume its sources (C6).
+        for member in members:
+            status = file_identity.delete_exact(
+                source / member.relative_path, member, context.cancel
+            )
+            if status not in ("deleted", "already_absent"):
+                log.warning(
+                    "Placed source retained for reclaim: %s (%s)",
+                    member.relative_path,
+                    status,
+                )
+        _rmdir_empty(source)
+        return final
 
     def _handoff(
         self, rt: LocalRuntime, job: m.PendingComputeJob
@@ -202,11 +275,11 @@ class LocalScrapeStep:
 
     def _stage(
         self, handoff: dict[str, Any], package: Path, staging: Path
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]]:
         items = handoff["items"]
         zh_ids = set(handoff["subtitles"]["item_ids"])
         restored = handoff["restoration"]["status"] in ("applied", "reused")
-        videos, japanese = [], []
+        videos = []
         for entry in self._stage_index(handoff):
             item, staged, volume = entry["item"], entry["file"], entry["volume"]
             source = _checked(package, item)
@@ -223,18 +296,16 @@ class LocalScrapeStep:
                     _checked(package, sub),
                     staging / f"{PurePosixPath(staged).stem}.srt",
                 )
-            japanese += [
-                {**s, "staged_video": staged} for s in subs if s.get("language") == "ja"
-            ]
             videos.append(
                 {
                     "file": staged,
                     "volume": volume,
                     "restored": restored,
+                    "ltx": entry["ltx"],  # #303: Miko stamps 无码, not 破解
                     "zh_subtitle": bool(zh),
                 }
             )
-        return videos, japanese
+        return videos
 
     def _launch(
         self, context: ReturnContext, attempt: Path, config: Path
@@ -289,49 +360,6 @@ class LocalScrapeStep:
                 raise _Failure("needs_attention", f"输出文件核对失败：{path}")
         return list(listed.values())
 
-    @staticmethod
-    def _place_japanese(
-        japanese: list[dict[str, Any]],
-        package: Path,
-        film_dir: Path,
-        out: Path,
-        files: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        placed = []
-        # Each keeps its own format; a second one of a format is `.ja.<n>` (H1-3).
-        used = {f["path"].casefold() for f in files}
-        for sub in japanese:
-            video = next(
-                (
-                    f
-                    for f in files
-                    if f["role"] == "main_video" and f["video"] == sub["staged_video"]
-                ),
-                None,
-            )
-            if video is None:
-                raise _Failure("needs_attention", "日语字幕找不到对应的视频")
-            main = out / video["path"]
-            ext = PurePosixPath(sub["relative_path"]).suffix
-            target, n = main.with_name(f"{main.stem}.ja{ext}"), 0
-            while target.relative_to(out).as_posix().casefold() in used:
-                n += 1
-                target = main.with_name(f"{main.stem}.ja.{n}{ext}")
-            used.add(target.relative_to(out).as_posix().casefold())
-            shutil.copyfile(_checked(package, sub), target)
-            placed.append(
-                {
-                    "path": target.relative_to(out).as_posix(),
-                    "role": "subtitle",
-                    "video": sub["staged_video"],
-                    "sha256": sha256_file(target),
-                    "size": target.stat().st_size,
-                    "language": "ja",
-                    "source_role": sub["role"],
-                }
-            )
-        return placed
-
     # ── final manifest ─────────────────────────────────────────────────
     def _final(
         self,
@@ -372,6 +400,17 @@ class LocalScrapeStep:
         videos = {f["video"]: f for f in files if f["role"] == "main_video"}
         if set(videos) != set(staged):
             raise _Failure("needs_attention", "Miko 输出的视频数量不符")
+        for mark in result.get("expected_marks", ()):
+            # M7/#303: the stamp Miko judged must be the one this video was sent for
+            video = staged.get(mark.get("video"))
+            wanted = "无码" if video and video["ltx"] else "无码破解"
+            if video and mark.get("mosaic") and mark["mosaic"] != wanted:
+                raise _Failure(
+                    "needs_attention",
+                    f"Miko 判定为 {mark['mosaic']}，应为 {wanted}：{mark['video']}",
+                )
+        first_file = next(iter(staged), None)  # volume order (M8)
+        poster_id: str | None = None
         items: list[m.ManifestItem] = []
         by_role: dict[str, list[str]] = {}
         zh_items: list[str] = []
@@ -407,11 +446,14 @@ class LocalScrapeStep:
             )
             items.append(value)
             by_role.setdefault(entry["role"], []).append(value.item_id)
+            if role == "poster" and entry.get("video") == first_file:
+                poster_id = value.item_id  # the first volume's, never cd2's
             if language == "zh":
                 zh_items.append(value.item_id)
         for role in ("nfo", "poster"):
             if len(by_role.get(role, ())) < 1:
                 raise _Failure("needs_attention", f"缺少 {role}")
+        poster_id = poster_id or by_role["poster"][0]
         multi = len(videos) > 1
         folder = by_role.get("folder_cover", [None])[0]
         if multi and folder is None:
@@ -450,9 +492,13 @@ class LocalScrapeStep:
                     evidence=rt.evidence("media_probe", producer=signer),
                 )
             )
-        marks: list[Literal["restored", "chinese_subtitles", "4k"]] = []
+        marks: list[Literal["restored", "uncensored", "chinese_subtitles", "4k"]] = []
         if handoff["restoration"]["status"] in ("applied", "reused"):
-            marks.append("restored")
+            # an LTX video is stamped 无码, any other restored one 破解 (#303)
+            if any(not v["ltx"] for v in staged.values()):
+                marks.append("restored")
+            if any(v["ltx"] for v in staged.values()):
+                marks.append("uncensored")
         if present:
             marks.append("chinese_subtitles")
         definitions = [
@@ -502,8 +548,8 @@ class LocalScrapeStep:
                     for i in outputs
                 ),
                 nfo_item_id=by_role["nfo"][0],
-                poster_item_id=by_role["poster"][0],
-                required_image_item_ids=(by_role["poster"][0],),
+                poster_item_id=poster_id,
+                required_image_item_ids=(poster_id,),
                 actual_marks=tuple(marks),
                 image_refresh="fresh",
                 folder_required=multi,
@@ -535,13 +581,30 @@ class LocalScrapeStep:
             key=lambda i: (i["volume_ordinal"] or 0, i["relative_path"]),
         )
         multi = len(mains) > 1
+        status = handoff["restoration"]["status"]
         out = []
         for index, item in enumerate(mains, start=1):
             name = PurePosixPath(item["relative_path"])
             volume = (item["volume_ordinal"] or index) if multi else None
             staged = f"{name.stem}-cd{volume}{name.suffix}" if multi else name.name
-            out.append({"file": staged, "volume": volume, "item": item})
+            out.append(
+                {
+                    "file": staged,
+                    "volume": volume,
+                    "item": item,
+                    "ltx": _is_ltx(name.name, status),
+                }
+            )
         return out
+
+
+def _is_ltx(name: str, status: str) -> bool:
+    """Whether a video was restored with LTX (#303 D2): a `-无码` file is, a kept
+    `-破解` / `_restored` one is not; any other name was made by this workflow's
+    own (LTX) restore when the film's restoration was `applied`."""
+    if is_ltx_name(name):
+        return True
+    return status == "applied" and not is_restored_name(name)
 
 
 def _checked(package: Path, item: dict[str, Any]) -> Path:
@@ -562,3 +625,24 @@ def _checked(package: Path, item: dict[str, Any]) -> Path:
 
 def _relative(rt: LocalRuntime, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(rt.work_dir.resolve())).as_posix()
+
+
+def _discard_placement(staging: Path, root_id: str) -> None:
+    """Exact-delete only this film's disposable staging, including incomplete copies."""
+    from .finalize import _rmdir_empty
+
+    for path in staging.rglob("*"):
+        if not path.is_file():
+            continue
+        member = m.CleanupMember(
+            item_id=str(uuid.uuid4()),
+            root_id=root_id,
+            relative_path=path.relative_to(staging).as_posix(),
+            native_identity=file_identity.native(path, root_id),
+            size_bytes=path.stat().st_size,
+            sha256=sha256_file(path),
+        )
+        status = file_identity.delete_exact(path, member)
+        if status not in ("deleted", "already_absent"):
+            raise _Failure("transient", f"成品暂存清理失败：{status}")
+    _rmdir_empty(staging)

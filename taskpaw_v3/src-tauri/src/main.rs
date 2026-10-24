@@ -16,12 +16,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod control_credentials;
+mod restart_supervisor;
 mod startup;
 #[cfg(any(windows, test))]
 mod windows_dialog;
 use control_credentials::{CredentialError, Descriptor, Ready};
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -543,28 +545,44 @@ fn signal_group(child: &Child, sig: libc::c_int) {
 /// by normal exit (kill_backend) and the Drop safety net so both honor the same
 /// graceful contract (Kimi).
 fn terminate_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return; // already gone
-    }
+    // #299 review IR6 (Unix): the leader is watched without being reaped, so
+    // the final group SIGKILL (stragglers too) can never hit a reused id.
     #[cfg(unix)]
-    signal_group(child, libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => {
+    {
+        use restart_supervisor::Poll;
+        let mut state = peek_child(child);
+        if state == Poll::Running {
+            signal_group(child, libc::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while state == Poll::Running && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
+                state = peek_child(child);
             }
-            _ => break,
         }
+        if state != Poll::Gone {
+            signal_group(child, libc::SIGKILL);
+        }
+        let _ = child.wait();
     }
-    // Force-kill the whole group (Unix) / the process (Windows; the Job Object
-    // reaps the rest of the tree).
-    #[cfg(unix)]
-    signal_group(child, libc::SIGKILL);
     #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return; // already gone
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => break,
+            }
+        }
+        // Force-kill the process (the Job Object reaps the rest of the tree).
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn kill_backend(app: &tauri::AppHandle) {
@@ -757,14 +775,373 @@ fn trusted_ui_navigation(url: &url::Url, debug: bool) -> bool {
             && matches!(host, "localhost" | "127.0.0.1" | "[::1]")
             && url.port() == Some(5173))
 }
-fn init_script(descriptor: &Descriptor, debug: bool) -> String {
-    let cfg = serde_json::json!({ "baseUrl": descriptor.base_url, "controlToken": descriptor.control_token, "role": descriptor.role, "bootId": descriptor.boot_id });
+/// `restart`: the shell owns the backend and supervises exit 75 (#299 §3), so
+/// the UI may offer 立即重启; otherwise it says to quit and reopen.
+fn init_script(descriptor: &Descriptor, debug: bool, restart: bool) -> String {
+    let cfg = serde_json::json!({ "baseUrl": descriptor.base_url, "controlToken": descriptor.control_token, "role": descriptor.role, "bootId": descriptor.boot_id, "restart": restart });
     let dev = if debug {
         "|| (p==='http:' && n==='5173' && (h==='localhost'||h==='127.0.0.1'||h==='[::1]'))"
     } else {
         ""
     };
     format!("(()=>{{ if(window.top!==window) return; const p=location.protocol,h=location.hostname,n=location.port; const u=new URL(location.href); if(u.username||u.password) return; if ((n==='' && ((p==='tauri:'&&h==='localhost')||((p==='http:'||p==='https:')&&h==='tauri.localhost'))) {dev}) {{ window.__TASKPAW__={cfg}; }} }})();")
+}
+
+/// Set when the app is quitting: a supervisor never respawns after it.
+static EXITING: AtomicBool = AtomicBool::new(false);
+/// #299 Codex r5 CX10, #296 CX14: serializes a restart's release + check-EXITING
+/// + spawn + install with the quit path's set-EXITING + take-and-kill, so a quit can never finish
+/// (the process exits right after it) while a fresh backend child exists but is
+/// not yet in `Backend` — that child would be orphaned.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
+
+/// Mark the app as quitting, serialized with `lock`'s holders (an in-flight
+/// respawn finishes installing its child first, so the caller's kill reaches it).
+fn begin_exit(lock: &'static Mutex<()>, flag: &AtomicBool) -> MutexGuard<'static, ()> {
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    flag.store(true, SeqCst);
+    guard
+}
+
+/// #296 CX14: take `lock` into `slot` (unless the slot already holds it), then
+/// run the release. The caller keeps the guard in `slot` until the new child is
+/// installed, so one respawn's release→spawn→install is one critical section
+/// against `begin_exit`.
+fn release_under_lifecycle(
+    slot: &mut Option<MutexGuard<'static, ()>>,
+    lock: &'static Mutex<()>,
+    release: impl FnOnce(),
+) {
+    if slot.is_none() {
+        *slot = Some(lock.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+    release();
+}
+
+/// The guard `spawn` holds: the one `release_old` left in `slot`, else a fresh
+/// lock — never a second lock while holding the first (that would deadlock).
+fn lifecycle_guard(
+    slot: &mut Option<MutexGuard<'static, ()>>,
+    lock: &'static Mutex<()>,
+) -> MutexGuard<'static, ()> {
+    slot.take()
+        .unwrap_or_else(|| lock.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Set while the `main` window is being replaced after a planned restart.
+static REBUILDING: AtomicBool = AtomicBool::new(false);
+
+/// The `main` window with the init script for `descriptor`, and — when a
+/// backend is owned — the close confirmation (#52). Built at startup and again
+/// after each planned restart (the old one is destroyed, so its close
+/// confirmation never fires).
+fn build_main_window(
+    app: &tauri::AppHandle,
+    descriptor: &Descriptor,
+    has_backend: bool,
+    supervised: bool,
+    geometry: Option<restart_supervisor::Geometry>,
+) -> tauri::Result<()> {
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("TaskPaw")
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(restart_supervisor::MIN_WIDTH, restart_supervisor::MIN_HEIGHT)
+        .initialization_script(init_script(descriptor, cfg!(debug_assertions), supervised))
+        .on_navigation(|url| trusted_ui_navigation(url, cfg!(debug_assertions)));
+    // #299 review IR9: a rebuilt window opens where the old one was
+    if let Some(g) = geometry {
+        builder = builder.inner_size(g.width, g.height).maximized(g.maximized);
+        if let Some((x, y)) = g.position {
+            builder = builder.position(x, y);
+        }
+    }
+    let win = builder.build()?;
+    // Closing the window kills the backend; warn first so the operator
+    // doesn't accidentally stop background monitoring — and, for a Hub,
+    // aggregation + OpenClaw notifications (#52). Only when a backend was
+    // actually spawned. The OK button is debounced via a flag so the
+    // post-confirm close isn't re-intercepted.
+    if has_backend {
+        let role = ui_role();
+        let confirmed = std::sync::Arc::new(AtomicBool::new(false));
+        let app_handle = app.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if confirmed.load(SeqCst) {
+                    return; // already confirmed → allow the close through
+                }
+                api.prevent_close();
+                let confirmed = confirmed.clone();
+                let app_handle = app_handle.clone();
+                // Read the current UI language AT CLOSE TIME so an in-session
+                // language switch is honored without a restart (#108).
+                let lang = app_handle
+                    .state::<UiLang>()
+                    .0
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_else(|_| "zh-CN".to_string());
+                let (title, msg, ok_label, cancel_label) = close_confirm_text(&role, &lang);
+                app_handle
+                    .dialog()
+                    .message(msg)
+                    .title(title)
+                    .buttons(MessageDialogButtons::OkCancelCustom(ok_label, cancel_label))
+                    .show(move |ok| {
+                        if ok {
+                            confirmed.store(true, SeqCst);
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.close();
+                            }
+                        }
+                    });
+            }
+        });
+    }
+    Ok(())
+}
+
+/// #299 review IR6: one look at the owned child. Unix: `waitid(WNOWAIT)`
+/// reports an exit without reaping, so `release_old` kills the old process
+/// group while the zombie leader still pins its id (no PID-reuse window),
+/// then reaps it. Windows: `try_wait` (the Job owns the tree).
+fn peek_child(child: &mut Child) -> restart_supervisor::Poll {
+    use restart_supervisor::Poll;
+    #[cfg(unix)]
+    {
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter for waitid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+        // SAFETY: `info` outlives the call; the pid is our own child.
+        let rc = unsafe {
+            libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, flags)
+        };
+        if rc != 0 {
+            return match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => Poll::Running,
+                _ => Poll::Gone,
+            };
+        }
+        let (pid, status) = siginfo_pid_status(&info);
+        if pid == 0 {
+            return Poll::Running;
+        }
+        if info.si_code == libc::CLD_EXITED {
+            Poll::Exited(Some(status))
+        } else {
+            Poll::Exited(None)
+        }
+    }
+    #[cfg(not(unix))]
+    match child.try_wait() {
+        Ok(None) => Poll::Running,
+        Ok(Some(status)) => Poll::Exited(status.code()),
+        Err(_) => Poll::Gone,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn siginfo_pid_status(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int) {
+    (info.si_pid, info.si_status)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn siginfo_pid_status(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int) {
+    // SAFETY: waitid filled a SIGCHLD siginfo, whose union holds pid/status.
+    unsafe { (info.si_pid(), info.si_status()) }
+}
+
+/// The `main` window's current place, read on the main thread (review IR9).
+fn current_geometry(app: &tauri::AppHandle) -> Option<restart_supervisor::Geometry> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let read = app.clone();
+    app.run_on_main_thread(move || {
+        let found = read.get_webview_window("main").and_then(|w| {
+            let size = w.inner_size().ok()?;
+            let position = w.outer_position().ok().map(|p| (p.x, p.y));
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let maximized = w.is_maximized().unwrap_or(false);
+            Some(restart_supervisor::logical_geometry(
+                (size.width, size.height),
+                position,
+                scale,
+                maximized,
+            ))
+        });
+        let _ = tx.send(found);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(5)).ok().flatten()
+}
+
+/// The real restart steps on the shell's owned backend state (#299 §3).
+struct ShellRespawn {
+    app: tauri::AppHandle,
+    command: (String, Vec<String>),
+    stdout: Option<std::process::ChildStdout>,
+    /// Held from `release_old` until the child is installed (or the restart
+    /// fails): one respawn is one critical section against the quit path.
+    lifecycle: Option<MutexGuard<'static, ()>>,
+}
+
+impl restart_supervisor::Respawn for ShellRespawn {
+    type Child = Child;
+    type Ready = Descriptor;
+
+    fn release_old(&mut self) {
+        // #296 CX14: under LIFECYCLE, held on into `spawn` and `install`, so a
+        // quit either kills the old backend itself first or waits for this.
+        let app = &self.app;
+        release_under_lifecycle(&mut self.lifecycle, &LIFECYCLE, || {
+            // The exited leader leaves the owned state; any straggler of its
+            // tree dies with it: the Unix group is killed, the Windows Job is
+            // closed.
+            let old = app
+                .state::<Backend>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(mut old) = old {
+                #[cfg(unix)]
+                signal_group(&old, libc::SIGKILL);
+                let _ = old.wait();
+            }
+            #[cfg(windows)]
+            if let Some(state) = app.try_state::<JobHandle>() {
+                let job = state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(job);
+            }
+        });
+    }
+
+    fn spawn(&mut self) -> Result<Child, String> {
+        let guard = lifecycle_guard(&mut self.lifecycle, &LIFECYCLE);
+        if EXITING.load(SeqCst) {
+            return Err(String::new());
+        }
+        let mut child = spawn_backend(Some(self.command.clone()))
+            .ok_or_else(|| format!("TaskPaw 重启后端失败。\n{}", backend_log_hint()))?;
+        self.stdout = child.stdout.take();
+        self.lifecycle = Some(guard);
+        Ok(child)
+    }
+
+    fn adopt(&mut self, child: &mut Child) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let Some(job) = jobobj::assign(child) else {
+                let _ = child.kill();
+                let _ = child.wait();
+                self.lifecycle = None;
+                return Err("重启后无法取得 Agent 进程树所有权，已停止启动。".into());
+            };
+            *self
+                .app
+                .state::<JobHandle>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(job);
+        }
+        #[cfg(not(windows))]
+        let _ = child;
+        Ok(())
+    }
+
+    fn install(&mut self, mut child: Child) {
+        if EXITING.load(SeqCst) {
+            terminate_child(&mut child);
+        } else {
+            *self
+                .app
+                .state::<Backend>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(child);
+        }
+        self.lifecycle = None;
+    }
+
+    fn ready(&mut self) -> Result<Descriptor, String> {
+        let stdout = self.stdout.take().ok_or_else(String::new)?;
+        let ready = match read_readiness(stdout, Duration::from_secs(30)) {
+            Ok(StartupStatus::Ready(ready)) => ready,
+            Ok(StartupStatus::Failed(code)) => {
+                return Err(format!("{}\n{}", code.message(), backend_log_hint()))
+            }
+            Err(error) => return Err(format!("{}\n{}", error.message(), backend_log_hint())),
+        };
+        load_credentials(Some(ready), &ui_role()).map_err(|_| {
+            "TaskPaw could not securely read this backend's current local control credentials. Please restart or reopen TaskPaw.".to_string()
+        })
+    }
+
+    fn rebuild(&mut self, descriptor: Descriptor) -> Result<(), String> {
+        let failed = || "TaskPaw 无法重建窗口，请退出并重新打开 TaskPaw。".to_string();
+        REBUILDING.store(true, SeqCst);
+        let app = self.app.clone();
+        let result = (|| {
+            let geometry = current_geometry(&app);
+            let destroy = app.clone();
+            app.run_on_main_thread(move || {
+                if let Some(w) = destroy.get_webview_window("main") {
+                    let _ = w.destroy();
+                }
+            })
+            .map_err(|_| failed())?;
+            // The label must be free before a new `main` (capabilities name it).
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.get_webview_window("main").is_some() {
+                if Instant::now() >= deadline {
+                    return Err(failed());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let build = app.clone();
+            app.run_on_main_thread(move || {
+                let built = build_main_window(&build, &descriptor, true, true, geometry);
+                let _ = tx.send(built.is_ok());
+            })
+            .map_err(|_| failed())?;
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(true) => Ok(()),
+                _ => Err(failed()),
+            }
+        })();
+        REBUILDING.store(false, SeqCst);
+        result
+    }
+}
+
+/// #299 §3: the watcher of the owned backend (one per shell).
+fn supervise_backend(app: tauri::AppHandle, command: (String, Vec<String>)) {
+    use restart_supervisor::Poll;
+    let poll_app = app.clone();
+    let poll = move || {
+        let state = poll_app.state::<Backend>();
+        let mut guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            None => Poll::Gone,
+            Some(child) => peek_child(child),
+        }
+    };
+    let mut respawn = ShellRespawn {
+        app: app.clone(),
+        command,
+        stdout: None,
+        lifecycle: None,
+    };
+    restart_supervisor::supervise(
+        poll,
+        &mut respawn,
+        || std::thread::sleep(restart_supervisor::POLL_INTERVAL),
+        |message| {
+            if !EXITING.load(SeqCst) {
+                fatal_startup(&message, Some(&app));
+            }
+        },
+    );
 }
 
 fn main() {
@@ -887,56 +1264,16 @@ fn main() {
             // Build the window in code so we can inject the runtime config script
             // (the validated base_url) BEFORE the page loads, only on the
             // loopback-served origin.
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("TaskPaw")
-                .inner_size(1100.0, 720.0)
-                .min_inner_size(720.0, 480.0)
-                .initialization_script(init_script(&descriptor, cfg!(debug_assertions)))
-                .on_navigation(|url| trusted_ui_navigation(url, cfg!(debug_assertions)))
-                .build()?;
-            // Closing the window kills the backend; warn first so the operator
-            // doesn't accidentally stop background monitoring — and, for a Hub,
-            // aggregation + OpenClaw notifications (#52). Only when a backend was
-            // actually spawned. The OK button is debounced via a flag so the
-            // post-confirm close isn't re-intercepted.
-            if has_backend {
-                let role = ui_role();
-                let confirmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let app_handle = app.handle().clone();
-                win.on_window_event(move |event| {
-                    use std::sync::atomic::Ordering::SeqCst;
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if confirmed.load(SeqCst) {
-                            return; // already confirmed → allow the close through
-                        }
-                        api.prevent_close();
-                        let confirmed = confirmed.clone();
-                        let app_handle = app_handle.clone();
-                        // Read the current UI language AT CLOSE TIME so an in-session
-                        // language switch is honored without a restart (#108).
-                        let lang = app_handle
-                            .state::<UiLang>()
-                            .0
-                            .lock()
-                            .map(|g| g.clone())
-                            .unwrap_or_else(|_| "zh-CN".to_string());
-                        let (title, msg, ok_label, cancel_label) =
-                            close_confirm_text(&role, &lang);
-                        app_handle
-                            .dialog()
-                            .message(msg)
-                            .title(title)
-                            .buttons(MessageDialogButtons::OkCancelCustom(ok_label, cancel_label))
-                            .show(move |ok| {
-                                if ok {
-                                    confirmed.store(true, SeqCst);
-                                    if let Some(w) = app_handle.get_webview_window("main") {
-                                        let _ = w.close();
-                                    }
-                                }
-                            });
-                    }
-                });
+            let supervised = has_backend && !attach;
+            build_main_window(app.handle(), &descriptor, has_backend, supervised, None)?;
+            // #299 §3: exit 75 = a planned restart the UI asked for.
+            if supervised {
+                if let Some(command) = command.clone() {
+                    let handle = app.handle().clone();
+                    std::thread::Builder::new()
+                        .name("backend-supervisor".into())
+                        .spawn(move || supervise_backend(handle, command))?;
+                }
             }
             Ok(())
         })
@@ -946,7 +1283,14 @@ fn main() {
             None,
         ))
         .run(|app, event| {
-            if let RunEvent::ExitRequested { .. } = event {
+            if let RunEvent::ExitRequested { code, api, .. } = event {
+                // The window is being replaced after a planned restart: the
+                // momentary "no window" must not quit the app (#299 §3).
+                if code.is_none() && REBUILDING.load(SeqCst) {
+                    api.prevent_exit();
+                    return;
+                }
+                let _quit = begin_exit(&LIFECYCLE, &EXITING);
                 kill_backend(app);
             }
         });
@@ -954,6 +1298,104 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// #299 Codex r5 CX10: quitting waits for an in-flight respawn (holding the
+    /// lifecycle lock) before it flags EXITING, so the fresh child is installed
+    /// — and then killed by the quit path — rather than orphaned.
+    #[test]
+    fn begin_exit_waits_for_an_inflight_respawn() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::{mpsc, Mutex};
+        static LOCK: Mutex<()> = Mutex::new(());
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let respawn = LOCK.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let quitter = std::thread::spawn(move || {
+            let _guard = super::begin_exit(&LOCK, &FLAG);
+            tx.send(()).unwrap();
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+        assert!(!FLAG.load(SeqCst), "EXITING set while a respawn is in flight");
+        drop(respawn);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        quitter.join().unwrap();
+        assert!(FLAG.load(SeqCst));
+    }
+
+    /// #296 CX14: `release_old` runs under the lifecycle lock and keeps it until
+    /// the new child is installed, so a quit can neither flag EXITING in the
+    /// middle of a release nor between the release and the spawn; `spawn` takes
+    /// the lock the release already holds instead of waiting for itself.
+    #[test]
+    fn begin_exit_waits_for_an_inflight_release_old() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        static LOCK: Mutex<()> = Mutex::new(());
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (released_tx, released_rx) = mpsc::channel();
+        let (install_tx, install_rx) = mpsc::channel::<()>();
+        let respawn = std::thread::spawn(move || {
+            let mut slot = None;
+            super::release_under_lifecycle(&mut slot, &LOCK, || {
+                started_tx.send(()).unwrap();
+                go_rx.recv().unwrap(); // the old tree is still being killed
+            });
+            released_tx.send(()).unwrap();
+            install_rx.recv().unwrap(); // the new child is not installed yet
+            // spawn() must reuse the held lock, never lock a second time
+            let held = super::lifecycle_guard(&mut slot, &LOCK);
+            assert!(slot.is_none());
+            drop(held); // install
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let quitter = std::thread::spawn(move || {
+            let _guard = super::begin_exit(&LOCK, &FLAG);
+            done_tx.send(()).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(!FLAG.load(SeqCst), "EXITING set while release_old is in flight");
+        go_tx.send(()).unwrap();
+        released_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "quit slipped in between release_old and the install"
+        );
+        assert!(!FLAG.load(SeqCst));
+        install_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        quitter.join().unwrap();
+        respawn.join().unwrap();
+        assert!(FLAG.load(SeqCst));
+    }
+
+    /// #299 review IR6: an exit is seen without reaping the child.
+    #[cfg(unix)]
+    #[test]
+    fn peek_reports_an_exit_without_reaping_the_child() {
+        use super::restart_supervisor::Poll;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 75"])
+            .spawn()
+            .expect("sh");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let seen = loop {
+            match super::peek_child(&mut child) {
+                Poll::Running if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => break other,
+            }
+        };
+        assert_eq!(seen, Poll::Exited(Some(75)));
+        assert_eq!(super::peek_child(&mut child), Poll::Exited(Some(75)));
+        assert_eq!(child.wait().expect("reap").code(), Some(75));
+    }
+
     use super::{
         applescript_escape, backend_log_hint, close_confirm_text, loopback_base,
         roll_log_if_oversized,
@@ -1184,7 +1626,7 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
     const location=new URL(href);const window={};window.top=frame==='top'?window:{};
     const context={window,location,URL};vm.runInNewContext(script,context);
     const trusted=['tauri://localhost/index.html','http://tauri.localhost/','https://tauri.localhost/'].includes(href)||(debug&&['http://localhost:5173/','http://127.0.0.1:5173/','http://[::1]:5173/'].includes(href));
-    if(frame==='top'&&trusted) assert.equal(JSON.stringify(window.__TASKPAW__),JSON.stringify({baseUrl:'http://127.0.0.1:5681',bootId:'0123456789abcdef0123456789abcdef',controlToken:'fake-init-marker',role:'agent'}));
+    if(frame==='top'&&trusted) assert.equal(JSON.stringify(window.__TASKPAW__),JSON.stringify({baseUrl:'http://127.0.0.1:5681',bootId:'0123456789abcdef0123456789abcdef',controlToken:'fake-init-marker',restart:true,role:'agent'}));
     else assert.equal(window.__TASKPAW__,undefined);
    }
   }
@@ -1197,7 +1639,7 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
             .stderr(Stdio::piped())
             .spawn()
             .expect("Node is required for initialization-script execution tests");
-        let input = serde_json::json!({"debug":super::init_script(&descriptor,true),"release":super::init_script(&descriptor,false)});
+        let input = serde_json::json!({"debug":super::init_script(&descriptor,true,true),"release":super::init_script(&descriptor,false,true)});
         child
             .stdin
             .take()

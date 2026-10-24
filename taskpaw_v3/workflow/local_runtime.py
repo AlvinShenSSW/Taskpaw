@@ -32,9 +32,11 @@ from .local_clock import MonotonicWallClock, read_high_water
 from .local_gpu import FULL_HD, UHD, LocalGpu, machine_identity, query_gpu
 from .owned_process import own_identity, process_alive
 from .store import WorkflowStore
+from .store_core import parse_time
 
 if TYPE_CHECKING:
     from .lookup import MetadataLookup
+    from .stage_results import StageResult
 
 log = logging.getLogger("taskpaw.workflow.runtime")
 
@@ -129,7 +131,7 @@ class LocalIdentity:
 
     @property
     def created(self) -> datetime:
-        return datetime.fromisoformat(self.created_at)
+        return parse_time(self.created_at)  # 'Z' too, on Python 3.10
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,13 @@ class AttemptFile:
 
 
 class LocalRuntime:
+    def final_dir(self, final: m.FinalManifest) -> Path:
+        return (
+            Path(final.output_directory)
+            if final.output_directory
+            else self.work_dir / final.output_relative_path
+        )
+
     def __init__(
         self,
         data_dir: Path,
@@ -153,6 +162,7 @@ class LocalRuntime:
         machine: Callable[[], str] = machine_identity,
         clock_source: Callable[[], datetime] | None = None,
         agent_identity: Callable[[], str] = own_identity,
+        output_dir: Path | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.executors = {executor.stage: executor for executor in executors}
@@ -161,6 +171,7 @@ class LocalRuntime:
         self.db_path = data_dir / "workflow.db"
         self.attempt_dir = data_dir / "attempts"
         self.work_dir = data_dir / "work"
+        self.output_dir = output_dir or data_dir / "成品"
         floor = read_high_water(self.db_path)
         self.clock = (
             MonotonicWallClock(floor, clock_source)
@@ -263,6 +274,7 @@ class LocalRuntime:
                 ),
                 clock=self.clock,
             )
+        self.store.controller_id = ident.worker_id  # P2-1 IR4/IR9
         self._operator = authenticate(
             self.store, ident.operator_credential_id, SecretStr(ident.operator_secret)
         )
@@ -308,6 +320,12 @@ class LocalRuntime:
                 note=note, item_ids=item_ids, timing=timing, energy=energy
             ),
         )
+
+    def stage_result(self, film_id: str, stage: str) -> StageResult | None:
+        """`ExecRuntime`: the store's verified ledger of the film's `stage`."""
+        from .stage_results import store_stage_result
+
+        return store_stage_result(self, film_id, stage)
 
     def worker_view(self) -> m.WorkerView:
         return self.store.get_worker(self.operator, self.identity.worker_id)
@@ -612,6 +630,12 @@ class LocalRuntime:
                 return False
             time.sleep(0.25)
         return True
+
+    def resolve_interrupted(self, assignment: m.AssignmentRecord) -> None:
+        """P2-3 §5: a remote attempt whose worker restarted with its children
+        gone and nothing to show: failed `interrupted`, then a free retry."""
+        with self.lock:
+            self._resolve_interrupted(assignment, None)
 
     def _resolve_interrupted(
         self, assignment: m.AssignmentRecord, record: AttemptFile | None

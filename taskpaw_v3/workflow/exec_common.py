@@ -13,13 +13,11 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from . import models as m
-from .executors import ErrorClass, ExecOutcome, JobContext
-from .local_runtime import LocalRuntime
+from .executors import ErrorClass, ExecOutcome, ExecRuntime, JobContext
 from .stage_results import (
     FileRef,
     StageResultError,
     file_ref,
-    load_stage_result,
     main_videos,
 )
 
@@ -82,7 +80,7 @@ def input_name(item: m.ManifestItem) -> str:
 
 
 def workcopy_ref(
-    rt: LocalRuntime, manifest: m.InputManifest, item_id: str
+    rt: ExecRuntime, manifest: m.InputManifest, item_id: str
 ) -> tuple[Path, FileRef]:
     """The work copy of `item_id` and its ref, checked against the manifest."""
     copy = next(
@@ -105,14 +103,13 @@ def workcopy_ref(
     return path, ref
 
 
-def output_stems(rt: LocalRuntime, manifest: m.InputManifest) -> dict[str, str]:
+def output_stems(rt: ExecRuntime, manifest: m.InputManifest) -> dict[str, str]:
     """Per main video, the stem subtitles are named after: the restored video's
     when the film has a restore stage, else the input's (E3)."""
     stems = {video.item_id: input_stem(video) for video in main_videos(manifest)}
-    view = rt.store.get_film(rt.operator, manifest.film_id)
-    if not any(record.stage == "restore" for record in view.stages):
+    restore = rt.stage_result(manifest.film_id, "restore")
+    if restore is None:
         return stems
-    restore = load_stage_result(rt, manifest.film_id, "restore")
     for video in restore.videos:
         if video.restore is not None and video.video_item_id in stems:
             stems[video.video_item_id] = PurePosixPath(video.restore.file.path).stem

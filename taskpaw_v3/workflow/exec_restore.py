@@ -54,9 +54,14 @@ from .exec_common import (
     tool_versions,
     workcopy_ref,
 )
-from .executors import ComputeStage, ExecOutcome, JobContext
-from .local_gpu import FULL_HD, LocalGpu, max_resolution
-from .local_runtime import LocalRuntime
+from .executors import (
+    RESTORE_DONE,
+    ComputeStage,
+    ExecOutcome,
+    ExecRuntime,
+    JobContext,
+)
+from .local_gpu import LocalGpu, max_resolution
 from .owned_process import OwnedJob
 from .stage_results import (
     FileRef,
@@ -72,7 +77,6 @@ from .timing import PhaseTimer, merge, timing_json
 
 PROFILE_ID = "workflow-restore-ltx"
 MODEL = "ltx"  # the record's model for every tier (U1 U05)
-TIER: jasna.Tier = "1080p"  # T04-P1 runs on the controller's 8 GB card only
 DURATION_SLACK_MS = 2000
 DURATION_SLACK_SHARE = 0.02
 LTX_WORK_DIRNAME = ".jasna-work"
@@ -95,9 +99,15 @@ monotonic = time.monotonic
 BITRATE_PROBE_SECONDS = 5.0
 _BITRATE_POLL = 0.05
 
-# The plugin's restored names (#187): `<stem>-破解.mp4`, legacy `<stem>_restored.mp4`.
+# The plugin's restored names (#187, #303): `<stem>-破解.mp4`, `<stem>-无码.mp4` (LTX),
+# legacy `<stem>_restored.mp4`.
 _RESTORED_SUFFIXES = tuple(
-    suffix.casefold() for suffix in (jasna._FINAL_SUFFIX, jasna._LEGACY_FINAL_SUFFIX)
+    suffix.casefold()
+    for suffix in (
+        jasna._FINAL_SUFFIX,
+        jasna._LTX_FINAL_SUFFIX,
+        jasna._LEGACY_FINAL_SUFFIX,
+    )
 )
 
 GpuQuery = Callable[[], "list[tuple[float, int]] | None"]
@@ -110,6 +120,11 @@ log = logging.getLogger("taskpaw.workflow.restore")
 def is_restored_name(name: str) -> bool:
     """Whether a file name is already a Jasna restore result (plugin rule)."""
     return name.casefold().endswith(_RESTORED_SUFFIXES)
+
+
+def is_ltx_name(name: str) -> bool:
+    """Whether a restored file was made with LTX: it is named `-无码` (#303)."""
+    return name.casefold().endswith(jasna._LTX_FINAL_SUFFIX.casefold())
 
 
 def needs_restore(manifest: m.InputManifest) -> bool:
@@ -285,6 +300,15 @@ def _int(value: str | None) -> int | None:
         return None
 
 
+def video_tier(probe: m.MediaProbe | None) -> jasna.Tier:
+    """P2-5 R2: the Jasna tier of one video, by Jasna's own pixel rule on its
+    probed size; an unknown size restores as "1080p"."""
+    width, height = getattr(probe, "width", None), getattr(probe, "height", None)
+    if not width or not height:
+        return "1080p"
+    return jasna.tier_for(width, height)
+
+
 def launch_params(
     argv: Sequence[str],
     *,
@@ -294,6 +318,7 @@ def launch_params(
     gpu: LocalGpu | None,
     preset: str,
     preset_auto: bool = False,
+    tier: jasna.Tier = "1080p",
 ) -> dict[str, Any]:
     """U1c: what Jasna was launched with for this video, read from its argv
     (the effective values after the GPU check, never the configured ones), and
@@ -338,7 +363,7 @@ def launch_params(
         "detection_model": _flag(argv, "--detection-model"),
         "clip_size": _int(_flag(argv, "--max-clip-size")),
         "temporal_overlap": _int(_flag(argv, "--temporal-overlap")),
-        "tier": TIER,
+        "tier": tier,
         "source_width": probe.width if probe is not None else None,
         "source_height": probe.height if probe is not None else None,
         "gpu": gpu.name if gpu is not None else None,
@@ -381,10 +406,17 @@ def probe_video(
     return facts
 
 
-def ffprobe_command(value: str | Sequence[str] | None) -> list[str] | None:
-    """The ffprobe command: a path, an argv prefix, or `ffprobe` on PATH."""
-    if value is None:
-        found = shutil.which("ffprobe")
+def ffprobe_command(
+    value: str | Sequence[str] | None, jasna_exe: str | None = None
+) -> list[str] | None:
+    """The ffprobe command: a path, an argv prefix, or none configured — then
+    Jasna's own copy (`<jasna dir>/tools`), PATH, the Jasna dir (as Jasna does)."""
+    if value is None or value == "":
+        found = (
+            jasna.find_ffprobe(str(Path(jasna_exe).parent))
+            if jasna_exe
+            else shutil.which("ffprobe")
+        )
         return [found] if found else None
     if isinstance(value, str):
         return [value]
@@ -446,7 +478,7 @@ class RestoreExecutor:
 
     def __init__(
         self,
-        runtime: LocalRuntime,
+        runtime: ExecRuntime,
         jasna_exe: str,
         gpu_id: str = "5060-8",
         *,
@@ -455,13 +487,13 @@ class RestoreExecutor:
         launch_prefix: Sequence[str] = (),
         gpus: GpuQuery = jasna.query_gpus,
     ) -> None:
-        """`ffprobe`: path or command (default: `ffprobe` on PATH).
+        """`ffprobe`: path or command (default: Jasna's own copy, else PATH).
         `launch_prefix` goes before the Jasna argv (tests run a fake tool).
         `preset_auto`: `gpu_id` was picked from the local GPU, not configured."""
         self.runtime, self.jasna_exe, self.gpu_id = runtime, jasna_exe, gpu_id
         self.preset_auto = preset_auto
         self.cfg = workflow_jasna_config(gpu_id)
-        self.ffprobe = ffprobe_command(ffprobe)
+        self.ffprobe = ffprobe_command(ffprobe, jasna_exe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
         # per tier (U1 Codex r2 F1): the model folder, settings and fast flag of
@@ -490,7 +522,6 @@ class RestoreExecutor:
             profile=PROFILE_ID,
             settings={
                 "gpu": self.gpu_id,
-                "tier": TIER,
                 "exe": self.jasna_exe,
                 "jasna": cfg.model_dump(mode="json"),
                 "duration_slack": [DURATION_SLACK_MS, DURATION_SLACK_SHARE],
@@ -498,8 +529,8 @@ class RestoreExecutor:
         )
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]:
-        # Phase 1 runs only the 1080p LTX tier, whatever the card (T04-P1 scope).
-        return min(max_resolution(vram_mib), FULL_HD)
+        # P2-5 R1: the card's true max (4K from 16 GB); the tier is chosen per video
+        return max_resolution(vram_mib)
 
     def needs_gpu(self, manifest: m.InputManifest) -> bool:
         """False only when every main video already is a restore result (D19)."""
@@ -715,7 +746,7 @@ class RestoreExecutor:
             1 for r in results if r.restore and r.restore.decision == "applied"
         )
         return ExecOutcome.succeeded(
-            f"修复完成：{applied} 卷修复，{len(results) - applied} 卷复用",
+            RESTORE_DONE.format(applied=applied, reused=len(results) - applied),
             digest,
             merge(*timings),
         )
@@ -743,7 +774,9 @@ class RestoreExecutor:
         if missing:
             raise attention(MISSING_LTX + "、".join(missing))
         names = [
-            jasna.output_path_for(str(context.workdir), Path(input_name(v))).name
+            jasna.output_path_for(
+                str(context.workdir), Path(input_name(v)), ltx=True
+            ).name
             for v in pending
         ]
         if len({name.casefold() for name in names}) != len(names):
@@ -787,17 +820,18 @@ class RestoreExecutor:
         """One video's Jasna run. `earlier`: the film's volumes before this one,
         so the step's live `timing` is the whole film's (U1e)."""
         workdir = context.workdir
-        staging = jasna.staging_path_for(str(workdir), source)
-        final = jasna.output_path_for(str(workdir), source)
+        staging = jasna.staging_path_for(str(workdir), source, ltx=True)
+        final = jasna.output_path_for(str(workdir), source, ltx=True)
         ltx_work = workdir / LTX_WORK_DIRNAME
         ltx_work.mkdir(parents=True, exist_ok=True)
         staging.unlink(missing_ok=True)
+        tier = video_tier(probe)  # P2-5 R2: this video's, from its probed size
         jasna_argv = jasna.build_argv(
             cfg,
             str(exe),
             source,
             staging,
-            TIER,
+            tier,
             False,
             False,
             ltx_work,
@@ -814,6 +848,7 @@ class RestoreExecutor:
             gpu=self.runtime.gpu,
             preset=self.gpu_id,
             preset_auto=self.preset_auto,
+            tier=tier,
         )
         lock = threading.Lock()
         state: dict = {}

@@ -5,7 +5,7 @@ import { ControlCredentialGate } from "./components/ControlCredentialGate";
 import { AppBar, Box, Tab, Tabs, Toolbar, Typography } from "@mui/material";
 import { create } from "zustand";
 import { useTranslation } from "react-i18next";
-import { AgentConsole } from "./views/AgentConsole";
+import { AgentHome } from "./views/SetupWizard";
 import { HubDashboard } from "./views/HubDashboard";
 import { Logo } from "./components/Logo";
 import { LocalApiBadge } from "./components/LocalApiBadge";
@@ -159,7 +159,7 @@ export function App() {
       <Box sx={{ p: 2 }}>
         {/* Settings now lives as a tab INSIDE each role view (next to
             Monitors/Events, Fleet/Events) — no app-bar gear (#87). */}
-        {ready ? (role === "agent" ? <AgentConsole /> : <HubDashboard />) : <ControlCredentialGate key={role} role={role} desktop={INJECTED_ROLE !== null || !import.meta.env.DEV} />}
+        {ready ? (role === "agent" ? <AgentHome /> : <HubDashboard />) : <ControlCredentialGate key={role} role={role} desktop={INJECTED_ROLE !== null || !import.meta.env.DEV} />}
       </Box>
     </Box>
   );

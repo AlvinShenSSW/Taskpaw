@@ -63,7 +63,7 @@ PARAMS = launch_params(
         _CFG,
         "C:/Jasna/jasna.exe",
         Path("D:/Work/a1/movie.mkv"),
-        Path("D:/Work/a1/movie-破解.tmp.mp4"),
+        Path("D:/Work/a1/movie-无码.tmp.mp4"),
         "1080p",
         False,
         False,

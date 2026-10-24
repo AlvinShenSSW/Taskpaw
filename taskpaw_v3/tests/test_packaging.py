@@ -474,31 +474,36 @@ def test_frozen_event_cursor_offline_recovery(tmp_path):
     _exercise_cursor_commands(run, tmp_path)
 
 
-def test_service_auto_scaffold_requires_explicit_event_admission(
+def test_service_auto_scaffold_initializes_its_own_first_lineage(
     tmp_path, monkeypatch, capsys
 ):
+    """#299 R1 (supersedes the explicit admission of a FRESH scaffold): the
+    service writes the first-run marker with the scaffold and initializes the
+    new lineage itself; the offline initialize then refuses (state exists)."""
+    import json
     import sys
 
-    from taskpaw_v3.agent.server import service
-    from taskpaw_v3.core.state import StateError
+    from taskpaw_v3.agent.server import first_run, service
+    from taskpaw_v3.core.state import read_record
 
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
-    # Avoid the baseline reclaim entirely; this proves the service diagnostic boundary.
-    def refuse(config, **kwargs):
-        assert kwargs["state_path"].parent.is_relative_to(tmp_path)
-        raise StateError("initialization_required")
+    seen = []
 
-    monkeypatch.setattr(service, "run_agent", refuse)
-    assert service.main() == 1
+    def run(config, **kwargs):
+        assert kwargs["state_path"].parent.is_relative_to(tmp_path)
+        seen.append(read_record(kwargs["state_path"]).server_id == config.server_id)
+
+    monkeypatch.setattr(service, "run_agent", run)
+    assert service.main() == 0
     output = capsys.readouterr()
-    assert "agent-state" in output.err and "python -m" not in output.err
-    assert "initialization_required" in output.err and "taskpaw_ready" not in output.out
+    assert "taskpaw_startup_error" not in output.out and seen == [True]
     config = service.default_config_path()
-    assert config.is_file() and not config.with_name("agent.state.json").exists()
+    marker = json.loads(config.with_name(first_run.SETUP_NAME).read_text())
+    assert marker["status"] == "pending" and marker["step"] == "role"
     assert (
         backend_main.main(
             [
@@ -509,7 +514,7 @@ def test_service_auto_scaffold_requires_explicit_event_admission(
                 "--confirm-new-pairing",
             ]
         )
-        == 0
+        == 2
     )
 
 

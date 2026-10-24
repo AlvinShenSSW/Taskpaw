@@ -160,9 +160,9 @@ def test_snapshot_size_is_bounded(monkeypatch, client, world, resource):
             board, "film_rows", lambda *args, **kw: [dict(large, group="active")]
         )
     elif resource == "plans":
-        monkeypatch.setattr(planning, "plan_list", lambda *args: large)
+        monkeypatch.setattr(planning, "plan_list", lambda *args, **kw: large)
     else:
-        monkeypatch.setattr(board, "film_detail", lambda *args: large)
+        monkeypatch.setattr(board, "film_detail", lambda *args, **kw: large)
     path = f"films/{world.film}" if resource == "detail" else resource
     response = client.get(f"/workflow/{path}")
     assert response.status_code == 413
@@ -204,3 +204,20 @@ def test_network_app_never_accepts_workflow_commands(client, method):
         "/control/workflow/plans",
     ):
         assert client.request(method, path, json={}).status_code in (404, 405)
+
+
+@pytest.mark.parametrize(
+    "resource", ["films", "plans", "films/x", "films/x/poster", "films/x/cover"]
+)
+def test_a_worker_never_serves_the_workflow_reads(host, resource):
+    """P2-2 S-5: on role=worker `/workflow/*` is 404, so the Mac Hub never
+    takes a worker as its workflow source."""
+    config = AgentConfig(
+        server_id="test",
+        machine="test",
+        api_token="t",
+        workflow=WorkflowSettings(enabled=True, role="worker"),
+    )
+    app = create_network_app(config, EventQueue("test"), workflow_provider=lambda: host)
+    assert all(route.methods == {"GET"} for route in app.routes)
+    assert TestClient(app, headers=AUTH).get(f"/workflow/{resource}").status_code == 404

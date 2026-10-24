@@ -1,7 +1,7 @@
 // 媒体处理中心 V3: the status vocabulary (build spec §3) and how a backend row maps onto it.
 // Pure functions only; the components and tests share them.
 import type {
-  FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
+  FilmGroup, FilmRouteInfo, FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
   WorkflowStep,
 } from "../../api";
 import { LTX_STAGES, plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
@@ -13,7 +13,8 @@ export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "restore" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
-  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention" | "awaiting_confirmation";
+  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention" | "awaiting_confirmation"
+  | "device_lost" | "source_missing";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
@@ -55,13 +56,18 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   // Not in the V3 vocabulary: a local stage that failed and can be retried (§4.4 last row).
   failed: ["处理失败", "red"],
   intake_attention: ["收件需要处理", "amber"],
+  // P2-4 R3 (OD2): the film's GPU worker stopped sending heartbeats; nothing moves until 处理.
+  device_lost: ["设备失联", "red"],
+  // P3 E1 (#304): the INBOX source is gone; the film is never dispatched
+  source_missing: ["片源丢失", "red"],
 };
 
 export const REVIEW_STATES: StatusKey[] = ["awaiting_confirmation", "checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
+  "device_lost", "source_missing",
 ];
-export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match"];
+export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match", "archiving"];
 
 // ── tiers (U1 V2) ───────────────────────────────────────────────────────
 export const TIER_ORDER: LtxTier[] = ["standard", "good", "high"];
@@ -139,6 +145,43 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
     phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params,
     timing: readRestoreTiming(step.timing),
   };
+}
+
+// #300: the existing ASR parser's snapshot, passed through by the board.
+interface AsrProgress {
+  phase?: number | null; phase_n?: number; phase_label?: string;
+  scene?: number | null; scenes?: number | null; percent?: number | null; eta_s?: number | null;
+  elapsed_s?: number; console?: string;
+  phases?: Array<{ n: number; label: string; state: "done" | "current" | "pending"; seconds: number | null }>;
+}
+
+interface ArchiveProgress {
+  phase: "copying" | "verifying"; copied_bytes: number; verified_bytes: number; total_bytes: number;
+  files_done: number; files_total: number; items: Array<{ name: string; bytes: number; total: number }>;
+  target: string; started_at: string;
+}
+
+export function archiveLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "archive" || step.state !== "running" || !record(step.progress)) return null;
+  const progress = step.progress as unknown as ArchiveProgress;
+  return { ...progress, percent: progress.total_bytes > 0
+    ? Math.min(99, Math.floor((progress.copied_bytes + progress.verified_bytes) / (2 * progress.total_bytes) * 100)) : null };
+}
+
+export const archiveBytes = (bytes: number, total: number) => `${(bytes / 1e9).toFixed(1)} / ${(total / 1e9).toFixed(1)} GB`;
+
+export function asrLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "asr" || step.state !== "running") return null;
+  const progress = (record(step.progress) ? step.progress : {}) as AsrProgress;
+  return { ...progress, startedAt: step.started_at ? Date.parse(step.started_at) : null,
+    console: step.console ?? progress.console ?? (typeof step.progress === "string" ? step.progress : null) };
+}
+
+export const asrEta = (seconds: number | null | undefined) => seconds == null ? null : `约 ${Math.ceil(seconds / 60)} 分钟`;
+
+export function asrSummary(live: NonNullable<ReturnType<typeof asrLive>>): string {
+  return ["识别", live.percent == null ? null : `${live.percent}%`,
+    live.scene == null ? null : `场景 ${live.scene}/${live.scenes}`, asrEta(live.eta_s)].filter(Boolean).join(" · ");
 }
 
 // ── 用时 (U1e): how long a film took, read defensively ──────────────────
@@ -336,6 +379,8 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
     case "confirm": return reviewStatus(preflight);
     case "archiving": return stage === "archive" && row.status === "unknown" ? "unknown" : "archiving";
     case "attention":
+      if (row.attention_kind === "device_lost") return "device_lost";
+      if (row.attention_kind === "source_missing") return "source_missing";
       if (stage === "scrape") return "postprocess_error";
       if (stage.startsWith("cleanup")) return "cleanup";
       if (stage === "intake") return "intake_attention";
@@ -470,7 +515,8 @@ export function reviewLine(status: StatusKey, packageFiles: number | null, candi
 }
 
 // "none": nothing to press (the stop is still being confirmed, or the backend offers no retry).
-export type ExceptionAction = "retry-scrape" | "retry" | "review" | "reconcile" | "cleanup" | "open-package" | "none";
+// "detail": the action lives in the film's drawer (设备失联: 改派 / 判定已停止).
+export type ExceptionAction = "retry-scrape" | "retry" | "review" | "reconcile" | "cleanup" | "open-package" | "detail" | "none";
 // Title, description and the one action of an exception card (§4.4).
 export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) => string): [string, string, string, ExceptionAction] {
   const note = item.kind === "film" ? item.row.note : null;
@@ -485,6 +531,10 @@ export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) =
     case "unknown": return ["入库结果待核对", "后台先检查目标和记录，暂不重新上传或清理来源。", "核对结果", "reconcile"];
     case "cleanup": return ["已入库 · 来源待清理", note || "仅重试来源清理，不重复上传。", "重试清理", "cleanup"];
     case "stopping": return ["正在确认停止", "等待本机任务确认停止；原始来源和已完成结果保留，确认前不能重试。", "", "none"];
+    case "device_lost":
+      return ["设备失联", note || "后台重连中；影片不会自动改派。", "处理", "detail"];
+    case "source_missing":
+      return ["片源丢失", note || "INBOX 里的文件已不存在 · 不再派发", "处理", "detail"];
     case "intake_attention":
       return ["收件需要处理", item.kind === "package" ? intakeReasons(item.pkg) : note || "", "打开文件夹", "open-package"];
     default: {
@@ -548,3 +598,73 @@ export const CLEANUP_STATE: Record<string, string> = {
   succeeded: "本次来源已清理", skipped: "已跳过 · 保留来源", failed: "清理失败，来源保留",
   blocked: "来源已变化，禁止清理", unknown: "已入库 · 待清理",
 };
+
+// ── 多机 (P2-4 R2/R3): the machine of a film and the 设备 line ──────────
+// Remote mode: the board sends `actions` on every film (null on a single machine).
+export const isRemoteRow = (row: { actions?: unknown }) => row.actions !== undefined && row.actions !== null;
+
+// A remote-mode film with no open route and no remote stage (§9 CX30): 「待派发」 only while its GPU work
+// (the restore) is unfinished, 本机 for the controller's own stages afterwards, null once it is done.
+export function unroutedMachine(film: { group: FilmGroup; steps?: WorkflowStep[] | null }): "待派发" | "本机" | null {
+  if (film.group === "done") return null;
+  const restore = (film.steps ?? []).find((s) => s.key === "restore");
+  return restore && restore.state !== "done" ? "待派发" : "本机";
+}
+
+// The machine column (V1): the open route's device (「本机」 for the controller's own), the worker a
+// running stage reports, else `unroutedMachine` (null: a finished film shows none).
+export function machineOf(row: FilmRow): string | null {
+  if (row.route) return row.route.live === "local" ? "本机" : row.route.machine.name || "工作机";
+  const running = (row.steps ?? []).find((s) => s.state === "running" && s.machine);
+  if (running?.machine) return running.machine.name;
+  return unroutedMachine(row);
+}
+
+// 「7 分钟」: a silence in whole minutes (under a minute: seconds).
+export function silentText(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  return seconds < 60 ? `${Math.round(seconds)} 秒` : `${Math.floor(seconds / 60)} 分钟`;
+}
+
+// 「21:40」 today, else 「10月24日 08:15」 (the backend's `_clock_text`); `now` in epoch ms.
+export function clockText(iso: string | null | undefined, now: number, seconds = false): string {
+  if (!iso) return "—";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "—";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hm = `${pad(at.getHours())}:${pad(at.getMinutes())}${seconds ? `:${pad(at.getSeconds())}` : ""}`;
+  const today = new Date(now);
+  return at.toDateString() === today.toDateString() ? hm : `${at.getMonth() + 1}月${at.getDate()}日 ${hm}`;
+}
+
+// 「约 0.9 度」 from Wh (planning `_energy`); null when unknown.
+export const energyText = (wh: number | null | undefined) => (wh == null || !Number.isFinite(wh) ? null : `约 ${(wh / 1000).toFixed(1)} 度`);
+
+// The route's live state as a chip: 在线 / 失联 N 分钟 / 等待心跳 / 本机.
+export function liveChip(route: Pick<FilmRouteInfo, "live" | "silent_s">): [string, ChipTone] {
+  if (route.live === "online") return ["在线", "green"];
+  if (route.live === "lost") return [`失联 ${silentText(route.silent_s)}`, "red"];
+  if (route.live === "waiting") return ["等待心跳", "amber"];
+  return ["本机", "neutral"];
+}
+
+// 「最后心跳 20:41」: the controller's clock minus the silence.
+export const lastBeat = (silent: number | null | undefined, now: number, seconds = false) =>
+  (silent == null ? "—" : clockText(new Date(now - silent * 1000).toISOString(), now, seconds));
+
+export const percentOf = (ltx: ReturnType<typeof ltxOf>) => (ltx?.percent !== undefined ? `${ltx.percent_text ?? ltx.percent}%` : null);
+
+// The running stage's progress as the board reports it (LTX percent, else a 0–1 fraction or a percent).
+export function progressText(item: WorkItem): string | null {
+  if (item.kind !== "film") return null;
+  const archive = archiveLive(item.row.steps?.find((s) => s.key === "archive"));
+  if (archive) return archive.percent == null ? null : `${archive.percent}%`;
+  const asr = asrLive((item.row.steps ?? []).find((s) => s.key === item.row.stage));
+  if (asr) return asr.percent == null ? null : `${asr.percent}%`;
+  const ltx = percentOf(ltxOf(item.row));
+  if (ltx) return ltx;
+  const step = (item.row.steps ?? []).find((s) => s.key === item.row.stage);
+  const p = step?.progress;
+  if (typeof p === "number" && Number.isFinite(p)) return `${Math.round(p <= 1 ? p * 100 : p)}%`;
+  return null;
+}

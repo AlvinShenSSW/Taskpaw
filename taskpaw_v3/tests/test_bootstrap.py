@@ -306,3 +306,21 @@ def test_force_and_preset_preserve_verified_lineage(home):
     bootstrap.apply_agent_edits(path, "moomoo")
     assert load_yaml(AgentConfig, path).server_id == cfg.server_id
     assert load_next_id(state) == 901
+
+
+def test_bind_host_keeps_lan_access_in_step(home):
+    """#299 Codex r3 CX8: a LAN bind_host written by bootstrap is LAN access
+    on; a loopback one is off; a settings round-trip keeps them together."""
+    from taskpaw_v3.agent.server import service as agent_service
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+
+    path = agent_service.default_config_path()
+    assert bootstrap.main(["agent", "--bind-host", "192.168.1.20"]) == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, path)
+    assert cfg.bind_host == "192.168.1.20" and cfg.lan_access is True
+    # the stored file carries the switch explicitly (not only derived on load)
+    assert "lan_access: true" in path.read_text(encoding="utf-8")
+    assert bootstrap.apply_agent_edits(path, bind_host="127.0.0.1") >= 0
+    cfg = load_yaml(AgentConfig, path)
+    assert cfg.bind_host == "127.0.0.1" and cfg.lan_access is False
+    assert "lan_access: false" in path.read_text(encoding="utf-8")

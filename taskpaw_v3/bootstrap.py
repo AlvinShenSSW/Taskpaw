@@ -155,6 +155,7 @@ def apply_agent_edits(
     Returns the monitor count after editing.
     """
     from taskpaw_v3.core.config import AgentConfig, load_yaml, save_yaml
+    from taskpaw_v3.core.net import bind_is_loopback
     from taskpaw_v3.monitors.presets.moomoo import moomoo_preset
 
     cfg: AgentConfig = load_yaml(AgentConfig, config_path)  # type: ignore[assignment]
@@ -164,7 +165,9 @@ def apply_agent_edits(
             cfg.server_id = "moomoo-prod"
         cfg.monitors = moomoo_preset()
     if bind_host:
-        cfg.bind_host = bind_host
+        cfg.bind_host = bind_host.strip().strip("[]")  # as the model normalises
+        # #299 Codex r3 CX8: 允许局域网访问 follows the address it is saved with
+        cfg.lan_access = not bind_is_loopback(cfg.bind_host)
     save_yaml(cfg, config_path)
     return len(cfg.monitors)
 

@@ -79,7 +79,7 @@ def test_restores_each_video_and_records_verified_facts(rt, tools):
     facts = only.restore
     attempt = stage(rt, film, "restore").attempt_id
     assert facts.decision == "applied"
-    assert facts.file.path == f"{attempt}/movie-破解.mp4"
+    assert facts.file.path == f"{attempt}/movie-无码.mp4"  # #303: LTX is 无码
     assert (facts.width, facts.height, facts.duration_ms) == (1920, 1080, 120000)
     assert (facts.video_streams, facts.audio_streams) == (1, 1)
     check_file(rt.work_dir, facts.file)  # size and sha256 match the published file
@@ -88,7 +88,7 @@ def test_restores_each_video_and_records_verified_facts(rt, tools):
     assert not list(workdir.glob("*.tmp.mp4"))
     (argv,) = tools.runs(tools.jasna_exe)
     assert argv[argv.index("--input") + 1] == str(source)
-    assert argv[argv.index("--output") + 1] == str(workdir / "movie-破解.tmp.mp4")
+    assert argv[argv.index("--output") + 1] == str(workdir / "movie-无码.tmp.mp4")
     assert argv[argv.index("--restoration-model-name") + 1] == "ltx"
     assert "--ltx-fast" in argv  # unknown GPU keeps the preset's fast mode
     assert argv[argv.index("--working-directory") + 1] == str(workdir / ".jasna-work")
@@ -383,6 +383,16 @@ def test_restored_name_is_reused_without_a_child_or_the_gpu(rt, tools):
     assert tools.runs(tools.jasna_exe) == []
 
 
+@pytest.mark.parametrize("name", ["movie-无码.mp4", "movie_restored.mp4"])
+def test_every_restored_name_is_reused_without_a_child(rt, tools, name):
+    film = single(rt, name)
+    assert rt.executors["restore"].needs_gpu(manifest(rt, film)) is False
+    run = run_direct(rt, film, "restore")
+    (only,) = ledger(run).videos
+    assert only.restore.decision == "reused"
+    assert tools.runs(tools.jasna_exe) == []
+
+
 def test_mixed_volumes_restore_in_order_and_reuse_the_restored_one(rt, tools):
     film = add_film(
         rt,
@@ -398,13 +408,16 @@ def test_mixed_volumes_restore_in_order_and_reuse_the_restored_one(rt, tools):
     assert (first.volume_ordinal, first.restore.decision) == (1, "reused")
     assert first.restore.file.path.endswith("cd1_restored.mp4")
     assert (second.volume_ordinal, second.restore.decision) == (2, "applied")
-    assert second.restore.file.path.endswith("cd2-破解.mp4")
+    assert second.restore.file.path.endswith("cd2-无码.mp4")
     assert len(tools.runs(tools.jasna_exe)) == 1
     assert any("第 2/2 卷" in text for text in run.progress)
 
 
 def test_is_restored_name_follows_the_plugin_suffixes():
     assert is_restored_name("ABC-123-破解.mp4")
+    assert is_restored_name("ABC-123-无码.mp4")  # #303
+    assert is_restored_name("ABC-123-无码.MP4")
+    assert not is_restored_name("ABC-123-无码.tmp.mp4")
     assert is_restored_name("abc_RESTORED.MP4")
     assert not is_restored_name("abc-破解.mkv")
     assert not is_restored_name("abc.mp4")
@@ -923,3 +936,95 @@ def test_an_explicit_preset_is_not_marked_automatic(rt, tools):
     params = run.ltx[0]["params"]
     assert (params["preset"], params["preset_auto"]) == ("5060-8", False)
     assert params["preset_label"] == "RTX 5060 · 8 GB"
+
+
+# ── P2-5 (#296): 4K on 16 GB cards, the tier chosen per video ──────────────
+@pytest.mark.parametrize(
+    "vram, limit",
+    [(16311, (3840, 2160)), (15360, (3840, 2160)), (15359, (1920, 1080))],
+)
+def test_the_executor_advertises_the_cards_true_max(rt, vram, limit):
+    assert rt.executors["restore"].max_resolution(vram) == limit
+
+
+@pytest.fixture
+def rt16(tmp_path, tools):
+    value = runtime(tmp_path / "wf16", tools, gpu_id="5060ti-16")
+    try:
+        yield value
+    finally:
+        value.close()
+
+
+@pytest.mark.parametrize(
+    "size, tier, clip",
+    [((3840, 2160), "4k", "90"), ((1920, 1080), "1080p", "180")],
+)
+def test_each_video_launches_with_the_tier_of_its_probed_size(
+    rt16, tools, size, tier, clip
+):
+    """5060ti-16 standard preset: clip 180 at 1080p, 90 at 4K (LTX on both)."""
+    film = single(rt16, "movie.mkv", video(*size))
+    run = run_direct(rt16, film, "restore")
+    assert run.outcome.ok
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert argv[argv.index("--max-clip-size") + 1] == clip
+    assert argv[argv.index("--restoration-model-name") + 1] == "ltx"
+    params = run.ltx[0]["params"]
+    assert params["tier"] == tier
+    assert params["clip_size"] == int(clip)
+    assert (params["source_width"], params["source_height"]) == size
+
+
+def test_a_mixed_film_launches_each_volume_with_its_own_tier(rt16, tools):
+    film = add_film(
+        rt16,
+        [
+            File("a.mkv", video(1920, 1080), volume=1),
+            File("b.mkv", video(3840, 2160), volume=2),
+        ],
+    )
+    run = run_direct(rt16, film, "restore")
+    assert run.outcome.ok
+    first, second = tools.runs(tools.jasna_exe)
+    clips = [a[a.index("--max-clip-size") + 1] for a in (first, second)]
+    assert clips == ["180", "90"]
+    tiers = {s["params"]["tier"] for s in run.ltx}
+    assert tiers == {"1080p", "4k"}
+
+
+@pytest.mark.parametrize(
+    "width, height, tier",
+    [
+        (3840, 2160, "4k"),
+        (2560, 1440, "4k"),  # > 1.5x 1080p pixels
+        (1920, 1080, "1080p"),
+        (1280, 720, "1080p"),
+        (None, None, "1080p"),  # no probe size: 1080p, as before
+        (3840, None, "1080p"),
+    ],
+)
+def test_the_tier_follows_the_jasna_rule_and_unknown_is_1080p(width, height, tier):
+    probe = SimpleNamespace(width=width, height=height)
+    assert exec_restore.video_tier(probe) == tier
+    assert exec_restore.video_tier(None) == "1080p"
+
+
+def test_the_claims_settings_carry_no_tier_but_the_4k_fields_stay_in_the_digest(
+    rt, monkeypatch
+):
+    seen = []
+    real = exec_restore.tool_versions
+
+    def spy(**kw):
+        seen.append(kw["settings"])
+        return real(**kw)
+
+    monkeypatch.setattr(exec_restore, "tool_versions", spy)
+    executor = RestoreExecutor(rt, "jasna.exe", "5060ti-16")
+    base = executor.tools()
+    assert "tier" not in seen[0]
+    assert seen[0]["jasna"]["ltx_4k"] is True
+    off = RestoreExecutor(rt, "jasna.exe", "5060ti-16")
+    off.cfg = off.cfg.model_copy(update={"ltx_4k": False})
+    assert off.tools().config_digest != base.config_digest

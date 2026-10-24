@@ -66,6 +66,7 @@ _RECOVERY_COMMANDS = frozenset(
         "revoke_worker",
         "mark_unknown",
         "resolve_assignment",
+        "attest_stopped",
         "revoke_approval",
         "finish_attempt",
         "accept_artifact_receipt",
@@ -97,6 +98,9 @@ class WorkflowCore:
         self._clock = clock
         self._lock = threading.RLock()
         self._closed = False
+        # P2-1: the controller's own worker, set by its runtime after opening.
+        # Its pin means 自动 (IR9) and its work is never 判定已停止 (IR4).
+        self.controller_id: str | None = None
 
     @classmethod
     def _connect(cls, path: Path, clock: Clock | None, *, create: bool) -> Self:

@@ -2,12 +2,12 @@
 // latest console line) above the phase's card: the mosaic scan, BasicVSR++, then the Jasna
 // monitor's own LtxProgress, unchanged. U1e: under it, 「LTX 合计用时」 so far.
 import { Box, Typography } from "@mui/material";
-import type { RestoreParams, WorkflowStep } from "../../api";
+import type { FilmPlan, RestoreParams, WorkflowStep } from "../../api";
 import { LtxProgress } from "../LtxProgress";
 import type { SplitNote } from "../restorePhase.helpers";
 import { ConsoleFold, DATA, ProgressFrame } from "../progressParts";
 import { BasicVsrProgress, MosaicScanProgress } from "../RestorePhaseProgress";
-import { heartbeatText, paramRows, presetText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
+import { heartbeatText, paramRows, presetText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, tierLong, type RestoreLive } from "./mediaModel";
 import { LtxTimingCard } from "./TimingParts";
 import { useNow } from "./useNow";
 
@@ -30,11 +30,14 @@ const PULSE = {
 } as const;
 
 // 「本片参数」: what Jasna was launched with for this video, and the full command to copy.
-function ParamsBlock({ params, split }: { params: RestoreParams; split: SplitNote | null }) {
+export function ParamsBlock({ params, split = null, plan, machine }: {
+  params?: RestoreParams | null; split?: SplitNote | null; plan?: FilmPlan | null; machine?: string;
+}) {
+  const rows = params ? paramRows(params, split) : [["画质", plan ? tierLong(plan.ltx_model) : "—"], ["设备", machine ?? "—"]];
   return (
-    <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={presetText(params) || undefined}>
+    <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={params ? presetText(params) || undefined : undefined}>
       <Box component="dl" sx={{ m: 0, px: { xs: 2, sm: 3 }, py: 2, display: "flex", flexWrap: "wrap", gap: 1 }}>
-        {paramRows(params, split).map(([label, value]) => (
+        {rows.map(([label, value]) => (
           <Box key={label} data-param={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.75, minWidth: 0,
             maxWidth: "100%", px: 1.25, py: 0.5, border: "1px solid", borderColor: "divider", borderRadius: 1.5,
             bgcolor: "background.default" }}>
@@ -43,7 +46,8 @@ function ParamsBlock({ params, split }: { params: RestoreParams; split: SplitNot
           </Box>
         ))}
       </Box>
-      <ConsoleFold raw={params.argv} title="完整命令" help="启动 Jasna 的完整命令（路径只保留文件名）" testIdPrefix="restore-argv" />
+      {params ? <ConsoleFold raw={params.argv} title="完整命令" help="启动 Jasna 的完整命令（路径只保留文件名）" testIdPrefix="restore-argv" />
+        : <Typography variant="caption" sx={{ display: "block", px: 3, pb: 2 }}>启动参数未留存；以上为已确认的安排。</Typography>}
     </ProgressFrame>
   );
 }

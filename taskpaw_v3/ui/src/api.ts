@@ -157,6 +157,60 @@ export type AgentConfigView = {
   llm_failover?: boolean;
 } & Record<string, unknown>;
 
+// P2-2 (#293): 设备 v1 and the worker console, both on the loopback control API.
+export type DeviceProfile = {
+  stage: "restore" | "asr" | "translate"; tool: string; tool_version: string; model: string; model_version: string;
+  profile: string; max_width: number; max_height: number;
+};
+export type DeviceProbe = { gpu_model: string; vram_mib: number; free_disk_bytes: number; profiles: DeviceProfile[]; config_digest?: string | null };
+export type DeviceRow = {
+  worker_id: string; version: number; name: string; address: string; port: number;
+  enrollment_state: "pending_pairing" | "pending_validation" | "verified" | "retired";
+  admission_state: "disabled" | "enabled" | "draining" | "revoked";
+  participation: boolean;
+  heartbeat: { state: "online" | "lost" | "waiting" | "off"; age_s: number | null };
+  gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
+  disk: { free: number; staging_used: number; cap: number } | null;
+  tiers_ready: string[]; agent_version: string | null; version_ok: boolean | null;  // OD7: no asr_ready
+  boot_reconciled: boolean; eligibility: string; eligible: boolean;
+  probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
+  restore_allowed: boolean; unresolved: number; can_retire: boolean;
+  // P2-4 §2: the row's unresolved compute assignments (判定已停止) and its open routes (排队)
+  assignments?: DeviceAssignment[]; route_depth?: number;
+};
+export interface DeviceAssignment {
+  assignment_id: string; version: number; film_id: string; film_name: string; stage: string; state: string;
+  stop: FilmStopAction | null;
+}
+export type DevicesView = {
+  remote_workers: boolean; server_time: string; controller: { name: string; stages: string[] }; workers: DeviceRow[];
+};
+export type PairingCode = { worker_id: string; code: string; expires_at: string };
+export type WorkerConsole = {
+  state: string; reason: string; role: "controller" | "worker"; controller: string | null;
+  worker_id?: string | null; credential: "valid" | "revoked" | null; staging_dir: string | null; staging_cap_gb: number;
+  last_heartbeat?: string | null; reconciled?: boolean; paused?: boolean;
+  // P2-3 §6: the 媒体处理 tab of a worker
+  controller_paused?: boolean; pending?: boolean; films?: WorkerFilm[]; current?: WorkerCurrent | null;
+  transfers?: WorkerTransfer[]; dispatch_reason?: string | null;
+  // P2-3 §11 IR3: what needs the operator (the controller refused a failed result)
+  dispatch_notice?: string | null;
+  staging?: { used: number | null; cap: number }; gpu?: { name: string | null; vram_mib: number | null; hold: string };
+};
+// P2-3: a film routed to this worker (position 0 当前, 1 预取) and its envelope's stage statuses.
+export interface WorkerFilm {
+  film: string; rev: number; name: string; position: number;
+  state: "queued" | "fetching" | "staged" | "running" | "settling" | "uploading" | "finishing";
+  stages: Record<string, string | null>;
+}
+export interface WorkerTransfer { film: string; dir: "down" | "up"; done: number; total: number; rate: number }
+// The running stage; `step` is shaped like the board's running 修复 step (LtxProgress, 本片参数, 用时).
+export interface WorkerCurrent {
+  film_id: string; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
+  progress: string; elapsed_s: number; uses_gpu: boolean; step: WorkflowStep; started_at: string;
+  power?: LivePower | null; energy?: Record<string, unknown> | null;
+}
+
 export interface MonitorMutationResult {
   ok: boolean;
   name: string;
@@ -210,7 +264,38 @@ export interface FilmPlan { ltx_model: LtxTier | null; machine: string }
 // U1 §7.2: the current input and final manifests, so the 图文确认 dialog can see a change.
 export interface ManifestRevision { revision: number; hash: string }
 export interface FilmRevisions { input: ManifestRevision | null; final: ManifestRevision | null }
-export interface FilmRow {
+// P2-4 R2/R3 (remote mode; null on a single machine): the film's open route, its plan's mutable
+// machine choice (null worker = 自动) and the 设备失联 attention state.
+export interface FilmRouteInfo {
+  machine: { id: string; name: string }; kind: "auto" | "pinned" | "local"; reason: string; routed_at: string;
+  position: number; live: "online" | "lost" | "waiting" | "local"; silent_s: number | null;
+}
+export interface FilmPin { worker_id: string | null; name: string; version: number }
+// R2/R8: 改派 for an unclaimed planned film; 判定已停止 of an unresolved remote assignment, allowed only
+// when both channels (heartbeat, /status) have been dead for 5 min (C4), else `reason` says which is alive.
+export interface FilmStopAction {
+  assignment_id: string; expected_version: number; stage: string; worker: { id: string; name: string };
+  allowed: boolean; reason: string | null; heartbeat_silent_s: number | null; status_quiet_s: number | null;
+  // the status channel's address (`host:port`) and how its last read ended (timeout / unreachable / idle / …)
+  address?: string; status_state?: string | null;
+}
+export interface FilmActions { can_reassign: boolean; stop: FilmStopAction | null }
+export interface ReassignOption {
+  worker_id: string | null; name: string; reason: string | null; current: boolean;
+  // 预计 (scheduler.preview): the finish and energy when it can take the film; 自动 names its device
+  finish_at?: string | null; energy_wh?: number | null; machine?: { id: string; name: string } | null;
+}
+// P3 E1 (#304): an INBOX source that vanished after intake — the missing paths and when it was found
+export interface SourceMissing { paths: string[]; found_at: string }
+export interface FilmRemote {
+  attention_kind?: "device_lost" | "source_missing" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
+  actions?: FilmActions | null;
+  // P3 E1/E3: 片源丢失 {paths, found_at}; whether 删除此任务 is offered (no stage running or claimed, not archived)
+  source_missing?: SourceMissing | null; can_remove?: boolean;
+  // #298 (§9 CX27): the 失联 worker, also when its route is on an older input revision
+  lost_worker?: { id: string; name: string } | null;
+}
+export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
@@ -231,6 +316,8 @@ export interface FilmRow {
 export interface EnergyStage {
   wh: number; gpu_wh: number; cpu_wh: number; other_wh: number; seconds: number;
   avg_w: number | null; peak_w: number | null; machine: string; attempts: number; partial: boolean; running: boolean;
+  // P2-4 R10: the machines the stage's attempts ran on
+  devices?: Array<{ id: string; name: string }>;
 }
 export interface FilmEnergy {
   stages: Partial<Record<string, EnergyStage>>; total_wh: number; partial: boolean; running: boolean; estimated: true;
@@ -282,6 +369,9 @@ export interface WorkflowStep {
   started_at?: string | null; console?: string | null; params?: RestoreParams | null;
   // U1e: the running restore's phase times so far (the whole film)
   timing?: RestoreTiming | null;
+  // P2-3 R15: a stage running on a remote worker — its 设备 and attempt (停止并重新排队)
+  machine?: { id: string; name: string } | null; attempt_id?: string | null;
+  phase?: "running" | "settling" | "uploading" | "finishing" | null;
 }
 // U1c: the effective Jasna launch of the running video, read from its argv (paths cut to names).
 export interface RestoreParams {
@@ -315,12 +405,13 @@ export interface WorkflowCounts {
 export interface WorkflowFilms {
   state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
   films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
+  done_paging?: { total: number; size: number; page: number; pages: number };
   // null without a host (dispatch) or without a probed GPU
   dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
   // PWR-2: the cluster's live estimate and the history behind 预计耗电 / 每片能耗
   power?: ClusterPower | null; energy_rates?: EnergyRate[];
 }
-export interface FilmDetail {
+export interface FilmDetail extends FilmRemote {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
   marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
   files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
@@ -333,9 +424,13 @@ export interface FilmDetail {
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
   timing?: FilmTiming | null;
+  history?: { completed_at: string | null; total_seconds: number | null;
+    steps: Array<{ key: string; device: string; seconds: number | null; result: string }> } | null;
   duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
+  // P2-4 §2: the 改派 dialog's choices (remote mode only)
+  reassign_options?: ReassignOption[] | null;
 }
 export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
@@ -358,7 +453,7 @@ export interface PlanLookup {
   studio: string | null; release: string | null; runtime_min: number | null; has_poster: boolean;
   error_class: string | null; message: string | null; can_requery: boolean;
 }
-export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
+export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string | null; machine_reason: string }
 export interface PlanEntry {
   film_id: string; input_revision: number; revision_changed: boolean; name: string;
   title: string | null; number: string | null; actors: string[];
@@ -369,6 +464,19 @@ export interface PlanEntry {
   lookup: PlanLookup | null; recommendation: PlanRecommendation;
   // PWR-2 PW13: 预计耗电 on the recommended machine (Wh per tier; null = 历史不足)
   prediction?: PlanPrediction | null;
+  // P2-4 R5 (remote mode; null on a single machine): per tier ("none" = 无需修复), 自动's predicted
+  // device or why it would wait, and every device's own finish or eligibility reason (预计).
+  routing?: Record<string, PlanRouting> | null;
+}
+export interface PlanRoutingDevice {
+  id: string; name: string; gpu: string | null; vram_mib: number | null;
+  finish_at: string | null; energy_wh: number | null; reason: string | null;
+}
+export interface PlanRouting {
+  auto: { machine: { id: string; name: string }; finish_at: string; energy_wh: number | null; text: string }
+    // P2-4 §9 CX2 / OD7 R7: waiting null + text 「无需修复，本机完成」 when no restore needs a worker
+    | { waiting: string | null; text?: string };
+  devices: PlanRoutingDevice[];
 }
 // PWR-1/3: the 功耗 tab. A machine's bounded history (at most 168 points; `avg_w` null = a gap).
 export type PowerRange = "24h" | "7d" | "30d";
@@ -389,6 +497,8 @@ export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
   os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;
   energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
+  // P2-4 R11: `workflow` = an enrolled GPU worker that joined automatically (工作机 · 自动加入)
+  source?: "config" | "workflow";
 }
 export interface PowerView {
   // `energy`: this machine's retained today / week / month Wh, present while `power` is null (sampling off)
@@ -403,8 +513,69 @@ export interface PlanMachine { id: string; name: string; gpu: string | null; vra
 export interface WorkflowPlans {
   plans: PlanEntry[]; default_tier: LtxTier;
   choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
+  // P2-4 R5: remote mode (the select starts with 自动; a null machine is 自动)
+  remote?: boolean;
 }
-export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
+export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string | null }
+// P2-4 R13–R16: 设置 · 媒体工作流 (agent.yaml `workflow`; no token or key lives in it).
+export type WorkflowRole = "off" | "controller" | "worker";
+export interface WorkflowSettingsView {
+  enabled: boolean; role: WorkflowRole;
+  inbox_root: string | null; data_dir: string | null; output_dir?: string | null; ffprobe_path: string | null;
+  jasna_exe_path: string | null; whisperjav_exe_path: string | null; ltx_gpu: string;
+  mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null; filmpaw_data_dir: string | null;
+  remote_workers: boolean; worker_api_port: number; staging_dir: string | null; staging_cap_gb: number;
+}
+export interface WorkflowSettingsState {
+  output_dir_default?: boolean; // derived location; the wizard follows its chosen data_dir
+  saved: WorkflowSettingsView; running: WorkflowSettingsView; restart_required: boolean;
+  busy: { films: number; remote: number; unknown: boolean };
+  presets: Array<{ id: string; label: string }>;
+  // what an empty ffprobe field uses (null: not on PATH)
+  ffprobe_detected: string | null;
+  // each saved directory / tool found or missing (null: unset), and whether Miko's three fields are complete
+  paths?: Partial<Record<keyof WorkflowSettingsView, "ok" | "missing" | null>>;
+  miko?: "complete" | "partial" | "off";
+  // #299 §12 operator decision: false off Windows (only 不参与 is offered)
+  media_supported?: boolean;
+}
+// #299 review IR10: `create_dirs` names the suggested folders the save makes once it validated
+export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>
+  & { create_dirs?: Array<"inbox_root" | "data_dir" | "output_dir" | "staging_dir"> };
+// #299: the first-run wizard, 网络与访问, detection, 立即重启 and the Hub's settings.
+export type SetupRole = "agent" | "controller" | "worker";
+export type SetupStep = "role" | "network" | "controller" | "worker_fields" | "worker_join" | "done";
+export interface SetupState { status: "absent" | "pending" | "done"; step: SetupStep | null; role: SetupRole | null }
+export interface NetworkAddress { ip: string; nic: string; primary: boolean }
+export interface NetworkView {
+  lan_access: boolean; bind_host: string; bind_port: number; control_port: number;
+  addresses: NetworkAddress[]; address_changed_from: string | null; running_bind_host?: string;
+  token_set: boolean; api_token_hint: string | null;
+  firewall: { platform: "windows" | "macos" | "other"; rule: "present" | "absent" | "unknown"; profile: "private" | "public" | "domain" | null };
+}
+export type FirewallResult = "added" | "declined" | "failed" | "unsupported" | "timeout" | "pending";
+export interface ToolFound { found: boolean; path: string | null; source: "saved" | "monitor" | "default" | "path" | "bundled" | null; version: string | null }
+export interface MikoFound { status: "complete" | "partial" | "off"; root: string | null; python: string | null; profile: string | null }
+export interface GpuFound { name: string; vram_mib: number; driver: string | null; power_limit_w: number | null; worker_ok: boolean }
+export interface Detection {
+  gpu: GpuFound | null;
+  tools: { ffprobe: ToolFound; jasna: ToolFound; whisperjav: ToolFound; miko: MikoFound };
+  suggested: { inbox: string | null; data_dir: string | null; staging: string | null };
+}
+export interface DirectoryFacts { exists: boolean | null; free_bytes: number | null; volume: string; local: boolean }
+export interface RestartState { required: boolean; fields: string[]; blocked: string | null; available: boolean }
+export interface HubSettingsValues {
+  openclaw_enabled: boolean; openclaw_url: string; openclaw_token: string; polling_token: string;
+  polling_token_hint: string | null; poll_interval: number; write_status_md: boolean; status_md_path: string | null;
+  status_md_default: string; status_log_retention_days: number; lan_access: boolean; bind_host: string; api_token: string;
+}
+export interface HubSettingsState {
+  saved: HubSettingsValues; running: HubSettingsValues; restart_required: boolean; fields: string[];
+  addresses: NetworkAddress[]; restart_available: boolean;
+  // #299 review IR2: the polled TaskPaw the operator chose as 主控 (null: none chosen)
+  controller_server_id: number | null;
+}
+export type OpenclawTest = { ok: true; at: string; elapsed_s: number } | { ok: false; error: "unreachable" | "token" | "timeout" | "http"; status?: number };
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
@@ -412,7 +583,7 @@ const seg = (id: string | number) => encodeURIComponent(String(id));
 export type ControlRole = "agent" | "hub";
 declare global {
   interface Window {
-    __TASKPAW__?: { baseUrl?: string; controlToken?: string; role?: ControlRole; bootId?: string };
+    __TASKPAW__?: { baseUrl?: string; controlToken?: string; role?: ControlRole; bootId?: string; restart?: boolean };
   }
 }
 const DEFAULT_PORT = { agent: 5681, hub: 5691 } as const;
@@ -440,6 +611,8 @@ export function canonicalControlBase(base: string): boolean {
   } catch { return false; }
 }
 function validToken(token: string): boolean { return /^[\x21-\x7e]{1,1024}$/.test(token); }
+// #299 §3: the shell supervises exit 75 only when it says so; the boot the window was built for.
+let injectedBoot: { role: ControlRole; bootId: string; restart: boolean } | null = null;
 function consumeInjection() {
   const injected = window.__TASKPAW__;
   if (!injected || consumedInjection === injected) return;
@@ -449,10 +622,14 @@ function consumeInjection() {
     && typeof injected.controlToken === "string" && validToken(injected.controlToken)
     && /^[0-9a-f]{32}$/.test(injected.bootId ?? "")) {
     credentials[injected.role] = { baseUrl: injected.baseUrl, controlToken: injected.controlToken, verified: true };
+    injectedBoot = { role: injected.role, bootId: injected.bootId as string, restart: injected.restart === true };
   }
 }
+export function restartSupported(role: ControlRole): boolean { consumeInjection(); return injectedBoot?.role === role && injectedBoot.restart; }
+export function controlBootId(role: ControlRole): string | null { consumeInjection(); return injectedBoot?.role === role ? injectedBoot.bootId : null; }
 export function hasControlCredential(role: ControlRole): boolean { consumeInjection(); return credentials[role]?.verified === true; }
 export function clearControlCredentials(role?: ControlRole) {
+  if (!role || injectedBoot?.role === role) injectedBoot = null;
   if (role) delete credentials[role];
   else { delete credentials.agent; delete credentials.hub; roleBases.agent = "http://127.0.0.1:5681"; roleBases.hub = "http://127.0.0.1:5691"; }
   if (!role || window.__TASKPAW__?.role === role) {
@@ -497,7 +674,9 @@ export const PLAN_BATCH_MAX = 500;
 
 export class HttpError extends Error {
   // `code`: the backend's error code when the body names one (a 409's `cas_conflict` = a changed revision)
-  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
+  // `fields`: a 422's per-field messages (P2-4 设置 · 媒体工作流), never echoing a value
+  constructor(message: string, public readonly status: number, public readonly code?: string,
+    public readonly fields?: Record<string, string>) { super(message); }
 }
 
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
@@ -544,7 +723,7 @@ async function hubFilmGet(path: string): Promise<unknown> {
 // admin's ValueError message → 400) so the UI can show why an edit was rejected.
 async function send<T>(
   role: "agent" | "hub",
-  method: "POST" | "DELETE" | "PATCH",
+  method: "POST" | "DELETE" | "PATCH" | "PUT",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -568,14 +747,18 @@ async function send<T>(
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
     let code: string | undefined;
+    let fields: Record<string, string> | undefined;
     try {
-      const j = monitor ? payload as { detail?: unknown; code?: unknown } : await res.json();
+      const j = monitor ? payload as { detail?: unknown; code?: unknown; fields?: unknown } : await res.json();
       if (j?.detail) detail = String(j.detail);
       if (typeof j?.code === "string") code = j.code;
+      if (j?.fields && typeof j.fields === "object" && !Array.isArray(j.fields)) {
+        fields = Object.fromEntries(Object.entries(j.fields as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+      }
     } catch {
       /* non-JSON error body */
     }
-    throw new HttpError(detail, res.status, code);
+    throw new HttpError(detail, res.status, code, fields);
   }
   if (res.status === 204) return undefined as T;
   return monitor ? payload as T : res.json() as Promise<T>;
@@ -655,17 +838,20 @@ export const api = {
     send<HubServer & { ok: boolean }>("hub", "POST", "/servers", s),
   hubUpdateServer: (id: number, patch: { name?: string; ip?: string; port?: number; enabled?: boolean }) =>
     send<HubServer & { ok: boolean }>("hub", "PATCH", `/servers/${id}`, patch),
+  // #299 Codex r4: 更换主控 selects/creates the server row for the address and names it the 主控
+  hubReplaceController: (ip: string, port: number) =>
+    send<{ ok: boolean; id: number; created: boolean }>("hub", "PUT", "/config/controller", { ip, port }),
   hubRemoveServer: (id: number) => send<{ ok: boolean }>("hub", "DELETE", `/servers/${id}`),
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
   // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
   power: (range: PowerRange) => get<PowerView>("agent", `/control/power?range=${range}`),
-  hubWorkflowFilms: (serverId: number) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films`),
+  hubWorkflowFilms: (serverId: number, donePage = 1) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films?done_page=${donePage}`),
   hubWorkflowFilm: (serverId: number, filmId: string) => get<FilmDetail>("hub", `/servers/${serverId}/workflow/films/${seg(filmId)}`),
   hubWorkflowPlans: (serverId: number) => get<WorkflowPlans>("hub", `/servers/${serverId}/workflow/plans`),
   hubWorkflowImagePath: (serverId: number, filmId: string, kind: "poster" | "cover") =>
     `/servers/${serverId}/workflow/films/${seg(filmId)}/${kind}`,
-  workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
+  workflowFilms: (donePage = 1) => get<WorkflowFilms>("agent", `/control/workflow/films?done_page=${donePage}`),
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>
     get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
@@ -673,6 +859,8 @@ export const api = {
     send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
   workflowRetry: (filmId: string, stage: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
+  workflowOpenFolder: (filmId: string, which: "output" | "archive") =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open-folder`, { which }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
@@ -693,6 +881,69 @@ export const api = {
   // H2 R2: open a current INBOX package folder (204 | 404 missing | 501 unsupported platform).
   workflowOpenPackage: (packageId: string) =>
     send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
+  // P2-2: 设备 (every command carries the worker's `expected_version`) and the worker console.
+  workflowDevices: () => get<DevicesView>("agent", "/control/workflow/devices"),
+  workflowAddDevice: (name: string, address: string) =>
+    send<PairingCode>("agent", "POST", "/control/workflow/devices", { name, address }),
+  workflowRepairDevice: (id: string, expected_version: number) =>
+    send<PairingCode>("agent", "POST", `/control/workflow/devices/${seg(id)}/pairing`, { expected_version }),
+  // OD7 (#298 R10): a GPU worker is approved for restore only
+  workflowApproveDevice: (id: string, expected_version: number, restore: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/approve`, { expected_version, restore }),
+  workflowDeviceAdmission: (id: string, expected_version: number, state: "enabled" | "draining") =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/admission`, { expected_version, state }),
+  workflowRevokeDevice: (id: string, expected_version: number) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/revoke`, { expected_version }),
+  workflowRetireDevice: (id: string, expected_version: number) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/retire`, { expected_version }),
+  workflowWorker: () => get<WorkerConsole>("agent", "/control/workflow/worker"),
+  workflowJoin: (code: string, staging_dir: string) =>
+    send<WorkerConsole>("agent", "POST", "/control/workflow/worker/join", { code, staging_dir }),
+  // P2-3 R12: 暂停领取 / 恢复领取 on the worker's own console
+  workflowWorkerPause: (paused: boolean) =>
+    send<{ paused: boolean }>("agent", "POST", "/control/workflow/worker/pause", { paused }),
+  // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
+  workflowRequeue: (filmId: string, attemptId: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
+  // P3 E2: 重新检查 of a 片源丢失 film; `source_missing` is null once the files are back; `unreachable`:
+  // the INBOX share could not be reached, so nothing was learned
+  workflowRecheckSource: (filmId: string) =>
+    send<{ ok: boolean; source_missing: SourceMissing | null; unreachable?: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/recheck-source`, {}),
+  // P3 E3: 删除此任务 — 409 (coded) while a stage runs or is claimed, or the film was confirmed or archived
+  workflowRemove: (filmId: string) =>
+    send<{ ok: boolean; leftover: number }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/remove`, {}),
+  // P2-4 R7: 改派 (null = 自动) — 409 `route_claimed` 「已开始处理」 when a claim won
+  workflowPin: (filmId: string, input_revision: number, expected_version: number, worker_id: string | null) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/pin`, { input_revision, expected_version, worker_id }),
+  // P2-4 R8: 判定已停止 of one unresolved remote assignment (C4: both channels dead for 5 min)
+  workflowAttest: (filmId: string, assignment_id: string, expected_version: number) =>
+    send<Record<string, unknown>>("agent", "POST", `/control/workflow/films/${seg(filmId)}/attest-stopped`, { assignment_id, expected_version }),
+  // P2-4 R13–R16: 设置 · 媒体工作流
+  workflowSettings: () => get<WorkflowSettingsState>("agent", "/control/workflow/settings"),
+  workflowSaveSettings: (patch: WorkflowSettingsPatch) =>
+    send<{ ok: boolean; restart_required: boolean; message?: string }>("agent", "PUT", "/control/workflow/settings", patch),
+  // 「创建此目录」: a local absolute folder (422 `fields.path` otherwise)
+  workflowOpenDir: (path: string) =>
+    send<void>("agent", "POST", "/control/workflow/settings/directory/open", { path }),
+  workflowCreateDir: (path: string) =>
+    send<{ ok: boolean; created: boolean }>("agent", "POST", "/control/workflow/settings/directory", { path }),
+  // #299: first-run wizard (§6), 网络与访问 (R4–R6), detection (§5), 立即重启 (§3)
+  setup: () => get<SetupState>("agent", "/control/setup"),
+  setupStep: (step: SetupStep, role: SetupRole) => send<SetupState>("agent", "PUT", "/control/setup", { step, role }),
+  setupComplete: () => send<SetupState>("agent", "POST", "/control/setup/complete"),
+  network: () => get<NetworkView>("agent", "/control/network"),
+  networkToken: (action: "generate" | "reveal") => send<{ token: string }>("agent", "POST", "/control/network/token", { action }),
+  networkFirewall: () => send<{ result: FirewallResult }>("agent", "POST", "/control/network/firewall"),
+  workflowDetect: (refresh = false) => get<Detection>("agent", `/control/workflow/detect${refresh ? "?refresh=1" : ""}`),
+  inspectDirectory: (path: string) =>
+    send<DirectoryFacts>("agent", "POST", "/control/workflow/settings/directory/inspect", { path }),
+  restartState: () => get<RestartState>("agent", "/control/restart"),
+  restart: (role: ControlRole, boot_id: string) =>
+    send<{ restarting: boolean }>(role, "POST", role === "agent" ? "/control/restart" : "/restart", { boot_id }),
+  hubSettings: () => get<HubSettingsState>("hub", "/config/settings"),
+  hubSaveSettings: (patch: Partial<Record<keyof HubSettingsValues | "controller_server_id", unknown>>) =>
+    send<{ ok: boolean; restart_required: boolean; fields: string[] }>("hub", "PUT", "/config/settings", patch),
+  hubOpenclawTest: (url: string, token: string) => send<OpenclawTest>("hub", "POST", "/config/openclaw/test", { url, token }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

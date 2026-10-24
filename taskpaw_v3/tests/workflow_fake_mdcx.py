@@ -1,10 +1,14 @@
 """A fake `mdcx.cmd.postprocess_one` for the M01 scrape tests (stdlib only).
 
 Behaviour comes from `<MDCX_CONFIG_DIR>/user-config.json` → `"fake_mode"`:
-`ok` (default), `fail`, `no_result`, `extra_file`, `wrong_hash`.
-It lays out Miko-like output: out/<Actor>/<NUMBER>/<NUMBER>[-cdN].<ext>,
-<NUMBER>.nfo, poster/thumb/fanart, folder.jpg for several volumes, and
-the Chinese subtitle renamed to .chs.srt.
+`ok` (default), `fail`, `no_result`, `extra_file`, `wrong_hash`, `wrong_mosaic`.
+It follows MDCX304 #299 (postprocess_one): out/<Actor>/<NUMBER>/, and per volume
+`<name>.<ext>`, `<name>.nfo`, `<name>-poster.jpg`, `<name>-fanart.jpg`,
+`<name>-thumb.jpg` and the Chinese subtitle as `<name>.zh.srt`, where `<name>`
+is `<NUMBER>[-无码|-破解][-C][-cdN]`; a film of several volumes also gets a
+`folder.jpg` copy of the first volume's poster. A request video with `ltx` is
+无码 (marker `-无码`, mosaic `无码`); a restored one without it is 破解 (mosaic
+`无码破解`). A `.ja.srt` is never staged by Taskpaw, so the fake never sees one.
 """
 
 from __future__ import annotations
@@ -65,39 +69,45 @@ def main() -> int:
         )
 
     multi = len(request["videos"]) > 1
+    mosaics = {}
+    first_poster = None
     for video in request["videos"]:
         source = staging_in / video["file"]
+        mosaics[video["file"]] = (
+            "无码" if video.get("ltx") else "无码破解" if video["restored"] else ""
+        )
+        marker = "-无码" if video.get("ltx") else "-破解" if video["restored"] else ""
+        zh = "-C" if video["zh_subtitle"] else ""
         suffix = f"-cd{video['volume']}" if multi else ""
-        target = film / f"ABC-123{suffix}{source.suffix}"
+        name = f"ABC-123{marker}{zh}{suffix}"
+        target = film / f"{name}{source.suffix}"
         shutil.move(source, target)
         add(target, "main_video", video["file"])
         sub = staging_in / f"{Path(video['file']).stem}.srt"
         if video["zh_subtitle"] and sub.exists():
-            dest = film / f"ABC-123{suffix}.chs.srt"
+            dest = film / f"{name}.zh.srt"
             shutil.move(sub, dest)
             add(dest, "subtitle", video["file"])
-    tags = (
-        "中文字幕 无码破解"
-        if any(v["zh_subtitle"] for v in request["videos"])
-        else "无码破解"
-    )
-    (film / "ABC-123.nfo").write_text(
-        "<movie><title>假的标题</title><actor><name>Actor</name></actor>"
-        f"<tag>{tags}</tag></movie>",
-        "utf-8",
-    )
-    add(film / "ABC-123.nfo", "nfo")
-    for name, role in (
-        ("poster.jpg", "poster"),
-        ("thumb.jpg", "thumb"),
-        ("fanart.jpg", "fanart"),
-    ):
-        # the fanart is the whole landscape jacket (a JPEG frame header, U1b)
-        head = _JACKET_HEAD if role == "fanart" else b""
-        (film / name).write_bytes(head + f"image {name}".encode())
-        add(film / name, role)
+        nfo = film / f"{name}.nfo"
+        tag = " ".join(
+            t for t in (("中文字幕" if zh else ""), mosaics[video["file"]]) if t
+        )
+        nfo.write_text(
+            "<movie><title>假的标题</title><actor><name>Actor</name></actor>"
+            f"<tag>{tag}</tag></movie>",
+            "utf-8",
+        )
+        add(nfo, "nfo", video["file"])
+        for role in ("poster", "thumb", "fanart"):
+            image = film / f"{name}-{role}.jpg"
+            # the fanart is the whole landscape jacket (a JPEG frame header, U1b)
+            head = _JACKET_HEAD if role == "fanart" else b""
+            image.write_bytes(head + f"image {name}-{role}".encode())
+            add(image, role, video["file"])
+            if role == "poster" and first_poster is None:
+                first_poster = image
     if multi:
-        shutil.copyfile(film / "poster.jpg", film / "folder.jpg")
+        shutil.copyfile(first_poster, film / "folder.jpg")
         add(film / "folder.jpg", "folder_cover")
     if mode == "extra_file":
         (film / "trailer.mp4").write_bytes(b"unexpected")
@@ -118,7 +128,10 @@ def main() -> int:
                     {
                         "video": v["file"],
                         "has_sub": v["zh_subtitle"],
-                        "mosaic": "无码破解",
+                        # an old Miko that ignores `ltx` still says 破解
+                        "mosaic": "无码破解"
+                        if mode == "wrong_mosaic"
+                        else mosaics[v["file"]],
                         "definition": definition,
                     }
                     for v in request["videos"]

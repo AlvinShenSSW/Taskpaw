@@ -31,6 +31,8 @@ export interface Machine {
   live: LivePower | null; day: PowerHistory | null; hist: PowerHistory | null;
   // the period energy that counts in the totals: live, or a peer's last reading while its period lasts
   energy?: PeerEnergy | null; energyStale?: boolean; duplicateOf?: string | null;
+  // P2-4 R11: an enrolled GPU worker that joined the list by itself (工作机 · 自动加入)
+  auto?: boolean;
 }
 
 const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]> = {
@@ -64,7 +66,7 @@ function peerMachine(p: PowerPeerRow, ranged: PowerPeerRow | undefined, i: numbe
   const fresh = p.state === "ok" && !p.stale;
   const counted = p.state !== "duplicate" && p.state !== "self";
   return {
-    duplicateOf: p.duplicate_of ?? null,
+    duplicateOf: p.duplicate_of ?? null, auto: p.source === "workflow",
     energy: counted ? (p.energy ?? (fresh && p.power ? energyOf(p.power) : null)) : null,
     energyStale: p.energy_stale ?? !fresh,
     id: `peer:${p.name}`, name: p.name, local: false, state: p.state, stale: p.stale, color: machineColor(i),

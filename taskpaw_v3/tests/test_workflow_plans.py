@@ -204,9 +204,10 @@ def test_other_stages_are_not_gated(rt):
 
 # ── v3 migration (U04) ───────────────────────────────────────────────────
 def as_v2(path) -> None:
-    """Turn a v3 file back into the exact v2 format (drop the plan table)."""
+    """Turn a v4 file back into the exact v2 format (drop the plan tables)."""
     with sqlite3.connect(path) as conn:
-        conn.execute("DROP TABLE film_plans")
+        for table in ("film_routes", "film_pins", "film_plans"):
+            conn.execute(f"DROP TABLE {table}")
         conn.execute("PRAGMA user_version=2")
 
 
@@ -248,7 +249,7 @@ def test_v2_upgrade_backfills_only_restores_that_already_ran(tmp_path):
     with sqlite3.connect(backups[0]) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     with sqlite3.connect(tmp_path / "wf" / "workflow.db") as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v2_upgrade_plans_only_finished_restores_not_interrupted_ones(tmp_path):
@@ -360,7 +361,8 @@ def test_a_modified_plan_table_is_rejected(tmp_path):
     rt.close()
     path = tmp_path / "wf" / "workflow.db"
     with sqlite3.connect(path) as conn:
-        conn.execute("DROP TABLE film_plans")
+        for table in ("film_routes", "film_pins", "film_plans"):
+            conn.execute(f"DROP TABLE {table}")
         conn.execute(
             "CREATE TABLE film_plans (film_id TEXT, input_revision INTEGER, "
             "ltx_model TEXT, machine TEXT, confirmed_at TEXT)"
@@ -369,8 +371,8 @@ def test_a_modified_plan_table_is_rejected(tmp_path):
         schema.connect_existing(path)
 
 
-def test_new_databases_are_created_at_v3(rt):
-    assert schema.SCHEMA_VERSION == 3
+def test_new_databases_are_created_at_v4(rt):
+    assert schema.SCHEMA_VERSION == 4
     assert "film_plans" in schema.TABLES
     assert STAGES  # imported policy stages still create every stage
 

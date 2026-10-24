@@ -231,8 +231,13 @@ describe("功耗 tab", () => {
     vi.spyOn(api, "power").mockRejectedValue(new HttpError("/control/power → 404", 404));
     vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
     vi.spyOn(api, "config").mockResolvedValue({ monitors: [] } as unknown as AgentConfigView);
-    wrap(<PowerPage />);
-    expect(await screen.findByText(/本机没有运行功耗估算/)).toBeInTheDocument();
+    const open = vi.fn();
+    wrap(<PowerPage onOpenSettings={open} />);
+    // #299 R12: no config file is named; the switch lives in 设置 → 功耗与主机监控
+    const notice = await screen.findByText(/功耗估算已关闭/);
+    expect(notice.textContent).not.toMatch(/agent\.yaml/);
+    fireEvent.click(screen.getByRole("button", { name: "设置 → 功耗与主机监控" }));
+    expect(open).toHaveBeenCalled();
   });
 });
 

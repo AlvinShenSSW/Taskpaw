@@ -251,6 +251,10 @@ def create_control_app(
     prompt_responder: Optional[Callable[[str, str, bool], bool]] = None,
     workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
     power_view: Optional[Callable[[str], dict]] = None,
+    worker_provider: Optional[Callable[[], Any]] = None,
+    address_changed_from: Optional[str] = None,
+    boot_id: Optional[str] = None,
+    on_restart: Optional[Callable[[], None]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API).
@@ -303,7 +307,51 @@ def create_control_app(
         return result
 
     _register_film_routes(app, "/control/monitors", films_provider, run_films_provider)
-    register_workflow_routes(app, config.workflow, workflow_provider)
+    register_workflow_routes(
+        app,
+        config.workflow,
+        workflow_provider,
+        worker_api_host=config.bind_host,
+        worker_provider=worker_provider,
+    )
+
+    from taskpaw_v3.agent.server.workflow_settings import register_workflow_settings
+
+    register_workflow_settings(  # P2-4 R13: 设置 · 媒体工作流
+        app,
+        config,
+        admin,
+        config_dir=admin.config_dir if admin is not None else None,
+        worker_provider=worker_provider,
+    )
+
+    from taskpaw_v3.agent.server.detect import register_detect_routes
+    from taskpaw_v3.agent.server.first_run import register_setup_routes
+    from taskpaw_v3.agent.server.network_routes import register_network_routes
+    from taskpaw_v3.agent.server.restart_routes import register_restart_routes
+
+    register_network_routes(  # #299 R4–R6: 网络与访问
+        app, admin, address_changed_from=address_changed_from
+    )
+
+    register_detect_routes(  # #299 §5: tools, GPU and directories
+        app,
+        admin,
+        admin.config_dir if admin is not None else None,
+        lambda: admin.desired_workflow() if admin is not None else config.workflow,
+    )
+    register_restart_routes(  # #299 §3/R11: 立即重启
+        app,
+        admin,
+        boot_id=boot_id,
+        on_restart=on_restart,
+        worker_provider=worker_provider,
+    )
+    register_setup_routes(  # #299 R2/§6: the first-run wizard's step
+        app,
+        admin.config_path if admin is not None else None,
+        lambda: admin.desired_workflow() if admin is not None else config.workflow,
+    )
 
     @app.get("/control/status")
     def control_status() -> dict:
@@ -417,6 +465,7 @@ def create_control_app(
     # live-applied. Loopback-only (this whole app binds control_host). Mounted
     # only when an admin is wired (the headless/interactive launcher provides it).
     if admin is not None:
+        from taskpaw_v3.agent.server.admin import ConfigRefused
 
         def _guard(fn, *a):
             try:
@@ -424,7 +473,23 @@ def create_control_app(
                 if isinstance(result, dict) and result.get("outcome") == "busy":
                     return JSONResponse(result, status_code=409)
                 return result
+            except ConfigRefused as e:  # #299 R16: per field, no value echoed
+                return JSONResponse(
+                    {"detail": str(e), "fields": e.fields}, status_code=422
+                )
             except ValueError as e:  # unknown type / dup / invalid config
+                if str(e) == "operation_busy":
+                    return JSONResponse(
+                        {
+                            "detail": "正在保存其他设置，请稍后再试",
+                            "code": "operation_busy",
+                        },
+                        status_code=409,
+                    )
+                if str(e) == "restarting":  # #299 review IR5
+                    from taskpaw_v3.agent.server.restart_routes import RESTARTING
+
+                    return JSONResponse(RESTARTING, status_code=409)
                 raise HTTPException(status_code=400, detail=str(e))
             except KeyError as e:  # not registered in the supervisor
                 raise HTTPException(status_code=404, detail=str(e))

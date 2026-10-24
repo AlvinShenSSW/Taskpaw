@@ -50,10 +50,13 @@ def fetch_agent_workflow(
     *,
     film_id: str | None = None,
     timeout: float = 5.0,
+    done_page: int = 1,
 ) -> tuple[bytes, str]:
     """Return validated JSON or an allowed image; never forward response headers."""
     if resource in ("films", "plans"):
         path = f"/workflow/{resource}"
+        if resource == "films" and done_page != 1:
+            path += f"?done_page={done_page}"
     elif resource in ("film", "poster", "cover"):
         if (
             not film_id

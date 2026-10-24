@@ -689,10 +689,17 @@ def test_the_network_films_snapshot_stays_inside_its_payload_budget(monkeypatch)
     rt = SimpleNamespace(
         operator=object(),
         gpu=None,
+        lookup=None,
+        identity=SimpleNamespace(worker_id="controller"),  # P2-4 board_inputs
         store=SimpleNamespace(
             film_board=lambda *_a, **_k: films,
+            done_paging=lambda *_a: {"total": 0, "size": 20, "page": 1, "pages": 1},
             list_intake_board=lambda _a: (),
             energy_history=lambda _a: (),
+            list_workers=lambda _a: (),
+            list_open_assignments=lambda _a: (),  # P3 #304: can_remove reads both
+            list_routes=lambda _a: (),
+            film_intake_open=lambda *_a: False,
         ),
     )
     monkeypatch.setattr(board, "row_facts", lambda *_a: {})

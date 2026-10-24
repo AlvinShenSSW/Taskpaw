@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -71,7 +71,41 @@ def _validation_summary(e: ValidationError) -> str:
 
 # Shared network-exposure guard (#114) — single source of truth used by the agent
 # UI (here), the agent startup, and the Hub, so the rules can't drift.
-from taskpaw_v3.core.net import guard_bind_exposure  # noqa: E402
+from taskpaw_v3.core.net import (  # noqa: E402
+    bind_is_global,
+    bind_is_loopback,
+    bind_is_wildcard,
+    guard_bind_exposure,
+)
+
+NEEDS_TOKEN = "开启局域网访问需要访问令牌"
+NEEDS_LAN_FOR_WORKERS = "GPU 工作机接入需要局域网访问"
+PICK_ADDRESS = "请选择本机地址"
+
+
+class ConfigRefused(ValueError):
+    """#299 R16: a refused config save, per field, never echoing a value."""
+
+    def __init__(self, fields: dict[str, str]) -> None:
+        super().__init__("设置有误")
+        self.fields = fields
+
+
+def _default_bind_probe(host: str, port: int) -> Optional[str]:
+    from taskpaw_v3.core.lan import probe_bind
+
+    return probe_bind(host, port)
+
+
+def workflow_needs_lan(workflow: Any) -> bool:
+    """A GPU worker, or a 主控 that lets GPU workers in, needs a LAN bind."""
+    return bool(
+        workflow.enabled
+        and (
+            workflow.role == "worker"
+            or (workflow.role == "controller" and workflow.remote_workers)
+        )
+    )
 
 
 @dataclass
@@ -102,13 +136,18 @@ class MonitorAdmin:
         config_path: Optional[Path] = None,
         *,
         operation_timeout: float = 10.0,
+        bind_probe: Optional[Callable[[str, int], Optional[str]]] = None,
     ) -> None:
         self._config = config
+        # #299 R4: a changed host:port is test-bound before it is saved
+        self._bind_probe = bind_probe or _default_bind_probe
         self._sup = supervisor
         self._reg = registry
         self._path = config_path
         self._lock = threading.RLock()  # memory only; no plugin or storage calls
         self._mutation = threading.Lock()
+        # #299 review IR5: set (under _mutation) once a restart is granted
+        self._restarting = False
         self._timeout = operation_timeout
         self._revision = 0
         self._sequence = 0
@@ -135,9 +174,35 @@ class MonitorAdmin:
         if not self._mutation.acquire(timeout=1):
             raise ValueError("operation_busy")
         try:
+            if self._restarting:
+                raise ValueError("restarting")
             yield
         finally:
             self._mutation.release()
+
+    def _try_save_admission(self) -> bool:
+        """Non-blocking `_mutation` for a stop's persist step; refused (and
+        released) once a restart is granted (#299 Codex r3 CX7)."""
+        if not self._mutation.acquire(blocking=False):
+            return False
+        if self._restarting:
+            self._mutation.release()
+            return False
+        return True
+
+    @property
+    def restarting(self) -> bool:
+        return self._restarting
+
+    def begin_restart(self) -> None:
+        """#299 review IR5: called under `_settings_admission` by the granted
+        restart; every later save, monitor change and restart is refused."""
+        self._restarting = True
+        # #299 Codex r3 CX7: reservations taken before the grant are cancelled;
+        # their commit step also rechecks the flag under `_mutation`.
+        with self._lock:
+            for owner in self._owners.values():
+                owner.cancel.set()
 
     def _candidate(
         self,
@@ -161,10 +226,13 @@ class MonitorAdmin:
                 }
             )
 
-    def _save(self, desired: dict) -> None:
+    def _save(self, desired: dict, *, backup: bool = False) -> None:
         candidate = self._candidate(self._config.monitors, desired)
         if self._path is not None:
-            save_yaml(candidate, self._path)
+            if backup:  # P2-4 R15: agent.yaml.bak holds the previous bytes
+                save_yaml(candidate, self._path, backup=True)
+            else:
+                save_yaml(candidate, self._path)
         with self._lock:
             self._config.monitors = copy.deepcopy(candidate.monitors)
             self._revision += 1
@@ -267,6 +335,8 @@ class MonitorAdmin:
         self, iid: str, operation: str, spec: dict, deadline: float
     ) -> _Reservation | None:
         self._refresh_stops()
+        if self._restarting:  # #299 review IR5
+            return None
         with self._lock:
             self._prune_validation()
             if iid in self._owners or iid in self._stop_saves or iid in self._stopping:
@@ -398,6 +468,8 @@ class MonitorAdmin:
             if not self._mutation.acquire(timeout=1):
                 return self._busy(iid, "add")
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     # Validation precedes admission: recheck eligibility against
                     # the latest commit, including a same-name overlapping Add.
@@ -455,6 +527,8 @@ class MonitorAdmin:
             if not self._mutation.acquire(timeout=1):
                 return self._busy(iid, "remove")
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     remaining = [
                         copy.deepcopy(m)
@@ -547,7 +621,7 @@ class MonitorAdmin:
         # No save/log/validator precedes the stop signal above.
         with self._lock:
             save = self._stop_saves.get(iid)
-        if save is None and self._mutation.acquire(blocking=False):
+        if save is None and self._try_save_admission():
             save = _Reservation(
                 iid,
                 "stop",
@@ -730,6 +804,8 @@ class MonitorAdmin:
             else:
                 validate()
             with self._lock:
+                if self._restarting:  # #299 Codex r3 CX7: granted while validating
+                    raise ValueError("restarting")
                 if op.cancel.is_set() or op.revision != self._revision:
                     op.stage = "validation_cancelled"
                     return self._result(
@@ -756,6 +832,8 @@ class MonitorAdmin:
             ):
                 return self._busy(iid, operation)
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     if (
                         op.cancel.is_set()
@@ -887,6 +965,7 @@ class MonitorAdmin:
     # and NOT server_id, the stable identity used for Hub grouping).
     _EDITABLE_CONFIG = (
         "machine",
+        "lan_access",  # #299 R4: 允许局域网访问 (bind_host follows it)
         "bind_host",
         "bind_port",
         "control_host",
@@ -907,6 +986,9 @@ class MonitorAdmin:
         "llm_fallback2_thinking_off",
         "llm_failover",
         "power",
+        # P2-4 R15: 设置 · 媒体工作流; never live (5682, the provider closures,
+        # the file lease and keep-awake are bound at startup)
+        "workflow",
     )
     # Live-safe editable fields: api_token is read per request (token_ok) and the
     # LLM settings are read by monitors at call time through the process-wide
@@ -970,14 +1052,53 @@ class MonitorAdmin:
                     spec["config"] = self._reg.get(type_id).migrate_config(raw)
         return view
 
-    def update_config(self, patch: dict) -> dict[str, Any]:
+    @property
+    def config_path(self) -> Optional[Path]:
+        """agent.yaml itself (#299: the first-run marker sits beside it)."""
+        return self._path
+
+    @property
+    def config_dir(self) -> Optional[Path]:
+        """agent.yaml's folder: the workflow's default data directory's parent."""
+        return self._path.parent if self._path is not None else None
+
+    def desired(self, name: str) -> Any:
+        """One saved (pending) editable setting (#299 网络与访问); the caller
+        must never log or echo a secret it reads here."""
+        with self._lock:
+            return self._desired[name]
+
+    def running(self) -> AgentConfig:
+        """The config this process runs (boot values for non-live fields)."""
+        return self._config
+
+    def desired_workflow(self) -> Any:
+        """The saved (pending) `workflow` section (P2-4 设置 · 媒体工作流)."""
+        with self._lock:
+            return self._desired["workflow"]
+
+    def update_config(
+        self,
+        patch: dict,
+        *,
+        workflow_check: Optional[Callable[[AgentConfig, Any], None]] = None,
+    ) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI
         (#43). Validates the merged result and persists agent.yaml atomically. Only
         api_token is live (read per request); machine/ports/host/host_metrics are
         bound at startup, so they persist for the next restart and the call returns
-        restart_required while they differ from the running config."""
+        restart_required while they differ from the running config.
+
+        P2-4 R15: `workflow` is accepted only with `workflow_check` (the
+        设置 · 媒体工作流 route's validation and busy refusal, run under the
+        admission lock before anything is written); it merges partially like
+        `power` and is saved with a backup."""
         if not isinstance(patch, dict):
             raise ValueError("config patch must be an object")
+        if "workflow" in patch and (
+            workflow_check is None or not isinstance(patch["workflow"], dict)
+        ):
+            raise ValueError("workflow is edited in 设置 · 媒体工作流")
         with self._settings_admission():
             p = dict(patch)
             # The GET masks the token as "***"; an unchanged/blank token in the
@@ -999,6 +1120,24 @@ class MonitorAdmin:
             # PWR-1: a partial `power` object edits only the fields it names.
             if isinstance(p.get("power"), dict):
                 p["power"] = {**self._desired["power"].model_dump(), **p["power"]}
+            # #299 R4: 允许局域网访问 drives bind_host — off means loopback;
+            # an older client sending only bind_host gets the matching switch
+            network = bool(
+                {"lan_access", "bind_host", "bind_port", "control_port"} & set(p)
+            )
+            if "lan_access" in p:
+                if not isinstance(p["lan_access"], bool):
+                    raise ConfigRefused({"lan_access": "格式不正确"})
+                if not p["lan_access"]:
+                    p["bind_host"] = "127.0.0.1"
+            elif isinstance(p.get("bind_host"), str):
+                p["lan_access"] = not bind_is_loopback(p["bind_host"])
+            workflow = "workflow" in p
+            if workflow:
+                p["workflow"] = {
+                    **self._desired["workflow"].model_dump(),
+                    **p["workflow"],
+                }
             # Merge over the DESIRED scalars (so a pending edit isn't lost by a
             # later save) on top of the running config's monitors (always current).
             editables = {
@@ -1017,9 +1156,13 @@ class MonitorAdmin:
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
             # Shared guard (wildcard / public / non-loopback-without-token), the
             # single source used by the agent startup and the Hub too (#114/Kimi).
+            if network:
+                self._check_network(validated)
             guard_bind_exposure(
                 validated.bind_host, validated.api_token, label="network API"
             )
+            if workflow and workflow_check is not None:  # refusals write nothing
+                workflow_check(validated, self._desired["workflow"])
             # A restart is needed if any non-live DESIRED field differs from what
             # the agent is actually RUNNING (the still-at-boot _config) — this
             # stays True across saves until the agent restarts (Codex #43).
@@ -1027,11 +1170,14 @@ class MonitorAdmin:
                 getattr(validated, f) != getattr(self._config, f)
                 for f in self._NON_LIVE_CONFIG
             )
+            if network:
+                self._probe_network(validated)
             # Persist the candidate desired scalars FIRST; commit to self._desired
             # (and the live token) ONLY if the write succeeds, so a failed save
             # leaves config + disk untouched — atomic (Codex #43 r7).
             new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
-            self._save(new_desired)
+            # P2-4 R15 / #299 R16: a workflow or network save keeps agent.yaml.bak
+            self._save(new_desired, backup=workflow or network)
             get_task_log().record(
                 "",
                 "operator.update",
@@ -1059,6 +1205,47 @@ class MonitorAdmin:
             )
             set_power_settings(validated.power)  # the sampler's next tick (PW07)
             return {"ok": True, "restart_required": restart_required}
+
+    @staticmethod
+    def _check_network(validated: AgentConfig) -> None:
+        """#299 R4/R16: per-field refusals before the shared exposure guard."""
+        host, errors = validated.bind_host, {}
+        if validated.lan_access and bind_is_loopback(host):
+            errors["bind_host"] = PICK_ADDRESS
+        elif bind_is_wildcard(host):
+            errors["bind_host"] = "不能监听所有网卡，请选择一个本机地址"
+        elif bind_is_global(host):
+            errors["bind_host"] = "不能使用公网地址"
+        elif not bind_is_loopback(host) and not validated.api_token.strip():
+            errors["api_token"] = NEEDS_TOKEN
+        if bind_is_loopback(host) and workflow_needs_lan(validated.workflow):
+            errors["lan_access"] = NEEDS_LAN_FOR_WORKERS
+        if errors:
+            raise ConfigRefused(errors)
+
+    def _probe_network(self, validated: AgentConfig) -> None:
+        """#299 R4: bind a changed address/port once before saving it — a
+        setting that cannot start would leave no UI to fix it."""
+        from taskpaw_v3.core.lan import NOT_LOCAL
+
+        errors: dict[str, str] = {}
+        running = self._config
+        if (validated.bind_host, validated.bind_port) != (
+            running.bind_host,
+            running.bind_port,
+        ):
+            why = self._bind_probe(validated.bind_host, validated.bind_port)
+            if why:
+                errors["bind_host" if why == NOT_LOCAL else "bind_port"] = why
+        if (validated.control_host, validated.control_port) != (
+            running.control_host,
+            running.control_port,
+        ):
+            why = self._bind_probe(validated.control_host, validated.control_port)
+            if why:
+                errors["control_port"] = why
+        if errors:
+            raise ConfigRefused(errors)
 
     def llm_test(self, candidate: dict, slot: str = "primary") -> dict[str, Any]:
         """Settings "Test connection" (#178) for one provider slot (#190: primary,

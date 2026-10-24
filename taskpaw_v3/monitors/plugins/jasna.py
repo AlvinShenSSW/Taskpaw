@@ -15,7 +15,8 @@ progress) but is built around Jasna's CLI:
     crashed run never leaves a "done" marker (constitution §2 atomic publish).
     #187: a `<stem>_restored.mp4` written by 3.5.1 and earlier still counts as
     restored (never renamed, never restored again; the new name wins when both
-    exist);
+    exist). #303: a `<stem>-无码.mp4` (the media workflow's LTX restore) counts as
+    restored too; this monitor itself always writes `-破解`;
   - **outcome-based degrade**: with capture off the plugin cannot read Jasna's
     output, so a failed unet-4x launch is simply retried without unet-4x; if that
     succeeds, unet-4x is disabled for THAT TIER for the rest of the run and one
@@ -282,6 +283,10 @@ _STAGING_SUFFIX = "-破解.tmp.mp4"
 # (never renamed); a legacy staging file is only ever swept / cleared.
 _LEGACY_FINAL_SUFFIX = "_restored.mp4"
 _LEGACY_STAGING_SUFFIX = "_restored.tmp.mp4"
+# #303: the media workflow (always LTX) names its restore `-无码`; this monitor never
+# writes that name, but a file carrying it still counts as restored.
+_LTX_FINAL_SUFFIX = "-无码.mp4"
+_LTX_STAGING_SUFFIX = "-无码.tmp.mp4"
 
 # Flags the plugin owns: letting them through `jasna_extra_args` would fight the
 # dedicated fields (argparse last-wins) and, for --output, break the staging
@@ -381,7 +386,7 @@ _ZH_EXT = ".zh.srt"
 # every generation's leftovers — only once they are old enough (#179 M12): an
 # `avsubs` task publishing into the same folder uses the same pattern. Both the
 # new and the legacy subtitle names (#187).
-_SUBS_TMP_GLOBS = ("*-破解*.srt.*.tmp", "*_restored*.srt.*.tmp")
+_SUBS_TMP_GLOBS = ("*-破解*.srt.*.tmp", "*-无码*.srt.*.tmp", "*_restored*.srt.*.tmp")
 _SUBS_TMP_MIN_AGE = 600.0  # seconds (mtime)
 _SUBS_DISABLE_AFTER = 3
 _ASR_MAX_ATTEMPTS = 2
@@ -391,10 +396,12 @@ Phase = Literal["restore", "subs", "translate"]
 
 
 # ── pure helpers (unit-tested without a GPU) ──────────────────────────────
-def output_path_for(output_folder: str, video: Path) -> Path:
+def output_path_for(output_folder: str, video: Path, ltx: bool = False) -> Path:
     """The FINAL (published) name a restore of `video` writes:
-    `<out>/<stem>-破解.mp4`."""
-    return Path(output_folder) / f"{video.stem}{_FINAL_SUFFIX}"
+    `<out>/<stem>-破解.mp4`; `ltx` (#303, the media workflow only) gives
+    `<stem>-无码.mp4`. The monitor always uses the default."""
+    suffix = _LTX_FINAL_SUFFIX if ltx else _FINAL_SUFFIX
+    return Path(output_folder) / f"{video.stem}{suffix}"
 
 
 def legacy_output_path_for(output_folder: str, video: Path) -> Path:
@@ -404,20 +411,27 @@ def legacy_output_path_for(output_folder: str, video: Path) -> Path:
 
 def restored_output_for(output_folder: str, video: Path) -> Optional[Path]:
     """The restored file that exists for `video` — the skip/done marker (#187):
-    the new name, else the legacy one, else None (a staging file never counts;
-    an unreadable entry counts as missing)."""
-    for final in (
-        output_path_for(output_folder, video),
-        legacy_output_path_for(output_folder, video),
-    ):
+    the new name (`-破解`, then `-无码`), else the legacy one, else None (a staging
+    file never counts; an unreadable entry counts as missing)."""
+    for final in _restored_candidates(output_folder, video):
         if exists_quietly(final):
             return final
     return None
 
 
-def staging_path_for(output_folder: str, video: Path) -> Path:
+def _restored_candidates(output_folder: str, video: Path) -> tuple[Path, Path, Path]:
+    """Every final name a restore of `video` may carry (#187, #303)."""
+    return (
+        output_path_for(output_folder, video),
+        output_path_for(output_folder, video, ltx=True),
+        legacy_output_path_for(output_folder, video),
+    )
+
+
+def staging_path_for(output_folder: str, video: Path, ltx: bool = False) -> Path:
     """The staging name Jasna writes to; renamed to the final name on exit 0."""
-    return Path(output_folder) / f"{video.stem}{_STAGING_SUFFIX}"
+    suffix = _LTX_STAGING_SUFFIX if ltx else _STAGING_SUFFIX
+    return Path(output_folder) / f"{video.stem}{suffix}"
 
 
 def legacy_staging_path_for(output_folder: str, video: Path) -> Path:
@@ -716,10 +730,7 @@ def plan_subs(
     listed = {entry_key(n): n for n in names}
 
     def restored(video: Path) -> Optional[Path]:
-        for final in (
-            output_path_for(output_folder, video),
-            legacy_output_path_for(output_folder, video),
-        ):
+        for final in _restored_candidates(output_folder, video):
             actual = listed.get(entry_key(final.name))
             if actual is not None:
                 return final.with_name(actual)

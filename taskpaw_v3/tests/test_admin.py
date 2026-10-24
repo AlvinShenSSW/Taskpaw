@@ -509,30 +509,42 @@ def test_update_config_rejects_invalid(tmp_path):
 
 def test_update_config_blocks_unsafe_network_exposure(tmp_path):
     # No public/WAN exposure: reject a wildcard bind from the UI, and require a
-    # token for a non-loopback bind (Codex #43 P1).
+    # token for a non-loopback bind (Codex #43 P1). #299 R16: each refusal is
+    # per field (Chinese, no value echoed); the shared guard stays the backstop.
+    from taskpaw_v3.agent.server.admin import ConfigRefused
+
     path = tmp_path / "a.yaml"
     cfg = _agent_config(api_token="")  # no token
-    admin = MonitorAdmin(cfg, None, _registry(), path)
-    with pytest.raises(ValueError, match="all interfaces"):
-        admin.update_config({"bind_host": "0.0.0.0"})  # wildcard refused
-    with pytest.raises(ValueError, match="requires an api_token"):
-        admin.update_config({"bind_host": "192.168.1.50"})  # LAN bind needs a token
+    admin = MonitorAdmin(cfg, None, _registry(), path, bind_probe=lambda h, p: None)
+
+    def refused(patch) -> dict:
+        with pytest.raises(ConfigRefused) as caught:
+            admin.update_config(patch)
+        return caught.value.fields
+
+    assert refused({"bind_host": "0.0.0.0"}) == {
+        "bind_host": "不能监听所有网卡，请选择一个本机地址"
+    }
+    assert refused({"bind_host": "192.168.1.50"}) == {
+        "api_token": "开启局域网访问需要访问令牌"
+    }
     assert cfg.bind_host == "127.0.0.1" and not path.exists()  # nothing persisted
     # Alternate spellings of the unspecified address are also refused — even WITH
     # a token (all-interfaces is never allowed from the UI) (Codex #43 r3).
     for wild in ("::", "0:0:0:0:0:0:0:0", "[::]"):
-        with pytest.raises(ValueError, match="all interfaces"):
-            admin.update_config({"bind_host": wild, "api_token": "tok"})
+        assert "bind_host" in refused({"bind_host": wild, "api_token": "tok"})
     # A public/WAN address is refused even WITH a token — LAN + Bearer only, in
     # lockstep with the Hub guard (#114).
     for pub in ("8.8.8.8", "[2001:4860:4860::8888]"):
-        with pytest.raises(ValueError, match="public/WAN"):
-            admin.update_config({"bind_host": pub, "api_token": "tok"})
+        assert refused({"bind_host": pub, "api_token": "tok"}) == {
+            "bind_host": "不能使用公网地址"
+        }
     # LAN bind WITH a token is allowed (Hub-reachable + authenticated); it persists
     # for the next boot while the running bind stays at loopback until restart.
     res = admin.update_config({"bind_host": "192.168.1.50", "api_token": "tok"})
     assert res["ok"] and cfg.bind_host == "127.0.0.1"
-    assert load_yaml(AgentConfig, path).bind_host == "192.168.1.50"
+    saved = load_yaml(AgentConfig, path)
+    assert saved.bind_host == "192.168.1.50" and saved.lan_access
 
 
 # ── enabled filtering at build time ────────────────────────────────────────
@@ -1145,11 +1157,13 @@ def test_live_and_non_live_config_partition():
     }
     assert MonitorAdmin._NON_LIVE_CONFIG == (
         "machine",
+        "lan_access",  # #299 R4: 允许局域网访问 moves the bind, after a restart
         "bind_host",
         "bind_port",
         "control_host",
         "control_port",
         "host_metrics",
+        "workflow",  # P2-4 R15: 设置 · 媒体工作流, applied after a restart
     )
 
 
@@ -3160,3 +3174,53 @@ def test_i216_r1_folder_update_timeout_never_resumes_retired_owner(tmp_path):
     finally:
         edge_release.set()
         sup.stop(1)
+
+
+def test_a_restart_granted_while_an_update_validates_refuses_the_commit(tmp_path):
+    """#299 Codex r3 CX7: the reservation was taken before the restart; the
+    commit rechecks `_restarting` under the mutation lock, so nothing is
+    persisted or applied after the 202."""
+    import threading
+
+    path = tmp_path / "agent.yaml"
+    cfg = _agent_config(
+        monitors=[{"type_id": "fake", "config": {"name": "m1", "poll_interval": 10}}]
+    )
+    from taskpaw_v3.core.config import save_yaml
+
+    save_yaml(cfg, path)
+    before = path.read_bytes()
+    sup = build_supervisor(_registry(), cfg.monitors, EventQueue("m"), "m")
+    adm = MonitorAdmin(cfg, sup, _registry(), path)
+    entered, release = threading.Event(), threading.Event()
+    original = adm._validated_config
+
+    def gated(spec):
+        entered.set()
+        assert release.wait(5)
+        return original(spec)
+
+    adm._validated_config = gated
+    outcome = []
+
+    def run():
+        try:
+            outcome.append(adm.update("m1", {"poll_interval": 20}))
+        except ValueError as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        with adm._settings_admission():
+            adm.begin_restart()
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert isinstance(outcome[0], ValueError) and str(outcome[0]) == "restarting"
+    assert path.read_bytes() == before
+    assert adm._config.monitors[0]["config"]["poll_interval"] == 10
+    assert adm._owners == {}
+    sup.stop(1)

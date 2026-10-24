@@ -590,8 +590,12 @@ def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(
         local_host,
         "LocalRuntime",
-        lambda path, execs: LocalRuntime(
-            path, execs, gpu=lambda: GPU_8GB, machine=lambda: "synthetic"
+        lambda path, execs, *, output_dir=None: LocalRuntime(
+            path,
+            execs,
+            gpu=lambda: GPU_8GB,
+            machine=lambda: "synthetic",
+            output_dir=output_dir,
         ),
     )
     host = LocalWorkflowHost(

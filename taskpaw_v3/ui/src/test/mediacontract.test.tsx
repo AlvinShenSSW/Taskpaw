@@ -322,7 +322,7 @@ describe("contract: 待确认 and 图文确认", () => {
     expect(card.getByText("ABC-123 · Actor")).toBeInTheDocument();
     await waitFor(() => expect(card.getByText("NAS / Actor")).toBeInTheDocument());
     expect(card.getByText("待确认")).toBeInTheDocument();
-    expect(await card.findByText("最终成品包 7 个文件 · Miko 已完成")).toBeInTheDocument();
+    expect(await card.findByText("最终成品包 6 个文件 · Miko 已完成")).toBeInTheDocument();
   });
 
   it("pre-selects the one candidate, shows the backend's target and confirms", async () => {
@@ -333,7 +333,7 @@ describe("contract: 待确认 and 图文确认", () => {
     await waitFor(() => expect(within(dialog).getByText("Actor", { selector: "strong" })).toBeInTheDocument());
     expect(await within(dialog).findByText(C.target.selected.target_path as string)).toBeInTheDocument();
     expect(within(dialog).getByText("\\\\nas-a\\actors\\Actor\\ABC-123")).toBeInTheDocument();
-    expect(within(dialog).getByText("最终文件包 · 7 个文件")).toBeInTheDocument();
+    expect(within(dialog).getByText("最终文件包 · 6 个文件")).toBeInTheDocument();
     const ok = within(dialog).getByRole("button", { name: "确认入库" });
     await waitFor(() => expect(ok).toBeEnabled());
     fireEvent.click(ok);

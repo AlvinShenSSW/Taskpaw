@@ -79,9 +79,19 @@ def _guard_bind_exposure(config: HubConfig) -> None:
 
 
 class HubService:
-    def __init__(self, config: HubConfig, store: HubStore) -> None:
+    def __init__(
+        self,
+        config: HubConfig,
+        store: HubStore,
+        *,
+        yaml_config: HubConfig | None = None,
+    ) -> None:
+        from taskpaw_v3.hub.server.settings import live_openclaw_url
+
         self.config = config
         self.store = store
+        # #299 review CX4: an invalid live override falls back to hub.yaml
+        yaml_url = (yaml_config or config).openclaw_url
         self._event_cursor_lease: FileLease | None = None
         self.poller = Poller(
             store=store,
@@ -97,6 +107,7 @@ class HubService:
             get_polling_token=lambda: store.get_config(
                 "polling_token", config.polling_token
             ),
+            get_url=lambda: live_openclaw_url(store, yaml_url),
             # Seed a restarted Hub's status.md as ONLINE only for agents whose last
             # success is within ~2 polls; older successes render OFFLINE (#38).
             seed_fresh_seconds=max(2 * config.poll_interval, 60),
@@ -170,7 +181,11 @@ class HubService:
 
             from taskpaw_v3.hub.server.status_md import write_status_md
 
-            path = Path(self.config.data_dir).expanduser() / "status.md"
+            path = (
+                Path(self.config.status_md_path).expanduser()
+                if self.config.status_md_path
+                else Path(self.config.data_dir).expanduser() / "status.md"
+            )
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # From the poller's in-memory snapshot (current reachability + last
             # good status), like V2 — status_log holds only successful polls.
@@ -299,6 +314,7 @@ def _register_read_routes(
         sid: int,
         resource: WorkflowResource,
         film_id: str | None = None,
+        done_page: int = 1,
     ) -> Response:
         if not authorize(request):
             return _unauthorized()
@@ -316,6 +332,7 @@ def _register_read_routes(
                 service.poller._auth_headers(),
                 film_id=film_id,
                 timeout=service.poller.http_timeout,
+                done_page=done_page,
             )
             return Response(
                 body,
@@ -326,8 +343,10 @@ def _register_read_routes(
             return _workflow_error(exc.code)
 
     @app.get("/servers/{sid}/workflow/films")
-    def workflow_films(request: Request, sid: int) -> Response:
-        return _workflow(request, sid, "films")
+    def workflow_films(
+        request: Request, sid: int, done_page: int = Query(default=1, ge=1)
+    ) -> Response:
+        return _workflow(request, sid, "films", done_page=done_page)
 
     @app.get("/servers/{sid}/workflow/plans")
     def workflow_plans(request: Request, sid: int) -> Response:
@@ -411,13 +430,15 @@ def _register_read_routes(
         }
 
 
-def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
+def create_hub_app(
+    config: HubConfig, store: HubStore, *, yaml_config: HubConfig | None = None
+) -> tuple[FastAPI, HubService]:
     """Network read API, retaining its independent Bearer and polling contract."""
     from taskpaw_v3.core.cors import add_ui_cors
 
     app = FastAPI(title="TaskPaw Hub", docs_url=None, redoc_url=None)
     add_ui_cors(app)
-    service = HubService(config, store)
+    service = HubService(config, store, yaml_config=yaml_config)
 
     def authorize(request: Request) -> bool:
         return token_ok(config.api_token, request.headers.get("Authorization"))
@@ -433,6 +454,9 @@ def create_hub_control_app(
     *,
     control_token: str,
     control_active: Callable[[], bool],
+    yaml_config: HubConfig | None = None,
+    boot_id: str | None = None,
+    on_restart: Callable[[], None] | None = None,
 ) -> FastAPI:
     """Local dashboard API, sharing the network app's single service and store."""
     from taskpaw_v3.core.control import add_control_guard
@@ -560,6 +584,34 @@ def create_hub_control_app(
         log.info("hub: removed agent id=%s (#124)", sid)
         return {"ok": True}
 
+    from taskpaw_v3.hub.server.settings import (
+        BUSY_SAVE,
+        RESTARTING,
+        HubSettings,
+        register_hub_settings,
+    )
+
+    # #299 R14/R15: 设置 (overrides in the store; hub.yaml is never rewritten)
+    settings = HubSettings(yaml_config or config, config, store)
+    app.state.hub_settings = settings
+
+    @app.put("/config/controller")
+    def replace_controller(request: Request, body: dict):
+        # #299 Codex r4: 更换主控 selects or creates the server row for the
+        # address and names it the controller — the old row keeps its cursor/acks
+        ip = _valid_ip(body.get("ip"))
+        port = _valid_port(body.get("port", 5680))
+        try:
+            return settings.bind_controller(ip, port)
+        except ValueError as exc:  # operation_busy / restarting
+            if str(exc) == "restarting":
+                return JSONResponse(status_code=409, content=RESTARTING)
+            return JSONResponse(
+                status_code=409, content={"detail": BUSY_SAVE, "code": "operation_busy"}
+            )
+
+    register_hub_settings(app, settings, boot_id=boot_id, on_restart=on_restart)
+
     @app.patch("/config")
     def update_config(request: Request, body: dict):
         if "polling_token" in body:
@@ -596,9 +648,11 @@ def run_hub(
     block: bool = True,
     *,
     config_path: Path | None = None,
+    yaml_config: HubConfig | None = None,
 ) -> GracefulShutdown:
     import uvicorn
 
+    from taskpaw_v3.core import restart
     from taskpaw_v3.core.control import (
         bootstrap_control,
         revoke_control,
@@ -703,7 +757,7 @@ def run_hub(
                 "set an api_token to require a Bearer token or to bind a LAN address.",
                 config.bind_host,
             )
-        app, service = create_hub_app(config, store)
+        app, service = create_hub_app(config, store, yaml_config=yaml_config)
         service._event_cursor_lease = lease
         control = create_hub_control_app(
             config,
@@ -711,6 +765,10 @@ def run_hub(
             service,
             control_token=session.token,
             control_active=session.is_active,
+            yaml_config=yaml_config,
+            boot_id=session.boot_id,
+            # #299 §3: 立即重启 — a graceful stop, then exit 75 for the shell
+            on_restart=lambda: restart.request(shutdown.shutdown),
         )
         servers.extend(
             uvicorn.Server(uvicorn.Config(surface, log_level="warning"))

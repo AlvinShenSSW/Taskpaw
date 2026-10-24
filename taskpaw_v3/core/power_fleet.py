@@ -29,6 +29,20 @@ is an estimate (估算).
 - A peer without power support answers `/status` without `power` (or 404 on
   the history): 「无功耗数据（需升级 TaskPaw）」. A Mac running only the Hub
   has no agent and so no row in P0 (PW08).
+- **P2-4 (#295) R11.** The controller's enrolled workers join as automatic
+  peers (`merge_peers`, `source: "workflow"`); a configured peer at the same
+  address wins. Still GET `/status` and `/power/history` only.
+- **P2-4 R8 (C4).** Every `/status` read is also 判定已停止's status channel:
+  unreachable, timeout or `workflow_worker.busy == false` keep a peer quiet;
+  any other answer (401, 404, an invalid body, no `busy`) means the machine
+  is up — §9 CX19: so does any request whose status line and headers
+  arrived, even when its body then stalled or broke (`PeerError.answered`).
+  `quiet(address)` says how long it has been quiet without a break
+  (a gap of more than `STALE_SECONDS` between reads restarts it), and whether
+  the peer ever answered since this process started (§9 IR2: a channel that
+  never connected may be a wrong address, not a machine that is off).
+- **§9 IR10.** A peer source that raises (the workflow store busy) keeps the
+  last good list, so configured peers and their quiet time survive it.
 """
 
 from __future__ import annotations
@@ -45,7 +59,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.core.net import bind_is_global, bind_is_wildcard
@@ -109,13 +124,64 @@ def peer_url(address: str, path: str) -> str:
     return f"http://{shown}:{port}{path}"
 
 
+# ── automatic peers (P2-4 R11) ──────────────────────────────────────────────
+@dataclass(frozen=True)
+class AutoPeer:
+    """A peer of the 功耗 tab: configured (`config`) or a workflow worker."""
+
+    name: str
+    address: str
+    source: str = "workflow"
+
+
+def _key(address: str) -> Optional[tuple[str, int]]:
+    try:
+        host, port = parse_address(address)
+    except ValueError:
+        return None
+    return host.lower(), port
+
+
+def merge_peers(configured: Iterable[Any], workflow: Iterable[Any]) -> list[AutoPeer]:
+    """The configured peers, then each workflow worker at an address no
+    earlier peer has (a configured peer wins; deduplicated by host:port)."""
+    merged = [AutoPeer(str(p.name), str(p.address), "config") for p in configured]
+    seen = {_key(p.address) for p in merged}
+    for peer in workflow:
+        key = _key(str(peer.address))
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        merged.append(AutoPeer(str(peer.name), str(peer.address), "workflow"))
+    return merged
+
+
+@dataclass(frozen=True)
+class StatusQuiet:
+    """判定已停止's status channel for one address: how long `/status` has
+    been dead or idle without a break (None: it answered as up at the last
+    read), how old the last read is, when up its answer's code, and whether
+    any read since this process started got an HTTP answer (§9 IR2).
+    `outcome`: how the last read ended, for the 判定已停止 dialog — `timeout`,
+    `unreachable`, `idle` (busy false) or the up answer's code."""
+
+    quiet_s: Optional[float]
+    checked_s: Optional[float]
+    state: Optional[str] = None
+    answered: bool = False
+    outcome: Optional[str] = None
+
+
 # ── one bounded GET ─────────────────────────────────────────────────────────
 class PeerError(Exception):
-    """A peer request failed; `code` names why, never the peer's own text."""
+    """A peer request failed; `code` names why, never the peer's own text.
+    `answered` (P2-4 §9 CX19): an HTTP response (status line and headers)
+    came back before it failed — the machine is up, whatever its body did."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, answered: bool = False):
         super().__init__(code)
         self.code = code
+        self.answered = answered
 
 
 _CLOCK_SLACK = time.get_clock_info("monotonic").resolution
@@ -287,7 +353,7 @@ def fetch_json(
         try:
             return _get_json(target, sent, attempt, opener)
         except PeerError as exc:
-            if exc.code not in ("unreachable", "timeout"):
+            if exc.answered or exc.code not in ("unreachable", "timeout"):
                 raise
             last = exc
         if time.monotonic() >= deadline:
@@ -301,7 +367,10 @@ def _get_json(
     deadline: float,
     opener: Optional[urllib.request.OpenerDirector],
 ) -> Any:
-    """One GET at one address, inside this attempt's `deadline` (never past the request's)."""
+    """One GET at one address, inside this attempt's `deadline` (never past the request's).
+
+    §9 CX19: every failure after the status line and headers arrived (a
+    non-2xx, a stalled, truncated or invalid body) is `answered`."""
     left = max(0.05, deadline - time.monotonic())
     request = urllib.request.Request(url, headers=headers, method="GET")
     watch = _Watch()
@@ -314,31 +383,41 @@ def _get_json(
         except urllib.error.HTTPError as exc:
             exc.close()
             if watch.expired(exc, deadline):
-                raise PeerError("timeout") from None
+                raise PeerError("timeout", answered=True) from None
             if exc.code in (401, 403):
-                raise PeerError("unauthorized") from None
+                raise PeerError("unauthorized", answered=True) from None
             if exc.code == 404:
-                raise PeerError("not_found") from None
-            raise PeerError("http_error") from None
+                raise PeerError("not_found", answered=True) from None
+            raise PeerError("http_error", answered=True) from None
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             raise PeerError(
                 "timeout" if watch.expired(exc, deadline) else "unreachable"
             ) from None
+        if watch.cut:
+            # §9 CX26: the watch shut the socket down before the response
+            # was handed back, so the header block was cut: http.client
+            # reads end-of-file there as the end of the headers (Linux),
+            # where Windows raises. Not an answer, on either platform.
+            resp.close()
+            raise PeerError("timeout")
         try:
             with resp:
                 body = _read_capped(resp, deadline)
+        except PeerError as exc:  # the deadline or the cap, mid-body
+            raise PeerError(exc.code, answered=True) from None
         except (http.client.HTTPException, OSError, ValueError) as exc:
             raise PeerError(
-                "timeout" if watch.expired(exc, deadline) else "unreachable"
+                "timeout" if watch.expired(exc, deadline) else "unreachable",
+                answered=True,
             ) from None
         if watch.cut:  # the socket was cut: what was read is not the answer
-            raise PeerError("timeout")
+            raise PeerError("timeout", answered=True)
     finally:
         timer.cancel()
     try:
         return json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise PeerError("invalid") from None
+        raise PeerError("invalid", answered=True) from None
 
 
 # ── the cache ───────────────────────────────────────────────────────────────
@@ -512,6 +591,8 @@ class PowerFleet:
         self._statuses = ThreadPoolExecutor(STATUS_WORKERS, "power-peer")
         self._histories = ThreadPoolExecutor(HISTORY_WORKERS, "power-peer-history")
         self._pending: dict[tuple[Any, ...], Future[Any]] = {}  # in flight, by job
+        self._sources: dict[tuple[str, str], str] = {}  # config | workflow (R11)
+        self._last_peers: list[tuple[str, str]] = []  # §9 IR10: the last good list
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def start(self) -> None:
@@ -552,10 +633,69 @@ class PowerFleet:
     def _configured(self) -> list[tuple[str, str]]:
         try:
             peers = list(self._peers() or ())
-        except Exception:
+        except Exception:  # §9 IR10: keep the last good list and its cache
             log.exception("power peers unavailable")
-            return []
-        return [(str(p.name), str(p.address)) for p in peers]
+            with self._lock:
+                return list(self._last_peers)
+        found = [(str(p.name), str(p.address)) for p in peers]
+        with self._lock:
+            self._sources = {
+                key: str(getattr(p, "source", "config")) for key, p in zip(found, peers)
+            }
+            self._last_peers = list(found)
+        return found
+
+    # ── the status channel (P2-4 R8, C4) ────────────────────────────────
+    def _status_seen(
+        self,
+        peer: tuple[str, str],
+        state: Optional[str],
+        *,
+        answered: bool,
+        outcome: Optional[str] = None,
+    ) -> None:
+        """One `/status` read: `state` None is quiet (dead or idle), else
+        the code of an answer that shows the machine up; `answered`: an HTTP
+        answer came back (anything but unreachable/timeout); `outcome`: how a
+        quiet read ended (`timeout`, `unreachable`, `idle`)."""
+        now = self._clock()
+        with self._lock:
+            entry = self._entry(peer)
+            if answered:
+                entry["answered"] = True
+            last = entry.get("status_mono")
+            if state is not None:
+                entry["quiet_since"] = None
+            elif (
+                entry.get("quiet_since") is None
+                or last is None
+                or now - last > STALE_SECONDS
+            ):
+                entry["quiet_since"] = now
+            entry["status_mono"] = now
+            entry["status_state"] = state
+            entry["status_outcome"] = state if state is not None else outcome
+
+    def quiet(self, address: str) -> Optional[StatusQuiet]:
+        """The status channel of the peer at `address` (host[:port]); None
+        when no listed peer is there or it was never read."""
+        key = _key(address)
+        if key is None:
+            return None
+        now = self._clock()
+        with self._lock:
+            for (_name, peer_address), entry in self._cache.items():
+                if _key(peer_address) != key or entry.get("status_mono") is None:
+                    continue
+                since = entry.get("quiet_since")
+                return StatusQuiet(
+                    quiet_s=None if since is None else max(0.0, now - since),
+                    checked_s=max(0.0, now - entry["status_mono"]),
+                    state=entry.get("status_state"),
+                    answered=bool(entry.get("answered")),
+                    outcome=entry.get("status_outcome"),
+                )
+        return None
 
     def _submit(
         self,
@@ -568,8 +708,20 @@ class PowerFleet:
         with self._lock:
             if self._stop.is_set() or job in self._pending:
                 return None
+
+            def run() -> Any:
+                try:
+                    return fn(*args)
+                finally:
+                    # the slot frees before the future resolves, so a caller
+                    # that waited on it (`refresh_once`) can submit the same
+                    # job at once; a done-callback runs after the waiter wakes
+                    with self._lock:
+                        if self._pending.get(job) is not None:
+                            del self._pending[job]
+
             try:
-                future = pool.submit(fn, *args)
+                future = pool.submit(run)
             except RuntimeError:  # shut down meanwhile
                 return None
             self._pending[job] = future
@@ -651,6 +803,15 @@ class PowerFleet:
         try:
             status = self._fetch(url, token)
         except PeerError as exc:
+            # C4: only a dead channel is quiet; any HTTP answer is a live
+            # machine — §9 CX19: a response whose body then failed included
+            dead = not exc.answered and exc.code in ("unreachable", "timeout")
+            self._status_seen(
+                peer,
+                None if dead else exc.code,
+                answered=not dead,
+                outcome=exc.code,
+            )
             # the last live figure is not shown as current; the histories
             # already read stay (they are history)
             self._update(
@@ -662,6 +823,7 @@ class PowerFleet:
             )
             return []
         if not isinstance(status, dict):
+            self._status_seen(peer, "invalid", answered=True)
             self._update(
                 peer,
                 state="invalid",
@@ -670,6 +832,14 @@ class PowerFleet:
                 power=None,
             )
             return []
+        worker = status.get("workflow_worker")
+        busy = worker.get("busy") if isinstance(worker, dict) else None
+        self._status_seen(
+            peer,
+            None if busy is False else "busy" if busy is True else "no_busy",
+            answered=True,
+            outcome="idle",
+        )
         seen = dict(
             machine=_text(status.get("machine")),
             server_id=_text(status.get("server_id")),
@@ -797,6 +967,8 @@ class PowerFleet:
                 {
                     "name": name,
                     "address": address,
+                    # P2-4 R11: 工作机 · 自动加入 (`workflow`) or configured
+                    "source": self._sources.get(key, "config"),
                     "state": state,
                     "duplicate_of": first,
                     "error": entry.get("error"),

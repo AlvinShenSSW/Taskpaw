@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from taskpaw_v3.core.config import WorkflowSettings
@@ -29,7 +29,8 @@ def register_workflow_network(
                 detail="unauthorized",
                 headers={"WWW-Authenticate": 'Bearer realm="TaskPaw"'},
             )
-        if not settings.enabled:
+        # P2-2 S-5: a worker is never the Hub's workflow source
+        if not settings.enabled or settings.role == "worker":
             raise HTTPException(status_code=404, detail="未启用媒体处理")
 
     def bounded_json(value: dict) -> JSONResponse:
@@ -54,8 +55,8 @@ def register_workflow_network(
         return Response(content, media_type=board.image_type(path))
 
     @app.get("/workflow/films", dependencies=[Depends(guard)])
-    def films() -> JSONResponse:
-        return bounded_json(reads.films(settings, provider))
+    def films(done_page: int = Query(default=1, ge=1)) -> JSONResponse:
+        return bounded_json(reads.films(settings, provider, done_page))
 
     @app.get("/workflow/plans", dependencies=[Depends(guard)])
     def plans() -> JSONResponse:

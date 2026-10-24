@@ -795,7 +795,9 @@ class IntakeCommands(ApprovalCommands):
                     "needs_attention"
                     if self._intake_archived(command.package_id)
                     else "missing"
-                    if command.kind == "missing"
+                    # A dirty hint cannot prove that a missing package returned.
+                    # Keep that fact until discovery can regroup a deleted film.
+                    if command.kind == "missing" or package["state"] == "missing"
                     else "receiving"
                 )
             )
@@ -1402,6 +1404,29 @@ class IntakeCommands(ApprovalCommands):
                 )
             return im.IntakeObservation.model_validate_json(package["observation_json"])
 
+    def removed_intake_films(self, auth: AuthProof, package_id: str) -> frozenset[str]:
+        """Films of the package the operator deleted (#304): discovery treats
+        their ids as absent, so a re-dropped package becomes a new film."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            package = self._one(
+                "SELECT * FROM intake_packages WHERE package_id=?", (package_id,)
+            )
+            if principal["role"] != "operator":
+                self._intake_access(
+                    principal, self._root(package["root_id"]), write=True
+                )
+            return frozenset(
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT f.film_id FROM intake_films i "
+                    "JOIN films f ON f.film_id=i.film_id "
+                    "WHERE i.package_id=? "
+                    "AND json_extract(f.body_json,'$.removed_at') IS NOT NULL",
+                    (package_id,),
+                )
+            )
+
     def get_intake_work(
         self,
         auth: AuthProof,
@@ -1556,7 +1581,11 @@ class IntakeCommands(ApprovalCommands):
                 "SELECT p.package_id,p.relative_path,p.state,p.reason,p.observation_json "
                 "FROM intake_packages p WHERE p.current=1 "
                 "AND p.state NOT IN ('missing','operational_ready') "
-                "AND NOT EXISTS (SELECT 1 FROM intake_films i WHERE i.package_id=p.package_id) "
+                # a removed film no longer holds its package off the board (#304 IR3)
+                "AND NOT EXISTS (SELECT 1 FROM intake_films i "
+                "LEFT JOIN films f ON f.film_id=i.film_id "
+                "WHERE i.package_id=p.package_id "
+                "AND json_extract(f.body_json,'$.removed_at') IS NULL) "
                 "ORDER BY p.path_key,p.package_id"
             ).fetchall()
         packages = []

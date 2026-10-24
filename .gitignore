@@ -32,6 +32,9 @@ dist/
 config.json
 agent.yaml
 hub.yaml
+# save_yaml's backup and temp files hold the same secrets (§9 CX23)
+*.yaml.bak
+*.yaml.tmp
 *.control.json
 .*.control.json.*.tmp
 

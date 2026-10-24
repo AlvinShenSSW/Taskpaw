@@ -11,11 +11,14 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .local_gpu import max_resolution
+from .local_gpu import LocalGpu, max_resolution
 from .models import InputManifest, PendingComputeJob, RestoreTiming, ToolVersions
 from .owned_process import OwnedJob
+
+if TYPE_CHECKING:
+    from .stage_results import StageResult
 
 ErrorClass = Literal["transient", "permission", "needs_attention", "cancelled"]
 ComputeStage = Literal["restore", "asr", "translate"]
@@ -23,6 +26,11 @@ ComputeStage = Literal["restore", "asr", "translate"]
 # The error class survives restarts in the attempt's evidence kind (D18).
 SUCCEEDED_KIND = "exec_succeeded"
 INTERRUPTED_KIND = "exec_interrupted"
+# The success notes of restore and ASR (their evidence `note`). The store reads
+# the per-volume decisions back so that only attempts whose tool ran on every
+# volume become GPU rate samples (P2-1 CX3).
+RESTORE_DONE = "修复完成：{applied} 卷修复，{reused} 卷复用"
+ASR_DONE = "字幕来源：{summary}"
 
 
 def failed_kind(error_class: ErrorClass) -> str:
@@ -86,6 +94,25 @@ class JobContext:
     progress: Progress = field(default=_no_progress)
 
 
+class ExecRuntime(Protocol):
+    """What an executor and `exec_common` may use of the machine it runs on
+    (P2-3 §4): the controller's `LocalRuntime` or a worker's `WorkerRuntime`."""
+
+    @property
+    def work_dir(self) -> Path:
+        """The root of the work copies and of every attempt's work folder."""
+        ...
+
+    @property
+    def gpu(self) -> LocalGpu | None: ...
+
+    def stage_result(self, film_id: str, stage: str) -> StageResult | None:
+        """The verified ledger of the film's current `stage`; None when the
+        film has no such stage. `StageResultError` when it cannot be vouched
+        for (not succeeded, missing, altered)."""
+        ...
+
+
 class StageExecutor(Protocol):
     stage: ComputeStage
     uses_gpu: bool  # default answer of needs_gpu(); executors may decide per film
@@ -97,6 +124,17 @@ class StageExecutor(Protocol):
     def max_resolution(self, vram_mib: int) -> tuple[int, int]: ...
 
     def run(self, context: JobContext) -> ExecOutcome: ...
+
+
+def needs_gpu(executor: StageExecutor | None, manifest: InputManifest) -> bool:
+    """Whether the stage runs a GPU tool for this film: the executor's own
+    `needs_gpu(manifest)` when it has one, else its `uses_gpu`; no executor
+    assumes the GPU. The one rule of the controller's dispatcher and of the
+    scheduler's pass (P2-1 IR3)."""
+    if executor is None:
+        return True
+    decide = getattr(executor, "needs_gpu", None)
+    return bool(decide(manifest)) if callable(decide) else executor.uses_gpu
 
 
 # Exit codes of the synthetic child (sysexits-style).

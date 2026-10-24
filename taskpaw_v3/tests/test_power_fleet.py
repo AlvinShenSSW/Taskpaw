@@ -845,6 +845,27 @@ def wall_fleet(peers, answers, wall, **kw):
 DAY = 86400.0
 
 
+def test_a_waited_refresh_leaves_no_job_in_flight():
+    """CI (macOS): a refresh that returns once its futures resolve must have
+    freed their slots, or the next call skips the peer and keeps its old live
+    reading. A slow release makes the order deterministic: a release done
+    after the future resolves would still be pending when the call returns."""
+
+    class SlowRelease(dict):
+        def __delitem__(self, key):
+            time.sleep(0.05)
+            super().__delitem__(key)
+
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = fleet([GPU02], answers)
+    f._pending = SlowRelease()
+    f.refresh_once()
+    assert dict(f._pending) == {}
+    answers["/status"] = "unreachable"
+    f.refresh_once()  # not skipped as "still in flight"
+    assert f.snapshot()[0]["power"] is None
+
+
 def test_an_offline_peers_period_energy_is_kept_until_the_period_rolls_over():
     wall = Wall()
     answers = {"/status": {"power": LIVE}, "range=": HISTORY}
@@ -991,14 +1012,134 @@ def trickle():
         value.close()
 
 
-@pytest.mark.parametrize("body", [False, True])
-def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body):
+@pytest.mark.parametrize(
+    ("body", "timeout"),
+    [
+        # a header block that never ends: tight, the deadline cuts it
+        (False, 0.05),
+        # a complete status line and headers, then a trickling body: the
+        # deadline leaves room for the (loopback) headers to arrive first,
+        # so the runner's timing cannot decide the outcome
+        (True, 0.6),
+    ],
+)
+def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body, timeout):
     peer_ = trickle(body=body)
     started = time.monotonic()
     with pytest.raises(PeerError) as caught:
-        fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
-    assert time.monotonic() - started < 0.4
+        fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=timeout)
+    assert time.monotonic() - started < timeout + 0.4
     assert caught.value.code == "timeout"
+    # §9 CX19: a complete status line and headers are an answer; a header
+    # block that never ends is not — on every platform (§9 CX26: http.client
+    # reads the cut socket's end-of-file as the end of the headers on Linux)
+    assert caught.value.answered is body
+
+
+class _HalfAnswer:
+    """§9 CX19: sends `head` (status line and headers) and `body`, then
+    either holds the connection open (`stall`) or closes it."""
+
+    def __init__(self, head: bytes, body: bytes = b"", stall: bool = False):
+        self.head, self.body, self.stall = head, body, stall
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.closing = threading.Event()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while not self.closing.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        try:
+            conn.settimeout(2.0)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(4096)
+            conn.sendall(self.head + self.body)
+            if self.stall:
+                self.closing.wait(4.0)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.closing.set()
+        self.sock.close()
+
+
+@pytest.mark.parametrize(
+    ("head", "body", "stall"),
+    [
+        # headers, then the body never comes
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n", b"", True),
+        # 200 with a truncated body, then the connection closes
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", b'{"work', False),
+        # a non-2xx whose body stalls
+        (b"HTTP/1.1 500 Oops\r\nContent-Length: 1000\r\n\r\n", b"", True),
+    ],
+    ids=["stalled-body", "truncated-body", "non-2xx-stalled"],
+)
+def test_a_response_whose_body_fails_still_counts_as_answered(head, body, stall):
+    """§9 CX19 (Codex r6): once the status line and headers arrived, the
+    machine answered, whatever happens to the body."""
+    peer_ = _HalfAnswer(head, body, stall)
+    try:
+        with pytest.raises(PeerError) as caught:
+            fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.3)
+        assert caught.value.answered is True
+    finally:
+        peer_.close()
+
+
+def test_no_response_at_all_is_not_answered():
+    """§9 CX19: a refused connect and a silent connection never answered."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # closed again: nothing listens there
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://127.0.0.1:{port}/status", TOKEN, timeout=0.3)
+    assert caught.value.answered is False
+    silent = SilentPeer()
+    try:
+        with pytest.raises(PeerError) as caught:
+            fetch_json(f"http://127.0.0.1:{silent.port}/status", TOKEN, timeout=0.1)
+        assert caught.value.code == "timeout" and caught.value.answered is False
+    finally:
+        silent.close()
+
+
+def test_an_answered_stall_resets_the_status_channel_quiet_time():
+    """§9 CX19: through the real fetch, a `/status` whose headers arrive but
+    whose body stalls keeps the machine up (never quiet)."""
+    peer_ = _HalfAnswer(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n", b"", True)
+    clock = {"t": 1000.0}
+    address = f"127.0.0.1:{peer_.port}"
+    f = PowerFleet(
+        lambda: [SimpleNamespace(name="w", address=address)],
+        lambda: TOKEN,
+        fetch=lambda u, t: fetch_json(u, t, timeout=0.2),
+        clock=lambda: clock["t"],
+        wall=lambda: 1_790_000_000.0,
+    )
+    try:
+        for _ in range(3):
+            f.refresh_once()
+            clock["t"] += 5.0
+        state = f.quiet(address)
+        assert state is not None and state.answered is True
+        assert state.quiet_s is None  # it answered: not quiet
+    finally:
+        f.stop()
+        peer_.close()
 
 
 class SilentPeer:
@@ -1056,15 +1197,22 @@ def test_the_socket_timeout_winning_the_race_is_still_a_timeout(monkeypatch):
 
 
 class _CoarseClock:
-    """`time` with CPython < 3.13 Windows' monotonic: GetTickCount64, 15.6 ms ticks."""
+    """`time` with a driven monotonic clock. With `tick`, it reads like CPython
+    < 3.13 on Windows (GetTickCount64, 15.6 ms ticks): the raw time floored."""
 
     TICK = 1 / 64
+
+    def __init__(self, tick: float = 0.0) -> None:
+        self.tick = tick
+        # part-way into a tick: the floored reading after the deadline lands
+        # a few ms before it, so only the slack makes it a timeout
+        self.raw = 1000.0 + 0.5 * self.TICK
 
     def __getattr__(self, name: str) -> Any:
         return getattr(time, name)
 
     def monotonic(self) -> float:
-        return (time.monotonic() // self.TICK) * self.TICK
+        return (self.raw // self.tick) * self.tick if self.tick else self.raw
 
 
 @pytest.mark.parametrize("coarse", [False, True], ids=["fine", "coarse"])
@@ -1074,10 +1222,13 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
 ):
     # Same ordering with a fake connection: connected, no timer, the failure
     # surfaces at (or past) the attempt deadline, wrapped as urllib wraps it.
-    # With a coarse clock the post-sleep reading can still be a tick before
+    # The clock is driven, never slept on (a real sleep can wake a little
+    # early on a loaded Windows runner): the attempt's deadline has passed by
+    # construction. With a coarse clock the reading can still be a tick before
     # the deadline (windows-latest py3.12 CI): still a timeout.
+    clock = _CoarseClock(_CoarseClock.TICK if coarse else 0.0)
+    monkeypatch.setattr(power_fleet, "time", clock)
     if coarse:
-        monkeypatch.setattr(power_fleet, "time", _CoarseClock())
         monkeypatch.setattr(power_fleet, "_CLOCK_SLACK", _CoarseClock.TICK)
     watch_box: list[Any] = []
     real_watch = power_fleet._Watch
@@ -1089,7 +1240,7 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
     class Opener:
         def open(self, request, timeout):
             watch_box[0].track(object())  # the connect succeeded
-            time.sleep(timeout)  # the attempt's deadline passes
+            clock.raw += timeout + 1e-6  # the attempt's deadline passes
             raise urllib.error.URLError(raised)
 
     monkeypatch.setattr(power_fleet, "_Watch", make_watch)
@@ -1097,6 +1248,44 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
     with pytest.raises(PeerError) as caught:
         fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
     assert caught.value.code == "timeout"
+
+
+def test_a_cut_during_the_headers_is_not_an_answer_whatever_the_platform(monkeypatch):
+    """§9 CX26 (CI run 39911578055): on Linux the cut socket reads as the end
+    of the header block, so `open` hands back a response whose body is empty;
+    the watch having fired first, that is a timeout without an answer."""
+    watch_box: list[Any] = []
+    real_watch = power_fleet._Watch
+
+    def make_watch():
+        watch_box.append(real_watch())
+        return watch_box[0]
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self, _n=-1):
+            return b""
+
+        def close(self):
+            pass
+
+    class Opener:
+        def open(self, request, timeout):
+            watch_box[0].track(socket.socket())  # connected
+            watch_box[0].fire()  # the deadline cuts the socket mid-headers
+            return Response()
+
+    monkeypatch.setattr(power_fleet, "_Watch", make_watch)
+    monkeypatch.setattr(power_fleet, "_Timer", _NeverFires)
+    with pytest.raises(PeerError) as caught:
+        fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
+    assert caught.value.code == "timeout"
+    assert caught.value.answered is False
 
 
 def test_a_refused_connect_is_still_unreachable(monkeypatch):

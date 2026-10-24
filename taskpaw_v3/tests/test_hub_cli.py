@@ -237,5 +237,13 @@ def test_headless_custom_config_reaches_credential_launcher(tmp_path, monkeypatc
     launch = Mock(side_effect=lambda config, store, **kwargs: store.close())
     monkeypatch.setattr(service, "run_hub", launch)
     assert service.run_from_config(config_path=path, db_path=database) == 0
-    assert launch.call_args.kwargs == {"block": True, "config_path": path}
+    kwargs = launch.call_args.kwargs
+    assert {k: kwargs[k] for k in ("block", "config_path")} == {
+        "block": True,
+        "config_path": path,
+    }
+    # #299 R15: hub.yaml as written, beside the effective (override) config
+    assert kwargs["yaml_config"] == HubConfig(
+        self_monitor=False, data_dir=str(tmp_path)
+    )
     assert launch.call_args.args[1].db_path == database

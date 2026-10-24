@@ -162,6 +162,16 @@ class IntakeService:
         assert value is not None
         return value
 
+    def _deleted(self, previous: im.IntakeView | None) -> dict[str, Any]:
+        """Discovery's view of films the operator deleted (#304 IR3): their ids
+        are not reused, and a package that was missing and is back is a new drop."""
+        if previous is None:
+            return {}
+        return {
+            "removed": self.store.removed_intake_films(self.auth, previous.package_id),
+            "reappeared": previous.state == "missing",
+        }
+
     def _notice(self, item: im.IntakeView, *, missing: bool, trigger: str) -> None:
         command = dm.IntakeSourceNotice.model_validate(
             dict(
@@ -265,6 +275,7 @@ class IntakeService:
                     package_version=previous.version if previous else 0,
                     observed_at=self.clock(),
                     trigger="rescan",
+                    **self._deleted(previous),
                 )
                 recorded = self.store.observe_intake(
                     self.auth, self.meta(), observation
@@ -282,6 +293,7 @@ class IntakeService:
                         package_version=previous.version,
                         observed_at=self.clock(),
                         trigger="rescan",
+                        **self._deleted(previous),
                     )
                     recorded = self.store.observe_intake(
                         self.auth, self.meta(), observation

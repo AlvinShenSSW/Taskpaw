@@ -72,6 +72,8 @@ export const MEDIA_CSS = `
 .mw .page-title{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
 .mw .page-title h1{font-size:20px;line-height:1.4;font-weight:600;letter-spacing:-.2px}
 .mw .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mw .page-title-main{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;min-width:0}
+.mw .page-sub{font-size:12px;color:var(--muted)}
 
 /* buttons */
 .mw .btn{min-height:44px;padding:9px 14px;display:inline-flex;justify-content:center;align-items:center;gap:8px;border:1px solid #344861;border-radius:8px;background:#17243a;color:#e1eaf5;font-size:12px;font-weight:500;line-height:1.5;transition:background .16s,border-color .16s;text-decoration:none}
@@ -238,6 +240,16 @@ export const MEDIA_CSS = `
 .mw .device-name{display:flex;gap:12px}
 .mw .device-name .device-icon{width:43px;height:43px}
 .mw .device-name p{color:var(--muted);font-size:11px;margin-top:4px}
+.mw .device-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:18px}
+.mw .device-list .facts{margin-top:4px}
+.mw .field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
+.mw .field .input{width:100%;font-size:13px}
+.mw .code-box{padding:14px;border:1px solid #3b4d66;border-radius:8px;background:#0d1728;font-size:13px;overflow-wrap:anywhere;user-select:all}
+.mw .switch-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.mw .switch{display:inline-flex;align-items:center;gap:10px;min-height:44px;font-size:13px;cursor:pointer}
+.mw .switch input{width:20px;height:20px;accent-color:var(--green)}
+.mw .probe-table .changed td:first-of-type{color:var(--amber)}
+.mw .probe-table .chip{margin-left:8px}
 .mw .metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .mw .metric-grid label{font-size:10px;color:var(--muted);display:block}
 .mw .metric-grid strong{display:block;font:500 20px/1.8 var(--mono);white-space:nowrap}
@@ -250,12 +262,32 @@ export const MEDIA_CSS = `
 .mw .facts{display:grid;grid-template-columns:125px minmax(0,1fr);gap:11px 16px;font-size:12px;margin:0}
 .mw .facts dt{color:var(--muted)}
 .mw .facts dd{margin:0;overflow-wrap:anywhere}
+.mw .facts dd.amber,.mw .small.amber{color:var(--amber)}
+.mw .facts dd.green{color:var(--green-light)}
+
+/* P2-4 (#295): multi-machine — 设备 rows, the drawer's 设备 line, 设备失联 rows */
+.mw .device-state{display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:0}
+.mw .device-state p{text-align:right}
+.mw .tier-chips{align-items:center}
+.mw .device-assignments{margin-top:16px;padding:14px;border:1px solid #6e3544;border-radius:9px;background:#59233114}
+.mw .device-assignments h4,.mw .device-more h4{margin:0 0 8px;font-size:12px;font-weight:600;color:#c9d6e7}
+.mw .device-assignments ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.mw .device-assignments li{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px}
+.mw .device-more{margin-top:16px;padding-top:16px;border-top:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:20px}
+.mw .eligibility-table td,.mw .eligibility-table th{text-align:center}
+.mw .eligibility-table th[scope=row]{text-align:left}
+.mw .device-line{padding:16px 18px}
+.mw .device-line-name{font-weight:600}
+.mw .device-line-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+.mw .device-line-action{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.mw .machine-name{color:#c9d6e7}
+.mw .lost-row .t-red{margin-top:4px}
 
 @media(min-width:1600px){.mw .content{padding:36px}.mw .queue-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:1200px){.mw .two-col{grid-template-columns:minmax(0,1.4fr) minmax(270px,1fr);gap:16px}.mw .queue-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mw .review-card{padding:17px;gap:13px}.mw .cover.review{width:66px;height:88px}.mw .stat{padding:15px}.mw .film-row{padding:16px}.mw .panel-head{padding:16px}.mw .review-peek{padding:16px}.mw .pending-card{column-gap:13px}}
 @media(max-width:1080px){.mw .workspace-shell{grid-template-columns:180px minmax(0,1fr)}}
 @media(max-width:900px){.mw .workspace-shell{display:block}.mw .workspace-rail{display:none}.mw .mobile-menu{display:inline-flex}.mw .content{padding:24px}.mw .two-col{grid-template-columns:1fr}.mw .review-grid,.mw .pending-grid{grid-template-columns:1fr;gap:15px}.mw .exception-card{grid-template-columns:1fr}}
-@media(max-width:600px){.mw{font-size:13px}.mw .scope-banner{padding:10px 15px;font-size:10px}.mw .content{padding:22px 15px}.mw .page-title{display:block}.mw .page-title .actions{margin-top:12px}.mw .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.mw .stat{padding:14px}.mw .stat strong{font-size:27px}.mw .flow-strip{grid-template-columns:repeat(3,1fr);margin-bottom:18px}.mw .flow-strip .flow-stage:last-child{grid-column:1/-1}.mw .flow-stage{min-height:71px;padding:9px 7px}.mw .flow-stage b{font-size:20px}.mw .panel-head{padding:15px}.mw .panel-head h2{font-size:15px}.mw .panel-body{padding:16px}.mw .film-row{padding:14px;gap:11px;align-items:flex-start}.mw .film-row .cover{width:48px;height:64px}.mw .film-title h3{font-size:12px}.mw .queue-grid,.mw .review-grid,.mw .pending-grid,.mw .rule-list{grid-template-columns:1fr}.mw .cover.review{width:77px;height:103px}.mw .search-wrap,.mw .search{width:100%}.mw .filter-pill{padding:7px 11px;font-size:10px}.mw .filters select{max-width:175px}.mw .notice{font-size:11px;padding:13px;margin-bottom:17px}.mw .exception-card{padding:16px}.mw .facts{grid-template-columns:90px minmax(0,1fr);font-size:11px;gap:10px}.mw .pending-card{grid-template-areas:"cover info" "plan plan" "foot foot";row-gap:13px}.mw .plan{padding:12px}.mw .pending-foot .btn{flex:1}.mw .pending-toolbar .btn{width:100%}.mw .device-mini{padding:12px 15px}.mw .queue-summary{padding:12px 15px}}
+@media(max-width:600px){.mw{font-size:13px}.mw .scope-banner{padding:10px 15px;font-size:10px}.mw .content{padding:22px 15px}.mw .page-title{display:block}.mw .page-title .actions{margin-top:12px}.mw .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.mw .stat{padding:14px}.mw .stat strong{font-size:27px}.mw .flow-strip{grid-template-columns:repeat(3,1fr);margin-bottom:18px}.mw .flow-strip .flow-stage:last-child{grid-column:1/-1}.mw .flow-stage{min-height:71px;padding:9px 7px}.mw .flow-stage b{font-size:20px}.mw .panel-head{padding:15px}.mw .panel-head h2{font-size:15px}.mw .panel-body{padding:16px}.mw .film-row{padding:14px;gap:11px;align-items:flex-start}.mw .film-row .cover{width:48px;height:64px}.mw .film-title h3{font-size:12px}.mw .queue-grid,.mw .review-grid,.mw .pending-grid,.mw .rule-list{grid-template-columns:1fr}.mw .cover.review{width:77px;height:103px}.mw .search-wrap,.mw .search{width:100%}.mw .filter-pill{padding:7px 11px;font-size:10px}.mw .filters select{max-width:175px}.mw .notice{font-size:11px;padding:13px;margin-bottom:17px}.mw .exception-card{padding:16px}.mw .facts{grid-template-columns:90px minmax(0,1fr);font-size:11px;gap:10px}.mw .pending-card{grid-template-areas:"cover info" "plan plan" "foot foot";row-gap:13px}.mw .plan{padding:12px}.mw .pending-foot .btn{flex:1}.mw .pending-toolbar .btn{width:100%}.mw .device-top{flex-direction:column}.mw .device-state{align-items:flex-start}.mw .device-state p{text-align:left}.mw .device-more{grid-template-columns:1fr}.mw .device-actions .btn{flex:1 1 auto}.mw .device-line-action{width:100%}.mw .device-line-action .btn{flex:1}.mw .lost-row{flex-wrap:wrap}.mw .lost-row .btn{width:100%}.mw .device-mini{padding:12px 15px}.mw .queue-summary{padding:12px 15px}}
 @media(prefers-reduced-motion:reduce){.mw *,.mw *::before,.mw *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 /* modal + drawer (portal content; the Paper carries .mw) */
@@ -270,6 +302,8 @@ export const MEDIA_CSS = `
 .mw .detail-hero{display:flex;gap:22px;align-items:center;margin-bottom:24px}
 .mw .detail-hero h2{font-size:24px;margin-bottom:8px;overflow-wrap:anywhere}
 .mw .detail-hero p{font-size:12px;color:var(--muted);margin-top:8px}
+.mw .history-hero .cover.large{width:120px;height:160px}
+.mw .history-hero>div:last-child{min-width:0;flex:1}
 .mw .detail-progress{padding:18px;background:#0b1726;border:1px solid #2e465e;border-radius:10px}
 .mw .final-panel{padding:20px}
 .mw .confirmation-layout{display:grid;grid-template-columns:108px minmax(0,1fr);gap:20px;margin-bottom:20px}

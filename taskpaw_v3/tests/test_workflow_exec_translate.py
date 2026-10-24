@@ -101,9 +101,9 @@ def test_full_pipeline_names_follow_the_restored_video(rt, tools):
     d = dispatcher(rt)
     assert [d.run_once() for _ in range(3)] == [True, True, True]
     restored = load_stage_result(rt, film, "restore").videos[0].restore
-    assert restored.file.path.endswith("ABC-123-破解.mp4")
-    assert only(rt, film, "asr").ja.path.endswith("ABC-123-破解.ja.srt")
-    assert only(rt, film, "translate").zh.path.endswith("ABC-123-破解.zh.srt")
+    assert restored.file.path.endswith("ABC-123-无码.mp4")  # #303: LTX is 无码
+    assert only(rt, film, "asr").ja.path.endswith("ABC-123-无码.ja.srt")
+    assert only(rt, film, "translate").zh.path.endswith("ABC-123-无码.zh.srt")
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ import { Dialog, GlobalStyles, Snackbar, useMediaQuery } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { POWER_CSS } from "../power/powerStyles";
 import { api as requests, type HubServer } from "../../api";
+import { DevicesPage } from "./DevicesPage";
 import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
 import { FilmDrawer } from "./FilmDrawer";
@@ -32,22 +33,22 @@ import {
   errorText, focusOnMount, isPaused, mediaFilmKey, mediaSourceKey, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
-// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last four are
-// later pages, marked 「后续」 (operator decision 3).
+// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last three are
+// later pages, marked 「后续」 (operator decision 3); 设备 is live since P2-2.
 const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?: boolean }> = [
   { key: "overview", label: "概览", icon: GridViewIcon },
   { key: "pending", label: "待处理", icon: PlaylistAddCheckIcon },
   { key: "queue", label: "影片队列", icon: MovieIcon },
   { key: "review", label: "待确认", icon: FactCheckIcon },
   { key: "exceptions", label: "异常", icon: WarningAmberIcon },
-  { key: "devices", label: "设备", icon: DesktopWindowsIcon, later: true },
+  { key: "devices", label: "设备", icon: DesktopWindowsIcon },
   { key: "local", label: "本机", icon: ComputerIcon },
   { key: "libraries", label: "片库与规则", icon: FolderOpenIcon, later: true },
   { key: "bridge", label: "Mac 信息桥", icon: LanIcon, later: true },
   { key: "settings", label: "设置 / 迁移", icon: TuneIcon, later: true },
 ];
 const PREFLIGHT_PAGES = new Set<PageKey>(["overview", "review", "exceptions"]);
-const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "local"]);
+const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "devices", "local"]);
 const NAV_BACKDROP = { sx: { backgroundColor: "#030812CC" } };
 
 function badge(key: PageKey, data: MediaData): number | null {
@@ -77,17 +78,18 @@ function NavList({ page, data, onPick, label }: { page: PageKey; data: MediaData
 
 // 「媒体处理中心」 (build spec V3 + U1). Phase 1 mounts it as the AgentConsole tab; it does not
 // depend on the console, so the Hub can mount the same component later. `onOpenPower` (PWR-2): the
-// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab (the Agent console only).
+// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab (the Agent console only);
+// `onOpenSettings` (P2-4): 设备's 「主控设置」 → 设置 · 媒体工作流, likewise.
 type Props =
-  | { readOnly?: false; server?: never; onOpenPower?: () => void }
-  | { readOnly: true; server: HubServer; onOpenPower?: never };
+  | { readOnly?: false; server?: never; onOpenPower?: () => void; onOpenSettings?: () => void }
+  | { readOnly: true; server: HubServer; onOpenPower?: never; onOpenSettings?: never };
 
 export function MediaWorkspace(props: Props = {}) {
   // Source changes close old drawers/lightboxes and reset navigation to the new source.
   return <MediaWorkspaceContent key={props.server?.id ?? "agent"} {...props} />;
 }
 
-function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props) {
+function MediaWorkspaceContent({ readOnly = false, server, onOpenPower, onOpenSettings }: Props) {
   const narrow = useMediaQuery("(max-width:900px)");
   const [page, setPage] = useState<PageKey>("overview");
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
@@ -127,7 +129,8 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props)
     openExplain: (kind, id) => { setDrawer(null); setReview(null); setExplain({ kind, filmId: id }); },
     toast: (text) => setToast({ text, key: Date.now() }),
     openPower: readOnly ? undefined : onOpenPower,
-  }), [data, navigate, queueStage, readOnly, server, onOpenPower]);
+    openSettings: readOnly ? undefined : onOpenSettings,
+  }), [data, navigate, queueStage, readOnly, server, onOpenPower, onOpenSettings]);
 
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const films = data.films.data;
@@ -136,13 +139,14 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props)
   const gpuFilm = films?.current;
 
   let body: ReactNode;
-  if (!LIVE_PAGES.has(page)) body = <LaterPage page={page as "devices" | "libraries" | "bridge" | "settings"} />;
+  if (!LIVE_PAGES.has(page)) body = <LaterPage page={page as "libraries" | "bridge" | "settings"} />;
   else if (data.films.isLoading) body = <div className="panel empty"><p>正在读取媒体流水线…</p></div>;
   else if (data.films.error || !films) body = <Notice tone="red" icon={WarningAmberIcon}>无法读取媒体流水线，请重试。{data.films.error ? `（${errorText(data.films.error)}）` : ""}</Notice>;
   else if (!running) body = <Notice icon={WarningAmberIcon}>媒体流水线未运行：{films.reason || films.state}</Notice>;
   else {
     body = page === "overview" ? <OverviewPage /> : page === "pending" ? <PendingPage /> : page === "queue" ? <QueuePage />
-      : page === "review" ? <ReviewPage /> : page === "exceptions" ? <ExceptionsPage /> : <LocalPage />;
+      : page === "review" ? <ReviewPage /> : page === "exceptions" ? <ExceptionsPage />
+        : page === "devices" ? <DevicesPage /> : <LocalPage />;
   }
 
   return (

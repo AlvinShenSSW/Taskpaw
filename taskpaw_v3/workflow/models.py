@@ -514,6 +514,17 @@ class FilmRecord(FilmCreate):
     context_state: Literal["ready", "blocked", "invalidated"] | None = None
     version: Revision
     created_at: UtcTime
+    # P3 E3 (#304): the operator deleted the task; terminal, the readers skip it
+    removed_at: UtcTime | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.removed_at is None:
+            value.pop("removed_at", None)
+        return value
 
 
 def _members(items: tuple[ManifestItem, ...]) -> None:
@@ -703,7 +714,9 @@ class PostprocessEvidence(Model):
     nfo_item_id: Id
     poster_item_id: Id
     required_image_item_ids: tuple[Id, ...]
-    actual_marks: tuple[Literal["restored", "chinese_subtitles", "4k"], ...]
+    actual_marks: tuple[
+        Literal["restored", "uncensored", "chinese_subtitles", "4k"], ...
+    ]
     image_refresh: Literal["fresh", "refreshed", "not_needed", "failed", "unknown"]
     folder_required: bool
     folder_item_id: Id | None
@@ -728,6 +741,15 @@ class PostprocessEvidence(Model):
 
 
 class FinalManifest(Model):
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.output_directory is None:
+            value.pop("output_directory", None)
+        return value
+
     film_id: Id
     revision: Revision
     input_revision: Revision
@@ -735,6 +757,9 @@ class FinalManifest(Model):
     items: tuple[ManifestItem, ...]
     output_root_id: Id
     output_relative_path: RelativePath
+    output_directory: Text | None = (
+        None  # #301: recorded package, independent of later settings
+    )
     tool_versions: ToolVersions
     restoration: RestorationResult
     subtitles: SubtitleResult
@@ -790,7 +815,7 @@ class FinalManifest(Model):
             or self.subtitles.evidence.status != "passed"
         ):
             raise ValueError("false_chinese_subtitle_mark")
-        if "restored" in pp.actual_marks and (
+        if ("restored" in pp.actual_marks or "uncensored" in pp.actual_marks) and (
             self.restoration.status not in ("applied", "reused")
             or self.restoration.evidence.status != "passed"
         ):
@@ -832,14 +857,6 @@ class HardwareDeclaration(Model):
     vram_mib: Revision
 
 
-class HardwareProbe(HardwareDeclaration):
-    evidence: EvidenceRef
-    device_identity: Text
-    gpu_identity: Text
-    free_disk_bytes: Count
-    model_ready: bool
-
-
 class ProfileCapability(Model):
     profile_id: Text
     profile_revision: Revision
@@ -850,6 +867,29 @@ class ProfileCapability(Model):
     allowed_stages: tuple[Literal["restore", "asr", "translate"], ...]
     max_width: Revision
     max_height: Revision
+
+
+class HardwareProbe(HardwareDeclaration):
+    evidence: EvidenceRef
+    device_identity: Text
+    gpu_identity: Text
+    free_disk_bytes: Count
+    model_ready: bool
+    # P2-2 (#293): a remote worker's proposed profiles (its executors' tools);
+    # the operator approves a subset. Absent from older rows and local probes.
+    profiles: tuple[ProfileCapability, ...] = ()
+    # P2-2 (#293, CX9): a fingerprint of the worker's executor settings; a
+    # change needs 核验 again. Absent from older rows and local probes.
+    config_digest: Digest | None = None
+
+    @model_serializer(mode="wrap")
+    def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if not self.profiles:
+            payload.pop("profiles", None)
+        if self.config_digest is None:
+            payload.pop("config_digest", None)
+        return payload
 
 
 class ApprovedCapability(Model):
@@ -1551,7 +1591,7 @@ class FilmPlanConfirm(Model):
     film_id: Id
     input_revision: Revision
     ltx_model: LtxTier | None
-    machine: Id
+    machine: Id | None  # P2-1: None = 自动
     actors: tuple[Text, ...] = ()  # the film's actors as the operator saw them
 
 
@@ -1563,10 +1603,165 @@ class FilmPlan(Model):
     film_id: Id
     input_revision: Revision
     ltx_model: LtxTier | None
-    machine: Id
+    machine: Id | None  # the operator's choice at confirm; None = 自动 (P2-1)
     confirmed_at: UtcTime
     backfilled: bool = False
     actors: tuple[Text, ...] = ()  # snapshot at confirm time; () when unknown
+
+
+RouteKind = Literal["auto", "pinned", "local"]
+RoutedStage = Literal["restore", "asr"]
+
+
+class FilmPin(Model):
+    """P2-1 C2: the mutable, CAS'd machine choice of one plan; None = 自动."""
+
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id | None
+    version: Revision
+    updated_at: UtcTime
+
+
+class FilmRoute(Model):
+    """P2-1 C9: a film revision routed to one worker. "Claimed" is derived from
+    unresolved assignments; `reason` is the persisted human-readable choice (V1)."""
+
+    route_id: Id
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id
+    kind: RouteKind
+    state: Literal["open", "closed"]
+    reason: Text
+    routed_at: UtcTime
+    closed_at: UtcTime | None = None
+    close_reason: Text | None = None
+    version: Revision
+
+
+class RouteOpen(Model):
+    """Route a film revision (operator). `expected_pin_version` is the pin row's
+    version the decision saw (0: no pin row); `local` routes skip the pin rules."""
+
+    route_id: Id
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id
+    kind: RouteKind
+    expected_pin_version: Count
+    reason: Text
+
+
+class RouteWithdraw(VersionedCommand):
+    """Close an unclaimed open route; `expected_version` is the route's."""
+
+    route_id: Id
+    reason: Text
+
+
+class PinSet(VersionedCommand):
+    """改派: change a plan's pin; `expected_version` is the pin's.
+    `withdraw_route_id`: the film's open route on a 失联 worker, withdrawn in
+    the same transaction when it is still the open route (P2-4 §9 CX4)."""
+
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id | None
+    reason: Text
+    withdraw_route_id: Id | None = None
+
+
+class FilmRemove(VersionedCommand):
+    """删除此任务 (P3 E3): a terminal `removed` mark on a film with no work in
+    flight and nothing archived; `expected_version` is the film's."""
+
+    film_id: Id
+    reason: Text
+
+
+class StoppedAttestation(VersionedCommand):
+    """判定已停止: the operator attests an unresolved compute assignment stopped;
+    `expected_version` is the assignment's."""
+
+    assignment_id: Id
+    attempt_id: Id
+    operation_id: Id
+    reason: Text
+    evidence: tuple[EvidenceRef, ...]
+
+
+class RoutingProfile(Model):
+    stage: Literal["restore", "asr", "translate"]
+    max_width: Revision
+    max_height: Revision
+
+
+class RoutingWorker(Model):
+    """A worker as the scheduler sees it in the store (heartbeats come apart)."""
+
+    worker_id: Id
+    name: Text
+    enrollment_state: EnrollmentState
+    admission_state: AdmissionState
+    participation: bool
+    boot_reconciled: bool
+    gpu_model: Text | None
+    vram_mib: Count
+    profiles: tuple[RoutingProfile, ...]
+
+
+class RoutingFilm(Model):
+    """A film revision's routing facts: the current revision with GPU work left
+    or an open route, or an older revision an open route still holds."""
+
+    film_id: Id
+    input_revision: Revision
+    display_name: Text
+    created_at: UtcTime
+    planned: bool
+    confirmed_at: UtcTime | None
+    ltx_model: LtxTier | None
+    pin_worker_id: Id | None
+    pin_version: Count
+    restore: StageStatus
+    asr: StageStatus
+    translate: StageStatus
+    # the worker, stage and claim time of the film's unresolved compute assignment
+    claimed_by: Id | None = None
+    claimed_stage: Literal["restore", "asr", "translate"] | None = None
+    claimed_at: UtcTime | None = None
+    max_width: Count = 0
+    max_height: Count = 0
+    duration_ms: Count | None = None
+    source_bytes: Count = 0
+    # CX7: the claim's own source check (dirty, rescan, disabled root) passes;
+    # an inadmissible film is neither routed nor held by an unclaimed route
+    source_admissible: bool = True
+
+
+class RateSample(Model):
+    """One succeeded restore/ASR attempt on a worker: the prediction's history."""
+
+    stage: RoutedStage
+    worker_id: Id
+    gpu_model: Text | None
+    tier: LtxTier | None
+    max_width: Count
+    max_height: Count
+    duration_ms: Count
+    wall_seconds: Seconds
+    avg_w: Watts | None
+    ended_at: UtcTime
+
+
+class RoutingSnapshot(Model):
+    films: tuple[RoutingFilm, ...]  # current revisions
+    # CX5: the older revisions open routes still hold, with their own facts
+    older_revisions: tuple[RoutingFilm, ...] = ()
+    routes: tuple[FilmRoute, ...]  # open routes only
+    workers: tuple[RoutingWorker, ...]
+    samples: tuple[RateSample, ...]  # newest first
 
 
 class UnplannedFilm(Model):
@@ -1623,6 +1818,23 @@ class WorkerView(Model):
     assignments: tuple[AssignmentRecord, ...]
 
 
+class WorkerAttempt(Model):
+    """A current, unresolved compute attempt of the calling worker (C7)."""
+
+    attempt_id: Id
+    job_id: Id
+    film_id: Id
+    input_revision: Revision
+    stage: Literal["restore", "asr", "translate"]
+
+
+class WorkerSelf(Model):
+    """A remote worker's own record as its credential reads it (P2-2 `GET /self`)."""
+
+    worker: WorkerRecord
+    boot_reconciled: bool
+
+
 class WorkflowApproval(Model):
     """The newest approval of the film's current approval context."""
 
@@ -1641,6 +1853,8 @@ class WorkflowArchiveOperation(Model):
     version: Revision
     resolved: bool
     error_code: Text | None
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class WorkflowCleanupItem(Model):
@@ -1665,6 +1879,8 @@ class WorkflowCleanupOperation(Model):
     status: Literal["admitted", "running", "unknown", "verified"]
     resolved: bool
     items: tuple[WorkflowCleanupItem, ...]
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class FilmWorkflow(Model):
@@ -1679,6 +1895,7 @@ class FilmWorkflow(Model):
     archive_operations: tuple[WorkflowArchiveOperation, ...]
     archive_receipt_id: Id | None
     archive_receipt_approval_id: Id | None
+    archive_path: str | None = None
     cleanup_operations: tuple[WorkflowCleanupOperation, ...]
     scrape_status: StageStatus | None
     archive_status: StageStatus | None
@@ -1714,6 +1931,9 @@ class BoardStage(Model):
     # the same attempts' ids, in the same order: the running attempt's live
     # figure is added only when its id is not among them (Codex PWR-2/3 r2)
     attempt_ids: tuple[str, ...] = ()
+    # P2-4 R10: the same attempts' workers, in the same order (the machines
+    # its energy ran on); None for an attempt with no worker
+    worker_ids: tuple[str | None, ...] = ()
 
 
 class BoardFilm(Model):

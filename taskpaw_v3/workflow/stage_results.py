@@ -13,13 +13,16 @@ import json
 import os
 import threading
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from . import models as m
 from .executors import SUCCEEDED_KIND
-from .local_runtime import LocalRuntime
+
+if TYPE_CHECKING:
+    from .executors import ExecRuntime
+    from .local_runtime import LocalRuntime
 
 RESULT_NAME = "stage-result.json"
 
@@ -131,11 +134,26 @@ def write_stage_result(workdir: Path, result: StageResult) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def load_stage_result(rt: LocalRuntime, film_id: str, stage: str) -> StageResult:
-    """The current succeeded attempt's ledger of `stage`, digest-checked."""
+def load_stage_result(rt: ExecRuntime, film_id: str, stage: str) -> StageResult:
+    """The current succeeded attempt's ledger of `stage`, digest-checked; a
+    film without that stage has nothing to vouch for (「尚未成功」)."""
+    result = rt.stage_result(film_id, stage)
+    if result is None:
+        raise StageResultError(f"{stage} 阶段尚未成功")
+    return result
+
+
+def store_stage_result(
+    rt: LocalRuntime, film_id: str, stage: str
+) -> StageResult | None:
+    """`LocalRuntime.stage_result`: the ledger the store vouches for — the
+    current succeeded attempt's file under the work dir, its sha256 equal to
+    the success evidence's payload digest. None: the film has no `stage`."""
     view = rt.store.get_film(rt.operator, film_id)
     record = next((s for s in view.stages if s.stage == stage), None)
-    if record is None or record.status != "succeeded" or record.attempt_id is None:
+    if record is None:
+        return None
+    if record.status != "succeeded" or record.attempt_id is None:
         raise StageResultError(f"{stage} 阶段尚未成功")
     attempt = next(
         (
@@ -174,7 +192,7 @@ def main_videos(manifest: m.InputManifest) -> list[m.ManifestItem]:
     )
 
 
-def workcopy_path(rt: LocalRuntime, manifest: m.InputManifest, item_id: str) -> Path:
+def workcopy_path(rt: ExecRuntime, manifest: m.InputManifest, item_id: str) -> Path:
     """The intake's private copy of an input item (never the user's original)."""
     for copy in manifest.readiness.workcopy.items:
         if copy.source_item_id == item_id:

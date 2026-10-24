@@ -9,6 +9,7 @@ import { ACTIVE_STATES, EXCEPTION_STATES, REVIEW_STATES, workItems, type StageFi
 
 export const MEDIA_FILMS_KEY = ["mediaFilms"] as const;
 export const MEDIA_PLANS_KEY = ["mediaPlans"] as const;
+export const DEVICES_KEY = ["workflowDevices"] as const;
 export const mediaFilmKey = (filmId: string) => ["mediaFilm", filmId] as const;
 // Preserve the Agent's existing keys; a remote source never shares its cached rows or images.
 export const mediaSourceKey = (key: readonly unknown[], serverId?: number) =>
@@ -103,6 +104,8 @@ export interface WorkspaceApi {
   toast: (message: string) => void;
   // PWR-2: 「功耗详情」 switches the console to the 功耗 tab (absent where there is none)
   openPower?: () => void;
+  // P2-4: 设备's 「主控设置」 opens 设置 · 媒体工作流 (absent where there is none)
+  openSettings?: () => void;
 }
 
 export const WorkspaceContext = createContext<WorkspaceApi | null>(null);

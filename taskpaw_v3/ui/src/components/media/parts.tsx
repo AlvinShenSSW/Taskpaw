@@ -1,3 +1,4 @@
+import { useArchiveProgress } from "./useArchiveProgress";
 // Small V3 building blocks of the 媒体处理中心 (build spec §2–§3). Styled by mediaStyles.ts.
 import type { SvgIconComponent } from "@mui/icons-material";
 import CheckIcon from "@mui/icons-material/Check";
@@ -7,7 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useContext, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type StepKey, type WorkflowStep } from "../../api";
 import {
-  currentStep, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
+  archiveBytes, archiveLive, asrLive, asrSummary, currentStep, elapsedClock, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
   STATUS_META, STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
@@ -39,10 +40,11 @@ export function Notice({ tone, icon, children, id }: {
 }
 
 // The compact title row of every page (operator decision 7): page name, actions on the right.
-export function PageTitle({ title, actions }: { title: string; actions?: ReactNode }) {
+// `summary`: one short count line beside the title (「工作机 4 · 可领取 2」), never a slogan.
+export function PageTitle({ title, actions, summary }: { title: string; actions?: ReactNode; summary?: string | null }) {
   return (
     <div className="page-title">
-      <h1>{title}</h1>
+      <div className="page-title-main"><h1>{title}</h1>{summary && <p className="page-sub">{summary}</p>}</div>
       {actions && <div className="actions">{actions}</div>}
     </div>
   );
@@ -228,10 +230,26 @@ function ParamsLine({ live }: { live: RestoreLive | null }) {
 // The stage block (§3): LTX shows only this stage's percent, counts and rate; others one line.
 // U1c: a running 修复 always shows it is alive (已用) and its phase before LTX.
 export function StageBlock({ item }: { item: WorkItem }) {
+  const archive = useArchiveProgress(item.kind === "film" ? item.row.steps?.find((s) => s.key === "archive") : undefined);
   const restoring = item.kind === "film" && isRestoring(item.status);
   const live = restoring && item.kind === "film" ? restoreLive(restoreStep(item.row)) : null;
-  const now = useNow(live !== null && live.startedAt !== null);
+  const asr = item.kind === "film" ? asrLive(item.row.steps?.find((s) => s.key === "asr")) : null;
+  const now = useNow((live !== null && live.startedAt !== null) || (asr !== null && asr.startedAt !== null));
   const beat = live ? heartbeatText(live, now) : null;
+  if (archive.live) {
+    const live = archive.live;
+    return <div className="film-stage"><span>{["归档", live.percent == null ? null : `${live.percent}%`,
+      `复制 ${archiveBytes(live.copied_bytes, live.total_bytes)}`, archive.eta == null ? null : `约 ${archive.eta} 秒`].filter(Boolean).join(" · ")}</span></div>;
+  }
+  if (asr) {
+    return <>
+      <div className="film-stage"><span>{asrSummary(asr)}</span></div>
+      {asr.phase == null && <div className="stage-detail">
+        <span>{asr.startedAt === null ? "识别中" : `已用 ${elapsedClock(now - asr.startedAt)}`}</span>
+        <span>{asr.console}</span>
+      </div>}
+    </>;
+  }
   if (item.kind === "film" && restoring && live && beat && item.status === "restore") {
     return <RestorePhaseBlock title={item.row.title || item.row.name} live={live} beat={beat} />;
   }
@@ -288,9 +306,15 @@ export function StepLine({ steps, title, durations }: {
       {line.map((s, i) => {
         const failed = s.state === "failed";
         if (i === cur) {
+          const percent = asrLive(s)?.percent ?? archiveLive(s)?.percent;
+          const activeLabel = percent == null ? STEP_LABEL[s.key] : `${STEP_LABEL[s.key]} · ${percent}%`;
           return (
             <li key={s.key} className={failed ? "failed" : "current"} aria-current="step" data-step={s.key}>
-              {STEP_LABEL[s.key]}{failed && <span className="sr-only">（失败）</span>}
+              {s.machine ? (
+                // P2-3 R15: the stage runs on a worker — its 设备 under the step
+                <span className="step-label">{activeLabel}<span className="step-time"><span className="sr-only">设备 </span>{s.machine.name}</span></span>
+              ) : activeLabel}
+              {failed && <span className="sr-only">（失败）</span>}
             </li>
           );
         }

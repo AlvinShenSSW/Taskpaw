@@ -2,6 +2,8 @@
 
 A missing tool path leaves its stage without an executor, which T03 reports as
 "没有可用的执行器"; there is never a second, manually added Jasna monitor.
+P2-1 C1: executors are built per compute stage; translate needs no tool path
+and is always a local stage of the controller.
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ def default_executors(
                 executors.append(AsrExecutor(runtime, settings.whisperjav_exe_path))
             except ValueError:
                 log.exception("ASR disabled: invalid settings")
-            executors.append(TranslateExecutor(runtime))
+        executors.append(TranslateExecutor(runtime))  # C1: independent of ASR
         return executors
 
     return build

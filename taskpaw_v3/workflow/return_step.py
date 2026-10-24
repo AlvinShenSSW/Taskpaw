@@ -147,9 +147,10 @@ class LocalReturnStep:
             subtitle = subtitles.get(video.item_id)
             if subtitle is None:
                 raise StageResultError("字幕结果缺少一个主视频")
-            for language, ref in (("zh", subtitle.zh), ("ja", subtitle.ja)):
-                if ref is None:
-                    continue
+            # #303 D3: only the Chinese subtitle leaves the work dirs; a .ja.srt
+            # (generated or kept from the input) is reclaimed with them.
+            ref = subtitle.zh
+            if ref is not None:
                 file = check_file(rt.work_dir, ref, cancel)
                 reused = ref.path in workcopies  # an input subtitle kept as is (IR05)
                 if reused:
@@ -158,18 +159,18 @@ class LocalReturnStep:
                     self._member(
                         film,
                         "source_subtitle" if reused else "generated_subtitle",
-                        (folder / f"{stem}.{language}.srt").as_posix(),
+                        (folder / f"{stem}.zh.srt").as_posix(),
                         file,
                         ref.sha256,
                         ref.size,
                         link=False,
                         video_item_id=video.item_id,
-                        language=language,
-                        final_zh=language == "zh",
+                        language="zh",
+                        final_zh=True,
                     )
                 )
         for item in manifest.items:
-            if item.role == "main_video":
+            if item.role == "main_video" or item.language == "ja":
                 continue
             source = workcopy_path(rt, manifest, item.item_id)
             if _relative(rt, source) in reused_sources:

@@ -80,6 +80,7 @@ class Poller:
         get_token: Callable[[], str],
         get_polling_token: Optional[Callable[[], str]] = None,
         http_timeout: float = 5.0,
+        get_url: Optional[Callable[[], str]] = None,
         seed_fresh_seconds: float = 0.0,
     ) -> None:
         self.store = store
@@ -89,6 +90,8 @@ class Poller:
         # was off — don't render it ONLINE (Kimi). 0 = always trust (tests).
         self.seed_fresh_seconds = seed_fresh_seconds
         self.openclaw_url = openclaw_url
+        # #299 D4: the OpenClaw address is read per delivery (a live setting)
+        self.get_url = get_url or (lambda: self.openclaw_url)
         self.get_active = get_active  # openclaw_enabled AND token
         self.get_token = get_token  # OpenClaw token
         # Bearer sent to agents when polling. Falls back to the SQLite config row
@@ -444,7 +447,7 @@ class Poller:
                     continue
                 try:
                     send_payload(
-                        self.openclaw_url, self.get_token(), payload, self.http_timeout
+                        self.get_url(), self.get_token(), payload, self.http_timeout
                     )
                 except Exception as exc:
                     attempts += 1

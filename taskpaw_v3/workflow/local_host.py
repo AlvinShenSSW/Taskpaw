@@ -27,11 +27,14 @@ from .exec_common import MISSING_LTX
 from .executors import StageExecutor
 from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
+from .fleet_live import FleetLive
 from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
+from .source_watch import SourceWatch
 from .timing import TaskLogSink, WorkflowLog
+from .transfer import Transfers, live_attempts
 
 ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 LookupFactory = Callable[[LocalRuntime], MetadataLookup]
@@ -284,6 +287,20 @@ class LocalWorkflowHost:
         self.intake: Any = None
         self.dispatcher: LocalDispatcher | None = None
         self.finalizer: Finalizer | None = None
+        # P3 E1 (#304): films whose INBOX source vanished
+        self.sources: SourceWatch | None = None
+        # P2-2: the workers' live state, while the worker API is on
+        self.fleet: FleetLive | None = None
+        self.transfers: Transfers | None = None
+        # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
+        self.cancels: set[str] = set()
+        self.scheduler: Any = None  # P2-3 R13: the routing pass's thread
+        # P2-4 R1: the last pass's decision; its waiting reasons reach the board
+        self.last_pass: Any = None
+        # the controller's free disk for the C8 gate (tests inject a figure)
+        self.free_bytes: Callable[[], int | None] | None = None
+        # C4's /status channel; None: the agent's power peers (P2-4 R8)
+        self.status_channel: Callable[[], Any] | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -299,7 +316,13 @@ class LocalWorkflowHost:
 
     def _boot(self) -> None:
         try:
-            rt = self.runtime = LocalRuntime(self.data_dir, self.executors)
+            rt = self.runtime = LocalRuntime(
+                self.data_dir,
+                self.executors,
+                output_dir=Path(self.settings.output_dir)
+                if self.settings.output_dir
+                else None,
+            )
             if self.executor_factory is not None:  # executors that read the ledger
                 rt.executors = {e.stage: e for e in self.executor_factory(rt)}
             rt.open()
@@ -341,14 +364,20 @@ class LocalWorkflowHost:
                 Path(inbox) if inbox else None,
                 FilmpawClient(Path(data) if data else None),
             )
+            self.sources = SourceWatch(
+                rt, Path(inbox) if inbox else None, on_change=self._on_sources
+            )
             self.dispatcher = LocalDispatcher(
                 rt,
+                sources=self.sources,
                 return_step=self.return_step,
                 scrape_step=self.scrape_step,
                 off_reasons=self.off_reasons,
                 finalizer=self.finalizer,
                 workflow_log=self.workflow_log,
-                on_resolved=self.events.resolved if self.events is not None else None,
+                on_resolved=self._local_resolved,
+                remote_enabled=self.settings.remote_workers
+                and self.settings.role == "controller",
             )
             if self._stopping.is_set():
                 return
@@ -356,6 +385,22 @@ class LocalWorkflowHost:
             if self.lookup_factory is not None:  # U1 L: off the dispatch thread
                 self.lookup = rt.lookup = self.lookup_factory(rt)
                 self.lookup.start()
+            if self.settings.remote_workers and self.settings.role == "controller":
+                from taskpaw_v3 import __version__
+
+                from .routing import RoutingThread
+
+                # R9: the restart grace counts from here (IR12, C14)
+                self.fleet = FleetLive(
+                    rt.clock.now(), __version__, on_change=self._wake_scheduler
+                )
+                self.transfers = Transfers(rt.work_dir, live=lambda: live_attempts(rt))
+                self.transfers.sweep()  # IR5: settled attempts' plans go
+                # P2-3 R13: the routing pass's own thread
+                self.scheduler = RoutingThread(self._route_pass)
+                if self._stopping.is_set():
+                    return
+                self.scheduler.start()
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)
@@ -391,6 +436,8 @@ class LocalWorkflowHost:
                 self._download_lock.release()
         else:
             confirmed = False
+        if self.scheduler is not None:  # R13: before the dispatcher it wakes
+            confirmed &= self.scheduler.stop(timeout=min(timeout, 30.0))
         if self.dispatcher is not None:
             confirmed &= self.dispatcher.stop(timeout=timeout)
         if self.lookup is not None:
@@ -437,9 +484,142 @@ class LocalWorkflowHost:
         from .planning import confirm_plans
 
         results = confirm_plans(self.runtime, items)
-        if self.dispatcher is not None and any(r["ok"] for r in results):
-            self.dispatcher.wake()
+        if any(r["ok"] for r in results):
+            if self.dispatcher is not None:
+                self.dispatcher.wake()
+            self._wake_scheduler()  # R13: a confirmed plan
         return results
+
+    # ── routing (P2-3 R13) ──────────────────────────────────────────────
+    def _wake_scheduler(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.wake()
+
+    def _on_sources(self) -> None:
+        """A film entered or left 片源丢失: route again, dispatch again."""
+        self._wake_scheduler()
+        if self.dispatcher is not None:
+            self.dispatcher.wake()
+
+    def _local_resolved(
+        self, rt: LocalRuntime, job: m.PendingComputeJob, name: str, outcome: Any
+    ) -> None:
+        """The controller's own dispatcher resolved a stage: the #286 events,
+        then a routing pass (a failed route closes; a finished one frees a
+        worker's slot)."""
+        if self.events is not None:
+            self.events.resolved(rt, job, name, outcome)
+        self._wake_scheduler()
+
+    def _controller_free(self, rt: LocalRuntime) -> int | None:
+        if self.free_bytes is not None:
+            return self.free_bytes()
+        from .transfer import disk_free
+
+        try:
+            return disk_free(rt.work_dir)
+        except OSError:
+            return None
+
+    def pass_inputs(self) -> dict[str, Any] | None:
+        """The routing pass's live inputs (P2-4: 待处理's preview reads the
+        same ones); None while remote workers are off."""
+        rt, fleet = self.runtime, self.fleet
+        if rt is None or fleet is None:
+            return None
+        return {
+            "live": fleet.snapshot(),
+            "now": rt.clock.now(),
+            "controller_id": rt.identity.worker_id,
+            "controller_free_bytes": self._controller_free(rt),
+            "live_since": fleet.started_at,
+        }
+
+    def _route_pass(self) -> None:
+        """One `routing.run_pass` over the live fleet; a routed or withdrawn
+        film wakes the controller's dispatcher (a hand-over or a local
+        route)."""
+        rt, inputs = self.runtime, self.pass_inputs()
+        if rt is None or inputs is None:
+            return
+        from .routing import run_pass
+
+        # P3 #304 IR1: the pass looks at the sources itself, whether or not
+        # the dispatcher is paused or busy with a stage
+        hold: frozenset[str] = frozenset()
+        if self.sources is not None:
+            try:
+                hold = self.sources.check_candidates()
+            except Exception:
+                log.exception("source check before the routing pass failed")
+                hold = self.sources.ids()
+        outcome = run_pass(
+            rt.store,
+            rt.operator,
+            rt.meta,
+            live=inputs["live"],
+            now=inputs["now"],
+            controller_id=inputs["controller_id"],
+            executors=rt.executors,
+            controller_free_bytes=inputs["controller_free_bytes"],
+            remote_enabled=True,
+            live_since=inputs["live_since"],
+            hold=hold,
+        )
+        self.last_pass = outcome.planned
+        if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:
+            self.dispatcher.wake()
+
+    def requeue(self, film_id: str, attempt_id: str) -> None:
+        """停止并重新排队 (P2-3 R9a); WorkflowError when it is not one."""
+        if self.runtime is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        from .remote_attempts import requeue
+
+        requeue(self.runtime, self.cancels, film_id, attempt_id, fleet=self.fleet)
+
+    def remote_resolved(
+        self,
+        rt: LocalRuntime,
+        job: m.PendingComputeJob,
+        name: str,
+        outcome: Any,
+    ) -> None:
+        """A remote finish resolved (P2-3 §2 (5)): the 日志 row and the #286
+        events as for a local stage; the worker API then wakes dispatch."""
+        from . import board
+
+        try:
+            name = board.name_of(rt, job.film_id) or name
+        except Exception:
+            log.exception("media workflow film name unavailable")
+        if outcome.error_class != "cancelled":
+            try:
+                attempt = next(
+                    a
+                    for a in rt.store.list_attempts(rt.operator, job.job_id)
+                    if a.status in ("succeeded", "failed")
+                    and a.ended_at is not None
+                    and a.attempt_id
+                    == rt.store.get_stage(rt.operator, job.job_id).attempt_id
+                )
+                ended = attempt.ended_at
+                assert ended is not None
+                duration = (ended - attempt.started_at).total_seconds()
+                self.workflow_log.stage(
+                    name,
+                    job.stage,
+                    ok=outcome.ok,
+                    duration=duration,
+                    note=outcome.message,
+                )
+            except Exception:  # the log never changes the outcome
+                log.exception("media workflow log row failed")
+        if self.events is not None:
+            try:
+                self.events.resolved(rt, job, name, outcome)
+            except Exception:
+                log.exception("media workflow event hook failed")
 
     def retry(self, film_id: str, stage: str) -> None:
         """Requeue a failed local stage (T06-P1 D05); WorkflowError when it is not one."""

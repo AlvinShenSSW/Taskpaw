@@ -1,150 +1,224 @@
 import {
-  Alert, Button, Card, CardContent, FormControlLabel, MenuItem, Stack, Switch, TextField, Typography,
+  Alert, Button, Card, CardContent, FormControlLabel, List, ListItemButton, ListItemText, MenuItem, Stack, Switch, TextField,
+  Typography, useMediaQuery,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type LlmKeySource, type LlmSlot, api } from "../api";
 import { Logo } from "../components/Logo";
+import { WorkflowSettingsSection } from "../components/WorkflowSettings";
+import { HubSettings } from "../components/HubSettings";
+import { NetworkAccess } from "../components/NetworkAccess";
+import { RESTART_KEY, restartText } from "../components/setupModel";
+import { RestartBanner } from "../components/RestartBanner";
 import { LANGS, type Lang, currentLang, setLang } from "../i18n";
 
-// Settings tab (#79 Language + About, #43 agent config). Config editing shows for
-// the agent role only — the Hub's OpenClaw config is a separate surface (#43 f/u).
-export function Settings({ role }: { role: "agent" | "hub" }) {
+// Settings tab (#79 Language + About, #43 agent config). #299 R12: the agent's sections — 通用
+// (language, machine name, LLM), 网络与访问, 媒体工作流, 功耗与主机监控, 关于 — with a side nav on
+// desktop and a select at 390 px. No copy names a config file: every setting lives here.
+export type SettingsSection = "general" | "network" | "workflow" | "power" | "about";
+const SECTIONS: Array<[SettingsSection, string]> = [
+  ["general", "通用"], ["network", "网络与访问"], ["workflow", "媒体工作流"], ["power", "功耗与主机监控"], ["about", "关于"],
+];
+
+// CX12: the household token is generated on the 主控 only; every other saved role (incl. LAN off)
+// pastes it, exactly as the wizard does — a self-generated token would 401 against the Hub.
+function SavedRoleNetwork() {
+  const workflow = useQuery({ queryKey: ["workflowSettings"], queryFn: api.workflowSettings, retry: false });
+  if (workflow.isLoading) return null; // never mount with the wrong mode: generating is a one-shot on entering
+  return <NetworkAccess tokenMode={workflow.data?.saved.role === "controller" ? "generate" : "paste"} />;
+}
+
+export function Settings({ role, section: initial = "general" }: { role: "agent" | "hub"; section?: SettingsSection }) {
   const { t } = useTranslation();
+  const [section, setSection] = useState<SettingsSection>(initial);
+  useEffect(() => setSection(initial), [initial]);
+  const narrow = useMediaQuery("(max-width:599.95px)");
+  if (role === "hub") {
+    return (
+      <Stack spacing={2} sx={{ maxWidth: 720 }}>
+        <Typography variant="overline" color="text.secondary">{t("settings.title")}</Typography>
+        <HubSettings />
+        <LanguageCard />
+        <AboutCard />
+      </Stack>
+    );
+  }
+  const body = section === "general" ? (
+    <>
+      <LanguageCard />
+      <MachineSection />
+      {/* Agent-level LLM API (#178) + two optional fallbacks and the failover switch (#190/#192) */}
+      <LlmSection slot="primary" />
+      <LlmSection slot="fallback1" />
+      <LlmSection slot="fallback2" />
+      <FailoverSection />
+    </>
+  ) : section === "network" ? (
+    <Card><CardContent>
+      <Typography variant="subtitle1" component="h2" sx={{ mb: 1.5 }}>网络与访问</Typography>
+      <PendingRestart />
+      <SavedRoleNetwork />
+    </CardContent></Card>
+  ) : section === "workflow" ? (
+    // P2-4: 设置 · 媒体工作流 (role + fields; 加入 while the running role is a worker)
+    <WorkflowSettingsSection />
+  ) : section === "power" ? (
+    <PowerHostSection />
+  ) : <AboutCard />;
   return (
-    <Stack spacing={2} sx={{ maxWidth: 640 }}>
-      <Typography variant="overline" color="text.secondary">{t("settings.title")}</Typography>
-
-      {/* Language */}
-      <Card>
-        <CardContent>
-          <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.language")}</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            {t("settings.languageHint")}
-          </Typography>
-          <TextField select size="small" value={currentLang()} sx={{ minWidth: 200 }}
-            onChange={(e) => setLang(e.target.value as Lang)}>
-            {LANGS.map((l) => (
-              <MenuItem key={l.value} value={l.value}>{l.label}</MenuItem>
-            ))}
-          </TextField>
-        </CardContent>
-      </Card>
-
-      {/* Agent config (#43) — agent role only */}
-      {role === "agent" && <ConfigSection />}
-
-      {/* Agent-level LLM API (#178) + two optional fallbacks and the failover
-          switch (#190/#192) — agent role only */}
-      {role === "agent" && (
-        <>
-          <LlmSection slot="primary" />
-          <LlmSection slot="fallback1" />
-          <LlmSection slot="fallback2" />
-          <FailoverSection />
-        </>
+    <Stack direction={narrow ? "column" : "row"} spacing={2} alignItems="flex-start">
+      {narrow ? (
+        <TextField select size="small" label="设置" value={section} fullWidth
+          onChange={(e) => setSection(e.target.value as SettingsSection)}>
+          {SECTIONS.map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
+        </TextField>
+      ) : (
+        <List component="nav" aria-label="设置" dense sx={{ width: 180, flex: "none", position: "sticky", top: 64 }}>
+          {SECTIONS.map(([v, l]) => (
+            <ListItemButton key={v} selected={section === v} onClick={() => setSection(v)} sx={{ borderRadius: 1, minHeight: 44 }}>
+              <ListItemText primary={l} />
+            </ListItemButton>
+          ))}
+        </List>
       )}
-
-      {/* About */}
-      <Card>
-        <CardContent>
-          <Typography variant="subtitle1" sx={{ mb: 1 }}>{t("settings.about")}</Typography>
-          <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1 }}>
-            {/* #120: the brand logo replaces the old 🐾 emoji (MASTER.md: no emoji). */}
-            <Logo size={44} alt="TaskPaw" />
-            <Stack direction="row" alignItems="baseline" spacing={1}>
-              <Typography variant="h6">TaskPaw</Typography>
-              <Typography variant="caption" color="text.secondary">{`v${__APP_VERSION__}`}</Typography>
-            </Stack>
-          </Stack>
-          <Typography variant="body2" sx={{ mb: 1.5 }}>{t("settings.aboutBody")}</Typography>
-          <Typography variant="body2" color="text.secondary">{t("settings.author")}</Typography>
-          <Typography variant="caption" color="text.secondary">{t("settings.copyright")}</Typography>
-        </CardContent>
-      </Card>
+      <Stack spacing={2} sx={{ maxWidth: 680, flex: 1, minWidth: 0, width: "100%" }}>{body}</Stack>
     </Stack>
   );
 }
 
-type Form = {
-  machine: string; bind_host: string; bind_port: string;
-  control_host: string; control_port: string; api_token: string;
-};
+function LanguageCard() {
+  const { t } = useTranslation();
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.language")}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          {t("settings.languageHint")}
+        </Typography>
+        <TextField select size="small" value={currentLang()} sx={{ minWidth: 200 }}
+          onChange={(e) => setLang(e.target.value as Lang)}>
+          {LANGS.map((l) => (
+            <MenuItem key={l.value} value={l.value}>{l.label}</MenuItem>
+          ))}
+        </TextField>
+      </CardContent>
+    </Card>
+  );
+}
 
-function ConfigSection() {
+function AboutCard() {
+  const { t } = useTranslation();
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>{t("settings.about")}</Typography>
+        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1 }}>
+          {/* #120: the brand logo replaces the old emoji (MASTER.md: no emoji). */}
+          <Logo size={44} alt="TaskPaw" />
+          <Stack direction="row" alignItems="baseline" spacing={1}>
+            <Typography variant="h6">TaskPaw</Typography>
+            <Typography variant="caption" color="text.secondary">{`v${__APP_VERSION__}`}</Typography>
+          </Stack>
+        </Stack>
+        <Typography variant="body2" sx={{ mb: 1.5 }}>{t("settings.aboutBody")}</Typography>
+        <Typography variant="body2" color="text.secondary">{t("settings.author")}</Typography>
+        <Typography variant="caption" color="text.secondary">{t("settings.copyright")}</Typography>
+      </CardContent>
+    </Card>
+  );
+}
+
+// #299 R11: the saved settings that wait for a restart (GET /control/restart), one banner.
+function PendingRestart({ only }: { only?: string[] }) {
+  const state = useQuery({ queryKey: RESTART_KEY, queryFn: api.restartState, retry: false });
+  const fields = (state.data?.fields ?? []).filter((f) => !only || only.includes(f));
+  if (!state.data?.required || fields.length === 0) return null;
+  return <Stack sx={{ mb: 2 }}><RestartBanner role="agent" text={restartText(fields)} /></Stack>;
+}
+
+// 通用 · 机器名称 (#43's machine field; the address, ports and token moved to 网络与访问)
+function MachineSection() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
-  const [form, setForm] = useState<Form | null>(null);
+  const [machine, setMachine] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-
-  // Seed the form once the config arrives (api_token comes masked as "***").
   useEffect(() => {
-    if (cfg.data && form === null) {
-      const c = cfg.data as Record<string, unknown>;
-      setForm({
-        machine: String(c.machine ?? ""), bind_host: String(c.bind_host ?? ""),
-        bind_port: String(c.bind_port ?? ""), control_host: String(c.control_host ?? ""),
-        control_port: String(c.control_port ?? ""), api_token: "",
-      });
-    }
-  }, [cfg.data, form]);
-
+    if (cfg.data && machine === null) setMachine(String(cfg.data.machine ?? ""));
+  }, [cfg.data, machine]);
   const save = useMutation({
-    mutationFn: () => {
-      const f = form!;
-      const patch: Record<string, unknown> = {
-        machine: f.machine, bind_host: f.bind_host, bind_port: Number(f.bind_port),
-        control_host: f.control_host, control_port: Number(f.control_port),
-      };
-      if (f.api_token.trim()) patch.api_token = f.api_token; // blank → keep current
-      return api.updateConfig(patch);
-    },
+    mutationFn: () => api.updateConfig({ machine: machine ?? "" }),
     onSuccess: (res) => {
-      // Refresh the shared config cache so the auth-disabled banner (#145) and this
-      // form reflect a just-set/changed token immediately, not a stale cached one.
       qc.invalidateQueries({ queryKey: ["agentConfig"] });
-      setMsg({ kind: "ok", text: res.restart_required ? t("settings.restartNeeded") : t("settings.saved") });
+      qc.invalidateQueries({ queryKey: RESTART_KEY });
+      // a rename that waits for a restart is shown by <PendingRestart> (it survives a remount)
+      setMsg(res.restart_required ? null : { kind: "ok", text: t("settings.saved") });
     },
     onError: (e) => setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) }),
   });
-
-  const set = (k: keyof Form) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setForm((p) => (p ? { ...p, [k]: e.target.value } : p));
-
   return (
     <Card>
       <CardContent>
         <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.config")}</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-          {t("settings.configHint")}
-        </Typography>
-        {cfg.isLoading || !form ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>{t("settings.configHint")}</Typography>
+        <PendingRestart only={["machine"]} />
+        {cfg.isLoading || machine === null ? (
           <Typography variant="body2" color="text.secondary">{t("common.loading")}</Typography>
         ) : (
           <Stack spacing={1.5}>
-            <TextField size="small" label={t("settings.machine")} value={form.machine} onChange={set("machine")} />
-            <Stack direction="row" spacing={1.5}>
-              <TextField size="small" label={t("settings.bindHost")} value={form.bind_host}
-                onChange={set("bind_host")} sx={{ flex: 1 }} />
-              <TextField size="small" label={t("settings.bindPort")} value={form.bind_port}
-                onChange={set("bind_port")} sx={{ width: 120 }} inputMode="numeric" />
-            </Stack>
-            <Stack direction="row" spacing={1.5}>
-              <TextField size="small" label={t("settings.controlHost")} value={form.control_host}
-                onChange={set("control_host")} sx={{ flex: 1 }} />
-              <TextField size="small" label={t("settings.controlPort")} value={form.control_port}
-                onChange={set("control_port")} sx={{ width: 120 }} inputMode="numeric" />
-            </Stack>
-            <TextField size="small" type="password" label={t("settings.apiToken")} value={form.api_token}
-              onChange={set("api_token")} placeholder="***" helperText={t("settings.apiTokenHint")} />
+            <TextField size="small" label={t("settings.machine")} value={machine} onChange={(e) => setMachine(e.target.value)} />
             {msg && <Alert severity={msg.kind === "ok" ? "success" : "error"}>{msg.text}</Alert>}
             <Stack direction="row">
-              <Button variant="contained" disabled={save.isPending} onClick={() => { setMsg(null); save.mutate(); }}>
+              <Button variant="contained" sx={{ minHeight: 44 }} disabled={save.isPending || !machine.trim()}
+                onClick={() => { setMsg(null); save.mutate(); }}>
                 {t("settings.save")}
               </Button>
             </Stack>
+          </Stack>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// #299 R12: 功耗与主机监控 — the power estimate switch (live) and the host monitor (after a restart).
+function PowerHostSection() {
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const save = useMutation({
+    mutationFn: (patch: Record<string, unknown>) => api.updateConfig(patch),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agentConfig"] });
+      qc.invalidateQueries({ queryKey: RESTART_KEY });
+      qc.invalidateQueries({ queryKey: ["power"] });
+      setMsg({ kind: "ok", text: "已保存" });
+    },
+    onError: (e) => setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) }),
+  });
+  const power = cfg.data?.power as { enabled?: boolean } | undefined;
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="subtitle1" component="h2" sx={{ mb: 1.5 }}>功耗与主机监控</Typography>
+        <PendingRestart only={["host_metrics"]} />
+        {cfg.isLoading || !cfg.data ? (
+          <Typography variant="body2" color="text.secondary">正在读取设置…</Typography>
+        ) : (
+          <Stack spacing={1.5}>
+            <FormControlLabel label="功耗估算" control={
+              <Switch checked={power?.enabled !== false} disabled={save.isPending} inputProps={{ role: "switch" }}
+                onChange={(e) => { setMsg(null); save.mutate({ power: { enabled: e.target.checked } }); }} />} />
+            <Typography variant="body2" color="text.secondary" sx={{ mt: "-8px !important" }}>
+              估算本机用电（显卡读数 + CPU 估算 + 基础功耗），立即生效；估算参数在 功耗 页调整。
+            </Typography>
+            <FormControlLabel label="主机监控（CPU、内存、显卡）" control={
+              <Switch checked={cfg.data.host_metrics !== false} disabled={save.isPending} inputProps={{ role: "switch" }}
+                onChange={(e) => { setMsg(null); save.mutate({ host_metrics: e.target.checked }); }} />} />
+            <Typography variant="body2" color="text.secondary" sx={{ mt: "-8px !important" }}>重启 TaskPaw 后生效。</Typography>
+            {msg && <Alert severity={msg.kind === "ok" ? "success" : "error"}>{msg.text}</Alert>}
           </Stack>
         )}
       </CardContent>

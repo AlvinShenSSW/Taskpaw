@@ -2,19 +2,34 @@ import CheckIcon from "@mui/icons-material/Check";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
+import {
+  api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult, type PlanRouting,
+} from "../../api";
 import { PredictLine } from "../power/PowerParts";
-import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
+import { clockText, energyText, fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
 
 const STALE_TEXT = "收件内容已更新，请重新查看后确认";
 
 type Filter = "all" | "gpu" | "nogpu";
-type Choice = { tier: LtxTier | null; machine: string };
+// `machine` null = 自动（推荐）: remote mode lets the controller pick the worker.
+type Choice = { tier: LtxTier | null; machine: string | null };
 
 const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommendation.ltx_model : null, machine: e.recommendation.machine });
-const complete = (e: PlanEntry) => Boolean(e.recommendation.machine) && (!e.needs_gpu || e.recommendation.ltx_model !== null);
+const complete = (e: PlanEntry) => e.recommendation.machine !== "" && (!e.needs_gpu || e.recommendation.ltx_model !== null);
+
+// P2-4 R5: remote mode's options for one tier (`routing[tier]`, "none" = 无需修复).
+const tierKey = (e: PlanEntry, tier: LtxTier | null) => (e.needs_gpu ? tier ?? e.recommendation.ltx_model ?? "standard" : "none");
+const routingOf = (e: PlanEntry, tier: LtxTier | null): PlanRouting | null => e.routing?.[tierKey(e, tier)] ?? null;
+// 自动's line: 「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, 「无需修复，本机完成」 or why it would wait.
+const autoText = (r: PlanRouting) => ("machine" in r.auto ? r.auto.text : r.auto.text ?? r.auto.waiting ?? "");
+// A device's finish (with its name for the reason line) or why it is greyed out.
+function deviceLine(d: PlanRouting["devices"][number], now: number, withName: boolean): string {
+  if (d.reason) return d.reason;
+  const finish = d.finish_at ? `预计 ${clockText(d.finish_at, now)}${withName ? ` 在 ${d.name}` : ""} 完成` : null;
+  return [finish, energyText(d.energy_wh)].filter(Boolean).join(" · ");
+}
 const entryTitle = (e: PlanEntry) => e.title || e.name;
 const planKey = (e: Pick<PlanEntry, "film_id" | "input_revision">) => `${e.film_id}:${e.input_revision}`;
 
@@ -77,6 +92,11 @@ export function PendingPage() {
   const batchEligible = (e: PlanEntry) => complete(e) && !isStale(e) && unchanged(e);
   const eligible = items.filter(batchEligible);
   const machines = plans.data?.choices.machines ?? [];
+  const remote = Boolean(plans.data?.remote);
+  // IR9: why 全部按推荐确认 is disabled
+  const batchWhy = eligible.length > 0 ? null
+    : items.length === 0 ? "没有待处理的影片"
+      : "没有可按推荐确认的影片：已调整、需重新查看或缺少选择的请单独确认";
 
   // `quiet`: the batch reports once for every film (confirmAll), not a toast per failure.
   const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown, quiet = false) => {
@@ -173,10 +193,14 @@ export function PendingPage() {
   return (
     <>
       <PageTitle title="待处理" actions={!ws.readOnly &&
-        <button type="button" className="btn ghost" disabled={eligible.length === 0 || confirm.isPending}
-          onClick={() => void confirmAll()}>
-          <Icon of={CheckIcon} />全部按推荐确认
-        </button>
+        <>
+          <button type="button" className="btn ghost" disabled={eligible.length === 0 || confirm.isPending}
+            title={batchWhy ?? undefined} aria-describedby={batchWhy ? "mw-batch-why" : undefined}
+            onClick={() => void confirmAll()}>
+            <Icon of={CheckIcon} />全部按推荐确认
+          </button>
+          {batchWhy && <span className="sr-only" id="mw-batch-why">{batchWhy}</span>}
+        </>
       } />
       <div className="toolbar pending-toolbar">
         <div className="filters" role="group" aria-label="按是否需要修复筛选">
@@ -184,6 +208,7 @@ export function PendingPage() {
             <button key={v} type="button" className="filter-pill" aria-pressed={filter === v} onClick={() => setFilter(v)}>{l}</button>
           ))}
           <Chip>{items.length} 部影片</Chip>
+          {remote && <Chip tone="green">{eligible.length} 部可按推荐派发</Chip>}
         </div>
       </div>
       {plans.isLoading ? (
@@ -209,7 +234,8 @@ export function PendingPage() {
   );
 }
 
-function machineName(machines: PlanMachine[], id: string): string {
+function machineName(machines: PlanMachine[], id: string | null): string {
+  if (id === null) return "自动";
   return machines.find((x) => x.id === id)?.name ?? "本机";
 }
 
@@ -222,10 +248,26 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
   const tid = `pt-${id}`;
   const title = entryTitle(e);
   const rec = e.recommendation;
-  const options = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : [{ id: rec.machine, label: "本机" }];
+  const workers = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : rec.machine === null ? [] : [{ id: rec.machine, label: "本机" }];
+  // P2-4 R5: with `routing` the options are the tier's — 自动 first, then every device with its finish
+  // or greyed out with its reason; without it (a single machine) the select is unchanged.
+  const routing = routingOf(e, choice.tier);
+  const now = Date.now();
+  const options: Array<{ id: string; label: string; disabled?: boolean }> = routing ? [
+    { id: "", label: autoText(routing) ? `自动（推荐）· ${autoText(routing)}` : "自动（推荐）" },
+    ...routing.devices.map((d) => ({ id: d.id, label: `${d.name} · ${deviceLine(d, now, false) || "可领取"}`, disabled: Boolean(d.reason) })),
+  ] : rec.machine === null ? [{ id: "", label: "自动（推荐）" }, ...workers] : workers;
+  const device = routing?.devices.find((d) => d.id === choice.machine);
   // The recommended machine shows the recommendation's reason (a 4K film: 「本机修复输出上限 1080p」).
-  const machineReason = choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
-  const ready = Boolean(choice.machine) && (!e.needs_gpu || choice.tier !== null);
+  const machineReason = routing ? (choice.machine === null ? autoText(routing) : device ? deviceLine(device, now, true) : "该机器当前不可选")
+    : choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
+  const ready = choice.machine !== "" && (!e.needs_gpu || choice.tier !== null)
+    && (!routing || choice.machine === null || (device !== undefined && !device.reason));
+  // A tier on which the chosen device is greyed out goes back to 自动.
+  const pickTier = (tier: LtxTier) => {
+    const next = routingOf(e, tier)?.devices.find((d) => d.id === choice.machine);
+    onChoice({ tier, machine: routing && choice.machine !== null && (!next || next.reason) ? null : choice.machine });
+  };
   const idLine = [e.number || (e.title ? e.name : null), e.actors.join("、")].filter(Boolean).join(" · ");
   const onKey = (ev: KeyboardEvent<HTMLButtonElement>, tier: LtxTier) => {
     const step = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[ev.key];
@@ -236,7 +278,7 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
     else if (ev.key === "End") next = TIER_ORDER.length - 1;
     else return;
     ev.preventDefault();
-    onChoice({ ...choice, tier: TIER_ORDER[next] });
+    pickTier(TIER_ORDER[next]);
     (ev.currentTarget.parentElement?.querySelector(`[data-tier="${TIER_ORDER[next]}"]`) as HTMLElement | null)?.focus();
   };
   return (
@@ -267,7 +309,7 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
                 return (
                   <button key={t} type="button" className="seg-opt" role="radio" aria-checked={on} data-tier={t}
                     tabIndex={on || (choice.tier === null && t === TIER_ORDER[0]) ? 0 : -1}
-                    onClick={() => onChoice({ ...choice, tier: t })} onKeyDown={(ev) => onKey(ev, t)}>
+                    onClick={() => pickTier(t)} onKeyDown={(ev) => onKey(ev, t)}>
                     {TIER_SHORT[t]}{rec.ltx_model === t && <span className="rec-tag">推荐</span>}
                   </button>
                 );
@@ -283,11 +325,11 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
           </div>
         )}
         <div className="plan-field">
-          {readOnly ? <><span className="plan-label">设备</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
-          <label className="plan-label" htmlFor={`machine-${id}`}>设备</label>
-          <select id={`machine-${id}`} value={choice.machine} aria-describedby={`machine-reason-${id}`}
-            onChange={(ev) => onChoice({ ...choice, machine: ev.target.value })}>
-            {options.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          {readOnly ? <><span className="plan-label">{routing ? "机器" : "设备"}</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
+          <label className="plan-label" htmlFor={`machine-${id}`}>{routing ? "机器" : "设备"}</label>
+          <select id={`machine-${id}`} value={choice.machine ?? ""} aria-describedby={`machine-reason-${id}`}
+            onChange={(ev) => onChoice({ ...choice, machine: ev.target.value || null })}>
+            {options.map((m) => <option key={m.id} value={m.id} disabled={m.disabled}>{m.label}</option>)}
           </select>
           </>}
           <p className="plan-reason" id={`machine-reason-${id}`}>{machineReason}</p>

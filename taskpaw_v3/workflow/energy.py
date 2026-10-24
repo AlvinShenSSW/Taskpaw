@@ -15,7 +15,7 @@ figure is an estimate (估算); there is no billing claim.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from statistics import median
 from typing import Any
@@ -72,10 +72,34 @@ def _active(
     )
 
 
+def _devices(
+    worker_ids: Sequence[str | None],
+    current: dict[str, Any] | None,
+    active: bool,
+    names: Mapping[str, str] | None,
+) -> list[dict[str, str]]:
+    """P2-4 R10: the machines a stage's energy ran on — each resolved
+    attempt's worker, then the running attempt's machine — in that order."""
+    found: dict[str, str] = {}
+    for worker_id in worker_ids:
+        if worker_id and worker_id not in found:
+            found[worker_id] = (names or {}).get(worker_id, "")
+    machine = (
+        (current.get("machine") or current.get("device"))
+        if active and current
+        else None
+    )
+    if isinstance(machine, dict) and machine.get("id"):
+        key = str(machine["id"])
+        found.setdefault(key, (names or {}).get(key) or str(machine.get("name") or ""))
+    return [{"id": key, "name": name} for key, name in found.items()]
+
+
 def _stage(
     values: Sequence[m.AttemptEnergy | None],
     live: m.AttemptEnergy | None,
     active: bool = False,
+    devices: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     parts = [v for v in values if v is not None] + ([live] if live else [])
     wh = sum(p.wh for p in parts)
@@ -90,6 +114,7 @@ def _stage(
         "avg_w": round(wh * 3600 / seconds, 1) if seconds > 0 else None,
         "peak_w": max(peaks) if peaks else None,
         "machine": LOCAL,
+        "devices": devices or [],
         "attempts": len(values) + (1 if live else 0),
         "partial": any(v is None for v in values) or (active and live is None),
         "running": active,
@@ -97,11 +122,14 @@ def _stage(
 
 
 def film_energy(
-    film: m.BoardFilm, current: dict[str, Any] | None = None
+    film: m.BoardFilm,
+    current: dict[str, Any] | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """`energy` of a film row: `{stages: {key: {wh, avg_w, peak_w, machine,
-    …}}, total_wh, partial}`; None while no attempt has a value (nothing ran
-    yet, sampling off, or evidence from before PWR-2)."""
+    devices, …}}, total_wh, partial}`; None while no attempt has a value
+    (nothing ran yet, sampling off, or evidence from before PWR-2).
+    `names`: worker id → name for each stage's `devices` (P2-4 R10)."""
     stages: dict[str, dict[str, Any]] = {}
     known = 0
     for stage in film.stages:
@@ -112,7 +140,12 @@ def film_energy(
         if not stage.attempt_energy and not active:
             continue
         known += sum(1 for v in stage.attempt_energy if v is not None) + bool(live)
-        stages[stage.stage] = _stage(stage.attempt_energy, live, active)
+        stages[stage.stage] = _stage(
+            stage.attempt_energy,
+            live,
+            active,
+            _devices(stage.worker_ids, current, active, names),
+        )
     if known == 0:
         return None
     return {

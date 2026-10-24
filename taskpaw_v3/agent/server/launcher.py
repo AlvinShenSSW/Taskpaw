@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from taskpaw_v3 import __version__
-from taskpaw_v3.core import power, power_fleet
+from taskpaw_v3.core import power, power_fleet, restart
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
@@ -28,6 +28,8 @@ from taskpaw_v3.core.net import (  # re-export
     PortBindError,
     PortInUseError,
     announce_ready,
+    bind_is_global,
+    bind_is_wildcard,
     claim_port,
     guard_bind_exposure,
     loopback_url,
@@ -53,6 +55,19 @@ __all__ = [
     "ensure_port_free",
     "effective_monitors",
 ]
+
+
+WORKER_API = "agent worker API"
+
+
+def guard_worker_api(host: str) -> None:
+    """S-1: the worker API binds the agent's LAN bind_host; a wildcard or a
+    public address is refused before any socket is claimed."""
+    if bind_is_wildcard(host) or bind_is_global(host):
+        raise ValueError(
+            f"refusing to bind the {WORKER_API} to {host!r} — use a specific "
+            f"private LAN address."
+        )
 
 
 def ensure_port_free(host: str, port: int, what: str) -> None:
@@ -95,10 +110,23 @@ def run_agent(
 
     from .app import create_control_app, create_network_app
 
+    # #299 R5: a LAN bind_host DHCP took away moves to the primary private
+    # address (saved with a backup) before the guard and any socket claim.
+    from .network_routes import heal_on_startup
+
+    address_changed_from = heal_on_startup(config, config_path)
     # Refuse an unsafe network exposure at startup too — not just from the UI guard
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
+    # P2-2 (#293): the worker API (a third server) only on a controller with
+    # remote workers on; it binds bind_host, never a wildcard or public address
+    workflow = config.workflow
+    worker_api = (
+        workflow.enabled and workflow.role == "controller" and workflow.remote_workers
+    )
+    if worker_api:
+        guard_worker_api(config.bind_host)
     strip_control_env()
 
     # Publish the global LLM settings (#178) BEFORE the stale-port reclaim, any
@@ -119,28 +147,32 @@ def run_agent(
     # or ours — a foreign service on either port aborts the whole reclaim so we never
     # kill the old agent when startup would fail here anyway (claim_port then fails
     # loudly as before).
-    reclaim_ports_from_stale_instance(
-        [
-            (config.bind_host, config.bind_port, "agent network API"),
-            (config.control_host, config.control_port, "agent control API"),
-        ],
-        role="agent",
-    )
+    ports = [
+        (config.bind_host, config.bind_port, "agent network API"),
+        (config.control_host, config.control_port, "agent control API"),
+    ]
+    if worker_api:
+        ports.append((config.bind_host, workflow.worker_api_port, WORKER_API))
+    reclaim_ports_from_stale_instance(ports, role="agent")
 
     # Validate after stale-instance reclaim, before fresh claims or writers.
     queue = queue if queue is not None else build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
-    net_sock = ctl_sock = None
+    net_sock = ctl_sock = api_sock = None
     try:
         net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
         ctl_sock = claim_port(
             config.control_host, config.control_port, "agent control API"
         )
+        if worker_api:  # a collision fails startup loudly, like the other two
+            api_sock = claim_port(
+                config.bind_host, workflow.worker_api_port, WORKER_API
+            )
         session = bootstrap_control(
             "agent", loopback_url(config.control_host, config.control_port), config_path
         )
     except BaseException:
-        for sock in (net_sock, ctl_sock):
+        for sock in (net_sock, ctl_sock, api_sock):
             if sock is not None:
                 try:
                     sock.close()
@@ -151,6 +183,7 @@ def run_agent(
 
     supervisor = None
     workflow_host = None
+    worker_host = None  # P2-2: role=worker
     power_sampler: Optional[power.PowerSampler] = None
     fleet: Optional[power_fleet.PowerFleet] = None
     servers: list[uvicorn.Server] = []
@@ -170,6 +203,8 @@ def run_agent(
                 task_log.record("", "agent.stopping", task_type="agent")
             if workflow_host is not None:
                 workflow_host.stop()
+            if worker_host is not None:  # S-7: joins its thread
+                worker_host.stop()
             if supervisor is not None:
                 supervisor.stop()
         finally:
@@ -194,7 +229,9 @@ def run_agent(
                         and thread is not threading.current_thread()
                     ):
                         thread.join(timeout=10)
-                for sock in (net_sock, ctl_sock):
+                for sock in (net_sock, ctl_sock, api_sock):
+                    if sock is None:
+                        continue
                     try:
                         sock.close()
                     except OSError:
@@ -273,15 +310,29 @@ def run_agent(
 
         sampler = power_sampler = power.PowerSampler(
             power.get_power_settings,
+            # P2-3 R14: a worker's dispatcher owns its films' energy too
             activity=power.activity_source(
-                _monitor_type, lambda: getattr(workflow_host, "dispatcher", None)
+                _monitor_type,
+                lambda: (
+                    getattr(workflow_host, "dispatcher", None)
+                    or getattr(worker_host, "dispatcher", None)
+                ),
             ),
             data_dir=config_path.parent if config_path is not None else None,
         )
+
         # PWR-3 (#289, PW06): the 功耗 tab's peers, refreshed in the background
         # with this agent's own (live) api_token; routes read only the cache.
+        def _peers() -> list:
+            # P2-4 R11: the controller's enrolled workers join automatically
+            from taskpaw_v3.workflow.devices import power_peers
+
+            return power_fleet.merge_peers(
+                power.get_power_settings().peers, power_peers(workflow_host)
+            )
+
         peers = fleet = power_fleet.PowerFleet(
-            lambda: power.get_power_settings().peers,
+            _peers,
             lambda: config.api_token,
             # IR06: this agent's own address entered as a peer is not summed twice
             own=lambda: (config.server_id, config.machine),
@@ -322,6 +373,10 @@ def run_agent(
                 # the retained today / week / month Wh, kept while sampling is off
                 "energy": sampler.energy(),
             }
+            if config.workflow.role == "worker":  # P2-3 R16
+                status["workflow_worker"] = (
+                    worker_host.summary() if worker_host is not None else None
+                )
             if config.workflow.enabled:
                 status["workflow"] = (
                     workflow_host.events.snapshot()
@@ -363,12 +418,30 @@ def run_agent(
                     # late-bound: the host starts after announce_ready (T06-P1)
                     workflow_provider=lambda: workflow_host,
                     power_view=_power_view,
+                    worker_provider=lambda: worker_host,
+                    address_changed_from=address_changed_from,
+                    boot_id=session.boot_id,
+                    # #299 §3: 立即重启 — a graceful stop, then exit 75
+                    on_restart=lambda: restart.request(shutdown.shutdown),
                 ),
                 log_level="warning",
             )
         )
 
         servers.extend((net, ctl))
+        api = None
+        if worker_api:
+            from .worker_api import create_worker_app
+
+            # S-6: no access log, so no path or header ever reaches a log
+            api = uvicorn.Server(
+                uvicorn.Config(
+                    create_worker_app(lambda: workflow_host),
+                    log_level="warning",
+                    access_log=False,
+                )
+            )
+            servers.append(api)
 
         def _serve(server, sock, label):
             try:
@@ -391,6 +464,14 @@ def run_agent(
                 ),
             )
         )
+        if api is not None:
+            threads.append(
+                threading.Thread(
+                    target=lambda: _serve(api, api_sock, "worker API"),
+                    name="agent-worker-api",
+                    daemon=True,
+                )
+            )
         shutdown.install_signal_handlers()
         # Cleanup is already registered even if start() fails part way through.
         startup.checkpoint()
@@ -434,14 +515,20 @@ def run_agent(
         announce_ready("agent", session.base_url, **ready)
         # After readiness and in its own thread: never delays or breaks the agent.
         try:
-            from taskpaw_v3.workflow.local_host import start_local_workflow
+            config_dir = config_path.parent if config_path is not None else None
+            if config.workflow.role == "worker":  # P2-2: no store, no events
+                from taskpaw_v3.workflow.remote_worker import start_worker_host
 
-            workflow_host = start_local_workflow(
-                config.workflow,
-                config_path.parent if config_path is not None else None,
-                task_log=task_log,
-                event_queue=queue,
-            )
+                worker_host = start_worker_host(config.workflow, config_dir)
+            else:
+                from taskpaw_v3.workflow.local_host import start_local_workflow
+
+                workflow_host = start_local_workflow(
+                    config.workflow,
+                    config_dir,
+                    task_log=task_log,
+                    event_queue=queue,
+                )
         except Exception:
             log.exception("media workflow could not be started")
     except BaseException:

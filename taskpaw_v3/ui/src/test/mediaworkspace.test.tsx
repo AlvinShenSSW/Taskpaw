@@ -6,9 +6,10 @@ import type { ReactNode } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import {
-  ACTIVE_STATES, filmStatus, lifecycle, matchesStage, reviewStatus, stageLine, STATUS_META, workItems,
+  ACTIVE_STATES, filmStatus, lifecycle, matchesStage, progressText, reviewStatus, stageLine, STATUS_META, workItems,
 } from "../components/media/mediaModel";
 import { PREFLIGHT_MS } from "../components/media/workspace";
+import { REMOTE_DEVICES } from "./fixtures/multiMachine";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
@@ -46,6 +47,9 @@ function mockApi() {
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
   vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { inbox_root: "D:\\TODO" } });
+  vi.spyOn(api, "workflowDevices").mockResolvedValue({
+    remote_workers: false, server_time: "2026-10-23T08:00:00Z", controller: { name: "本机", stages: ["修复", "识别", "翻译"] }, workers: [],
+  });
   return {
     confirmPlans: vi.spyOn(api, "workflowConfirmPlans").mockImplementation(async (plans: PlanChoice[]) =>
       ({ results: plans.map((p) => ({ film_id: p.film_id, ok: true, error: null, message: null })) })),
@@ -63,6 +67,144 @@ const go = async (label: string) => {
 beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+describe("overview compute devices", () => {
+  it("counts the controller and one online worker", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowDevices").mockResolvedValue({ ...REMOTE_DEVICES, workers: [REMOTE_DEVICES.workers[0]] });
+    wrap(<MediaWorkspace />);
+    const card = within((await screen.findByText("计算设备")).closest(".stat") as HTMLElement);
+    expect(await card.findByText("2", { selector: "strong" })).toBeInTheDocument();
+    expect(card.getByText("/ 2 在线")).toBeInTheDocument();
+    expect(card.getByText("本机 + 1 台工作机")).toBeInTheDocument();
+  });
+
+  it("keeps the local count and GPU label when remote workers are off", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowDevices").mockResolvedValue({ ...REMOTE_DEVICES, remote_workers: false, workers: [REMOTE_DEVICES.workers[0]] });
+    const { qc } = wrap(<MediaWorkspace />);
+    const card = within((await screen.findByText("计算设备")).closest(".stat") as HTMLElement);
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    expect(card.getByText("1", { selector: "strong" })).toBeInTheDocument();
+    expect(card.getByText("/ 1 在线")).toBeInTheDocument();
+    expect(card.getByText(/RTX 5070 Ti/)).toBeInTheDocument();
+    expect(card.queryByText(/台工作机/)).toBeNull();
+  });
+});
+
+describe("#302 finished history", () => {
+  it.each([true, false])("shows retained facts, recorded steps and detail buttons (energy=%s)", async (energy) => {
+    mockApi();
+    const film = row({ film_id: "history", number: "ABC-123", title: "留存标题", actors: ["留存演员"], group: "done",
+      resolution: "4K", plan: { ltx_model: "high", machine: "worker" }, steps: steps("done", "done") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    const keys = ["intake", "restore", "return", "asr", "translate", "scrape", "confirm", "archive", "cleanup"];
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      has_poster: true, poster_source: "retained-poster", marks: { restored: true, chinese_subtitles: true, uhd: true },
+      files: [{ role: "main_video", path: "ABC-123-无码-C.mp4", size: 1000, volume: null }],
+      duration_ms: 7293000, archive: { status: "succeeded", target_path: "fake-NAS/Actor/ABC-123", error: null },
+      history: { completed_at: "2026-10-24T07:42:00Z", total_seconds: 7200,
+        steps: keys.map((key) => ({ key, device: key === "restore" ? "工作机" : "本机", seconds: key === "confirm" ? null : 60,
+          result: key === "archive" ? "已校验入库" : key === "cleanup" ? "来源与工作副本已清理" : "已完成" })) },
+      timing: { stages: { restore: 60 }, total_restore_to_translate: 90, queue_wait: null,
+        restore_breakdown: { scan: 1, basicvsr: 1, ltx: 50, speed_test: 0, ltx_stages: { encode: 50 }, ltx_runs: 1, wall: 60 } },
+      energy: energy ? { total_wh: 9999, estimated: true, partial: false, running: false, stages: {
+        restore: { wh: 1234, gpu_wh: 1000, cpu_wh: 200, other_wh: 34, seconds: 60, avg_w: null, peak_w: null,
+          machine: "worker", attempts: 1, partial: false, running: false },
+      } } : null,
+    }));
+    const open = vi.spyOn(api, "workflowOpenFolder").mockResolvedValue(undefined);
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 留存标题 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByRole("heading", { name: "ABC-123" })).toBeInTheDocument();
+    expect(drawer).toHaveTextContent(/4K · 画质 高 · 2:01:33 · 已完成/);
+    expect(await within(drawer).findByAltText("留存标题 封面")).toBeInTheDocument();
+    for (const text of ["无码", "字幕", "演员", "留存演员", "归档到", "fake-NAS/Actor/ABC-123", "✓ 全部完成", "总用时 2:00:00"]) {
+      expect(drawer).toHaveTextContent(text);
+    }
+    if (energy) expect(drawer).toHaveTextContent("修复耗电 1.234 kWh");
+    else expect(drawer).not.toHaveTextContent("修复耗电");
+    const table = within(drawer).getByRole("table", { name: "处理历史" });
+    expect(within(table).getAllByRole("columnheader").map((e) => e.textContent)).toEqual(["步骤", "设备", "用时", "结果"]);
+    expect(within(table).getAllByRole("row")).toHaveLength(10);
+    for (const name of ["下载片源", "修复", "回传", "识别", "翻译", "刮削", "确认入库", "归档", "清理"]) {
+      expect(within(table).getByText(name)).toBeInTheDocument();
+    }
+    expect(table).toHaveTextContent("工作机");
+    fireEvent.click(within(drawer).getByRole("button", { name: "本片参数" }));
+    expect(within(drawer).getByTestId("restore-params")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "LTX 用时明细" }));
+    expect(within(drawer).getByTestId("ltx-timing")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "打开归档目录" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("history", "archive"));
+  });
+
+  it("shows the full overview count and pages completed films", async () => {
+    mockApi();
+    const films = Array.from({ length: 21 }, (_, i) => row({ film_id: `done-${i}`, title: `历史影片${i}`, group: "done", steps: steps("done", "done") }));
+    const read = vi.spyOn(api, "workflowFilms").mockImplementation(async (page = 1) => ({ ...FILMS_RESPONSE,
+      films: films.slice((page - 1) * 20, page * 20), packages: [], counts: counts(films, []),
+      done_paging: { total: 21, size: 20, page, pages: 2 },
+    }));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "完成 21" }));
+    expect(await screen.findByText("已完成 · 21")).toBeInTheDocument();
+    expect(screen.getByText("第 1 页 / 共 2 页")).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(20);
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("历史影片20")).toBeInTheDocument();
+    expect(read).toHaveBeenCalledWith(2);
+    expect(screen.getByText("第 2 页 / 共 2 页")).toBeInTheDocument();
+    expect(screen.queryByText("历史影片0")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    expect(await screen.findByText("历史影片0")).toBeInTheDocument();
+  });
+
+  it("keeps a reused 破解 mark and explains an empty LTX breakdown", async () => {
+    mockApi();
+    const film = row({ film_id: "reused", title: "沿用成品", group: "done", steps: steps("done", "done") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      marks: { restored: true, chinese_subtitles: false, uhd: false },
+      files: [{ role: "main_video", path: "ABC-123-破解.mp4", size: 1000, volume: null }],
+      timing: { stages: {}, total_restore_to_translate: null, queue_wait: null,
+        restore_breakdown: { scan: 5, basicvsr: 0, ltx: 0, speed_test: 0, ltx_stages: {}, ltx_runs: 0, wall: 5 } },
+    }));
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 沿用成品 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByText("破解")).toBeInTheDocument();
+    expect(within(drawer).queryByText("无码")).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "LTX 用时明细" }));
+    expect(within(drawer).getByText("未记录 LTX 用时")).toBeInTheDocument();
+  });
+
+  it("keeps the completed page after a failed next-page request and allows retry", async () => {
+    mockApi();
+    let fail = true;
+    const read = vi.spyOn(api, "workflowFilms").mockImplementation(async (page = 1) => {
+      if (page === 2 && fail) throw new Error("temporary failure");
+      const films = [row({ film_id: `history-${page}`, title: `第${page}页影片`, group: "done", steps: steps("done", "done") })];
+      return { ...FILMS_RESPONSE, films, packages: [], counts: { ...counts(films, []), done: 21 },
+        done_paging: { total: 21, size: 20, page, pages: 2 } };
+    });
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "完成 21" }));
+    await screen.findByText("第1页影片");
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled());
+    expect(screen.getByText("第1页影片")).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("第2页影片")).toBeInTheDocument();
+  });
+});
+
 describe("MediaWorkspace shell", () => {
   it("lists the ten pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 on the later pages", async () => {
     mockApi();
@@ -74,7 +216,8 @@ describe("MediaWorkspace shell", () => {
       ["overview", "pending", "queue", "review", "exceptions", "devices", "local", "libraries", "bridge", "settings"]);
     expect(items[1]).toHaveTextContent("待处理3");
     expect(items[4]).toHaveTextContent("异常6");
-    for (const i of [5, 7, 8, 9]) expect(items[i]).toHaveTextContent("后续");
+    for (const i of [7, 8, 9]) expect(items[i]).toHaveTextContent("后续");
+    expect(items[5]).not.toHaveTextContent("后续");  // 设备 is live since P2-2
     for (const i of [0, 2, 6]) expect(items[i].querySelector(".nav-count")).toBeNull();
     expect(items[0]).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("TaskPaw / 媒体处理中心 / 概览")).toBeInTheDocument();
@@ -265,6 +408,41 @@ describe("待处理", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "影片详情" })).not.toBeInTheDocument());
     expect(c.queryByText("收件内容已更新，请重新查看后确认")).toBeNull();
     expect(c.getByRole("button", { name: "确认入队" })).toBeEnabled();
+  });
+
+  it("remote mode: a null recommended machine is 自动（推荐）, the first option, and confirms as null (Codex r2 CX5)", async () => {
+    const m = mockApi();
+    const auto = { ltx_model: "standard" as const, ltx_reason: "默认", machine: null, machine_reason: "自动（推荐）" };
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({
+      ...PLANS, remote: true,
+      plans: PLANS.plans.map((p) => ({ ...p, recommendation: { ...auto, ltx_model: p.needs_gpu ? "standard" : null } })),
+      choices: { ...PLANS.choices, machines: [
+        { id: "w-a", name: "工作机甲", gpu: "RTX 5070 Ti", vram_mib: 16303, reason: "RTX 5070 Ti 16 GB" },
+        { id: "w-b", name: "工作机乙", gpu: null, vram_mib: null, reason: "" }] },
+    });
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    const c = within(card("abf-422"));
+    const select = c.getByLabelText("设备") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["自动（推荐）", "工作机甲 · RTX 5070 Ti 16 GB", "工作机乙"]);
+    expect(select.value).toBe("");
+    expect(c.getByText("自动（推荐）", { selector: "p" })).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "确认入队" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "全部按推荐确认" })).toBeEnabled();
+    fireEvent.click(c.getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
+      [{ film_id: "abf-422", input_revision: 1, ltx_model: "standard", machine: null }]));
+    // picking a worker pins it; the batch then skips the changed film and sends the rest as 自动
+    fireEvent.change(within(card("abf-421")).getByLabelText("设备"), { target: { value: "w-b" } });
+    m.confirmPlans.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "全部按推荐确认" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith([
+      { film_id: "abf-423", input_revision: 1, ltx_model: null, machine: null }]));
+    m.confirmPlans.mockClear();
+    fireEvent.click(within(card("abf-421")).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
+      [{ film_id: "abf-421", input_revision: 1, ltx_model: "standard", machine: "w-b" }]));
   });
 
   it("shows the empty state", async () => {
@@ -1072,5 +1250,137 @@ describe("deferred Codex r6 P2s", () => {
     await waitFor(() => expect(card("abf-422")).toBeNull());
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
     expect(card("abf-422")).toBeNull();
+  });
+});
+
+
+describe("ASR live progress (#300)", () => {
+  afterEach(() => vi.useRealTimers());
+  const labels = ["提取音频", "划分场景", "语音增强", "语音分段", "识别语音", "生成场景字幕", "合并字幕", "过滤与清理"];
+  const consoleLine = "[DecoupledPipeline] Generating scene 214/346 (26.1s audio)...";
+  const progress = {
+    phase: 5, phase_n: 8, phase_label: "识别语音", scene: 214, scenes: 346, percent: 62,
+    eta_s: 660, elapsed_s: 1122, console: consoleLine,
+    phases: labels.map((label, i) => ({ n: i + 1, label, state: i < 4 ? "done" : i === 4 ? "current" : "pending",
+      seconds: i < 4 ? 30 : i === 4 ? 1002 : null })),
+  };
+  it.each([[62, "62%"], [0, "0%"], [null, null]] as const)("reads ASR percent %s for the device summary", (percent, expected) => {
+    const film = row({ film_id: "asr-live", stage: "asr", status: "running", steps: steps("asr", "running", { progress: { ...progress, percent } }) });
+    expect(progressText({ kind: "film", id: film.film_id, row: film, status: "asr" })).toBe(expected);
+  });
+  function setup(p: Record<string, unknown> = progress) {
+    mockApi();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:18:42Z"));
+    const film = row({ film_id: "asr-live", title: "识别测试", stage: "asr", status: "running",
+      steps: steps("asr", "running", { progress: p, started_at: "2026-10-24T08:00:00Z", console: String(p.console) }) });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film, actors: [] }));
+    return wrap(<MediaWorkspace />);
+  }
+  async function open() {
+    fireEvent.click(await screen.findByRole("button", { name: "查看 识别测试 详情" }));
+    return screen.findByRole("dialog", { name: "影片详情" });
+  }
+
+  it("renders the approved drawer heartbeat, percent, tiles, phases, console and step chip", async () => {
+    setup();
+    const drawer = await open();
+    const panel = await within(drawer).findByTestId("asr-live");
+    expect(panel).toHaveTextContent("已用 18:42");
+    expect(panel).toHaveTextContent("第 5/8 阶段 · 识别语音");
+    expect(within(panel).getByText("62%")).toBeInTheDocument();
+    expect(within(panel).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "62");
+    const tiles = within(panel).getByRole("list", { name: "识别数据" });
+    expect(within(tiles).getAllByRole("listitem")).toHaveLength(4);
+    expect(tiles).toHaveTextContent("场景214 / 346");
+    expect(tiles).toHaveTextContent("已用18:42");
+    expect(tiles).toHaveTextContent("预计剩余约 11 分钟");
+    expect(tiles).toHaveTextContent("设备本机 · RTX 5070 Ti");
+    const phases = within(panel).getByRole("list", { name: "识别阶段" });
+    const entries = within(phases).getAllByRole("listitem");
+    expect(entries).toHaveLength(8);
+    labels.forEach((label, i) => expect(entries[i]).toHaveTextContent(label));
+    expect(entries[0]).toHaveTextContent("✓");
+    expect(entries[0]).toHaveTextContent("00:30");
+    expect(entries[4]).toHaveTextContent("●");
+    expect(entries[4]).toHaveTextContent("场景 214/346");
+    expect(entries[4]).toHaveTextContent("16:42");
+    expect(entries[5]).toHaveTextContent("○");
+    fireEvent.click(within(panel).getByText("最新输出"));
+    expect(within(panel).getByTestId("asr-console-raw")).toHaveTextContent(consoleLine);
+    expect(within(drawer).getByText("识别 · 62%", { selector: "[aria-current=step]" })).toBeInTheDocument();
+  });
+
+  it("shows percent, scenes and ETA in the overview row", async () => {
+    setup();
+    expect(await screen.findByText("识别 · 62% · 场景 214/346 · 约 11 分钟")).toBeInTheDocument();
+    expect(screen.queryByText("此阶段不提供影片总体百分比")).not.toBeInTheDocument();
+  });
+
+  it("an untagged pipeline shows only a ticking heartbeat and console, with no percent", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    setup({ elapsed_s: 1122, console: "Loading balanced pipeline" });
+    const drawer = await open();
+    const panel = await within(drawer).findByTestId("asr-live");
+    expect(panel).toHaveTextContent("已用 18:42");
+    expect(within(panel).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("list")).not.toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("%");
+    expect(panel).not.toHaveTextContent("预计剩余");
+    expect(within(panel).getByTestId("asr-console-raw")).toHaveTextContent("Loading balanced pipeline");
+    expect(within(drawer).getByText("识别", { selector: "[aria-current=step]" })).toBeInTheDocument();
+    expect(screen.queryByText("此阶段不提供影片总体百分比")).not.toBeInTheDocument();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:18:44Z"));
+    act(() => vi.advanceTimersByTime(2000));
+    expect(panel).toHaveTextContent("已用 18:44");
+  });
+});
+
+
+describe("archive output (#301)", () => {
+  const progress = { phase: "copying", copied_bytes: 2e9, verified_bytes: 0, total_bytes: 4e9,
+    files_done: 0, files_total: 1, items: [{ name: "ABC-123", bytes: 2e9, total: 4e9 }],
+    target: "fake-NAS/Actor/ABC-123", started_at: "2026-10-24T08:00:00Z" };
+
+  it("shows archive progress in the drawer, chip and overview", async () => {
+    mockApi();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:01:00Z"));
+    const film = row({ film_id: "archive-live", title: "归档测试", group: "archiving", stage: "archive", status: "running",
+      steps: steps("archive", "running", { progress }) });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film }));
+    wrap(<MediaWorkspace />);
+    expect(await screen.findByText("归档 · 25% · 复制 2.0 / 4.0 GB")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看 归档测试 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const panel = await within(drawer).findByTestId("archive-live");
+    expect(panel).toHaveTextContent("已用 01:00");
+    expect(panel).toHaveTextContent("复制 → 校验");
+    expect(within(panel).getByRole("progressbar", { name: "归档进度" })).toHaveAttribute("aria-valuenow", "25");
+    expect(panel).toHaveTextContent("已复制2.0 / 4.0 GB");
+    expect(panel).toHaveTextContent("已校验0.0 / 4.0 GB");
+    expect(panel).toHaveTextContent("文件夹0 / 1");
+    expect(panel).toHaveTextContent("速度—");
+    expect(panel).toHaveTextContent(progress.target);
+    expect(panel).toHaveTextContent("复制完会逐个校验；校验通过后才清理主控上的工作副本。");
+    expect(within(drawer).getByText("归档 · 25%", { selector: "[aria-current=step]" })).toBeInTheDocument();
+  });
+
+  it.each([false, true])("opens the recorded folder, including history (archived=%s)", async (archived) => {
+    mockApi();
+    const open = vi.spyOn(api, "workflowOpenFolder").mockResolvedValue(undefined);
+    const film = row({ film_id: "folder-film", title: "目录测试", group: archived ? "done" : "confirm",
+      stage: archived ? "done" : "archive", status: archived ? "succeeded" : "pending",
+      steps: steps(archived ? "done" : "confirm", archived ? "done" : "waiting") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      archive: { status: archived ? "succeeded" : "pending", target_path: archived ? "fake-NAS/ABC-123" : null, error: null },
+      revisions: revisions(1, 1) }));
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 目录测试 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    fireEvent.click(await within(drawer).findByRole("button", { name: archived ? "打开归档目录" : "打开成品目录" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("folder-film", archived ? "archive" : "output"));
   });
 });

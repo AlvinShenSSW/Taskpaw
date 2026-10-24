@@ -13,7 +13,9 @@ from pathlib import Path
 
 import yaml
 
+from taskpaw_v3.agent.server import first_run
 from taskpaw_v3.agent.server.launcher import run_agent
+from taskpaw_v3.core import restart
 from taskpaw_v3.core.config import AgentConfig, load_yaml
 from taskpaw_v3.core.startup import emit_startup_error, startup_code
 from taskpaw_v3.core.state import StateError
@@ -33,6 +35,7 @@ def default_config_path() -> Path:
 def _main() -> int:
     logging.basicConfig(level=logging.INFO)
     path = default_config_path()
+    scaffolded = False
     if not path.exists():
         # Self-initialize a default config so a fresh install / first run "just
         # works" (host_metrics baseline on loopback) instead of exiting and
@@ -51,6 +54,7 @@ def _main() -> int:
             )
             emit_startup_error("config_unwritable")
             return 1
+        scaffolded = True
         logging.getLogger("taskpaw.agent").info(
             "created default agent config at %s", path
         )
@@ -64,6 +68,19 @@ def _main() -> int:
         return 1
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
+    # #299 R1: a fresh install starts the wizard and needs no confirmation
+    # dialog for its first event lineage — only in the run that scaffolded
+    # agent.yaml and wrote the marker (review IR4: a pending marker alone,
+    # e.g. after a crash, keeps the dialog).
+    if scaffolded:
+        try:
+            first_run.write_pending(path, config.server_id)
+        except OSError:
+            logging.getLogger("taskpaw.agent").warning(
+                "could not write the first-run marker"
+            )
+        else:
+            first_run.maybe_initialize(path, state_path, config.server_id)
     # Pass the config path so the control API can persist add/remove/enable (#57).
     try:
         run_agent(config, state_path=state_path, config_path=path, block=True)
@@ -89,7 +106,8 @@ def _main() -> int:
         print(f"Agent startup failed: {code}.", file=sys.stderr)
         emit_startup_error(code)
         return 1
-    return 0
+    # #299 §3: a planned restart asks the desktop shell to start us again
+    return restart.exit_code(0)
 
 
 def main() -> int:

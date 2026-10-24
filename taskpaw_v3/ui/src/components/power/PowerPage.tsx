@@ -36,7 +36,7 @@ function completedFilms(rows: FilmRow[] | undefined): FilmRow[] {
     .slice(-8).reverse();
 }
 
-export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
+export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () => void; onOpenSettings?: () => void } = {}) {
   const [range, setRange] = useState<PowerRange>("24h");
   const [params, setParams] = useState(false);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
@@ -44,7 +44,7 @@ export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
   const ranged = useQuery({
     queryKey: ["power", range], queryFn: () => api.power(range), refetchInterval: 60000, enabled: range !== "24h", retry: false,
   });
-  const films = useQuery({ queryKey: ["power", "films"], queryFn: api.workflowFilms, refetchInterval: 30000, retry: false });
+  const films = useQuery({ queryKey: ["power", "films"], queryFn: () => api.workflowFilms(), refetchInterval: 30000, retry: false });
   const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const view = range === "24h" ? day.data : ranged.data;
   const machines = useMemo(() => machinesOf(day.data, view), [day.data, view]);
@@ -55,7 +55,11 @@ export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
   if (day.isLoading) body = <div className="panel empty"><p>正在读取功耗估算…</p></div>;
   else if (day.error) {
     body = day.error instanceof HttpError && day.error.status === 404
-      ? <Notice tone="amber" icon={WarningAmberIcon}>本机没有运行功耗估算（agent.yaml 中 power.enabled 关闭，或这版 TaskPaw 不支持）。</Notice>
+      ? <Notice tone="amber" icon={WarningAmberIcon}>
+        功耗估算已关闭（{onOpenSettings
+          ? <button type="button" className="link-btn" onClick={onOpenSettings}>设置 → 功耗与主机监控</button>
+          : "设置 → 功耗与主机监控"}）
+      </Notice>
       : <Notice tone="red" icon={WarningAmberIcon}>无法读取功耗估算，请重试。</Notice>;
   } else {
     body = <PowerBody machines={machines} range={range} rows={films.data?.state === "running" ? films.data.films : undefined}
@@ -91,7 +95,8 @@ export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
         </Snackbar>
       </div>
       <PowerParams open={params} onClose={() => setParams(false)} settings={settings} live={day.data?.power ?? null}
-        machineName={day.data?.machine?.name || "本机"} os={day.data?.machine?.os} onSaved={say} />
+        machineName={day.data?.machine?.name || "本机"} os={day.data?.machine?.os} onSaved={say}
+        autoPeers={(day.data?.peers ?? []).filter((p) => p.source === "workflow")} />
     </>
   );
 }
@@ -201,7 +206,7 @@ function MachineRow({ m }: { m: Machine }) {
           <h3>{m.name}</h3>
           <div className="hw">{m.hw}</div>
           <div className="chips">
-            <Chip tone={m.local ? "green" : "neutral"}>{m.local ? "本机" : "对端"}</Chip>
+            <Chip tone={m.local ? "green" : m.auto ? "blue" : "neutral"}>{m.local ? "本机" : m.auto ? "工作机 · 自动加入" : "对端"}</Chip>
             <Chip tone={tone}>{tone === "green" && <span className="dot" aria-hidden="true" />}{stateText}</Chip>
           </div>
         </div>

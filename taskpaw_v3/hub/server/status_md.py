@@ -336,6 +336,7 @@ def _workflow_progress(current: Any, now: datetime) -> str:
         "translate": "翻译",
         "return": "回传",
         "scrape": "刮削",
+        "fetch": "下载",  # P2-4: a worker fetching the source
     }
     stage = current.get("stage")
     label = labels.get(stage, "处理中") if isinstance(stage, str) else "处理中"
@@ -410,9 +411,23 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
             f"待确认 {count('confirm')} · "
             f"异常 {count('attention') + count('packages_attention')} · 完成今日 {today}"
         )
-        progress = _workflow_progress(workflow.get("current"), point)
-        if progress:
-            lines.append(f"- {progress}")
+        # P2-4 R12: each running film with its machine; an older agent
+        # sends only `current`
+        currents = workflow.get("currents")
+        if isinstance(currents, list) and currents:
+            for item in currents[:4]:
+                progress = _workflow_progress(item, point)
+                machine = (
+                    _inline(str(item.get("machine") or ""), 64)
+                    if isinstance(item, dict)
+                    else ""
+                )
+                if progress:
+                    lines.append(f"- {progress}" + (f" · {machine}" if machine else ""))
+        else:
+            progress = _workflow_progress(workflow.get("current"), point)
+            if progress:
+                lines.append(f"- {progress}")
     return [*lines, ""]
 
 

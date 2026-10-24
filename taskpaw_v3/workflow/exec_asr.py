@@ -11,14 +11,18 @@ the stage for the operator (`needs_attention`) before any child starts.
 from __future__ import annotations
 
 import shutil
+import threading
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from time import monotonic
 from typing import Literal
 
+from taskpaw_v3.monitors.plugins.jasna_progress import console_text
 from taskpaw_v3.monitors.subs import srt, whisperjav
 from taskpaw_v3.monitors.subs.child import asr_env
+from taskpaw_v3.monitors.subs.progress import AsrProgress
 
 from . import models as m
 from .exec_common import (
@@ -32,9 +36,8 @@ from .exec_common import (
     workcopy_ref,
     write_text_atomic,
 )
-from .executors import ComputeStage, ExecOutcome, JobContext
-from .local_gpu import max_resolution
-from .local_runtime import LocalRuntime
+from .executors import ASR_DONE, ComputeStage, ExecOutcome, ExecRuntime, JobContext
+from .local_gpu import UHD
 from .stage_results import (
     FileRef,
     StageResult,
@@ -50,6 +53,17 @@ from .subtitle_judge import judge
 PROFILE_ID = "workflow-asr"
 ASR_DIRNAME = "asr"
 _TAIL_LINES = 8
+CONSOLE_INTERVAL_S = 1.0
+_PHASE_LABELS = (
+    "提取音频",
+    "划分场景",
+    "语音增强",
+    "语音分段",
+    "识别语音",
+    "生成场景字幕",
+    "合并字幕",
+    "过滤与清理",
+)
 
 
 @dataclass(frozen=True)
@@ -81,7 +95,7 @@ class AsrExecutor:
 
     def __init__(
         self,
-        runtime: LocalRuntime,
+        runtime: ExecRuntime,
         whisperjav_exe: str,
         *,
         engine: whisperjav.Engine = whisperjav.DEFAULT_ENGINE,
@@ -112,7 +126,8 @@ class AsrExecutor:
         )
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]:
-        return max_resolution(vram_mib)
+        """OD7 R8: WhisperJAV reads the audio only, so any card takes 4K."""
+        return UHD
 
     def needs_gpu(self, manifest: m.InputManifest) -> bool:
         """False when no video will run WhisperJAV (all reused, or the stage
@@ -217,7 +232,7 @@ class AsrExecutor:
             if result.subtitle is not None:
                 counts[result.subtitle.decision] += 1
         summary = "，".join(f"{k} {v}" for k, v in counts.items() if v)
-        return ExecOutcome.succeeded(f"字幕来源：{summary}", digest)
+        return ExecOutcome.succeeded(ASR_DONE.format(summary=summary), digest)
 
     def _transcribe(
         self,
@@ -247,13 +262,74 @@ class AsrExecutor:
             ),
         ]
         tail: deque[str] = deque(maxlen=_TAIL_LINES)
-        context.progress(f"识别日语{label}")
+        parser = AsrProgress(monotonic())
+        lock = threading.Lock()  # stdout, stderr and the console flusher
+        console = ""
+        phase: int | None = None
+        phase_started = monotonic()
+        durations: dict[int, int] = {}
+        last_emit = 0.0
+        held = False
+
+        def publish(now: float) -> None:
+            nonlocal last_emit, held
+            progress = parser.snapshot(now)
+            if phase is None:
+                progress = {"elapsed_s": progress["elapsed_s"]}
+            else:
+                progress["phase_label"] = _PHASE_LABELS[phase - 1]
+                progress["phases"] = [
+                    {
+                        "n": n,
+                        "label": name,
+                        "state": "done"
+                        if n < phase
+                        else "current"
+                        if n == phase
+                        else "pending",
+                        "seconds": int(now - phase_started)
+                        if n == phase
+                        else durations.get(n),
+                    }
+                    for n, name in enumerate(_PHASE_LABELS, 1)
+                ]
+            progress["console"] = console
+            # The existing dict channel is named ltx; board maps it to ASR progress.
+            context.progress(f"识别日语{label}：{console[-120:]}", ltx=progress)
+            last_emit, held = now, False
+
+        publish(monotonic())
 
         def on_line(_stream: str, text: str) -> None:
-            line = text.strip()
-            if line:
-                tail.append(line[:300])
-                context.progress(f"识别日语{label}：{line[-120:]}")
+            nonlocal console, phase, phase_started, held
+            with lock:
+                now = monotonic()
+                parser.feed_text(text, now)  # parse even when publication is throttled
+                next_phase = parser.snapshot(now)["phase"]
+                if next_phase != phase:
+                    if phase is not None:
+                        durations[phase] = int(now - phase_started)
+                    phase, phase_started = next_phase, now
+                line = console_text(text)
+                if not line:
+                    return
+                console = line
+                tail.append(line)
+                held = True
+                if now - last_emit >= CONSOLE_INTERVAL_S:
+                    publish(now)
+
+        stop_flush = threading.Event()
+
+        def flush_held() -> None:
+            # A burst's last line still reaches the UI if the child goes quiet.
+            while not stop_flush.wait(CONSOLE_INTERVAL_S):
+                with lock:
+                    now = monotonic()
+                    if (
+                        held or phase is not None
+                    ) and now - last_emit >= CONSOLE_INTERVAL_S:
+                        publish(now)
 
         child = context.processes.launch(
             argv,
@@ -261,7 +337,18 @@ class AsrExecutor:
             env=asr_env(None, self.whisperjav_exe),
             on_line=on_line,
         )
-        code = child.wait(context.cancel)
+        flusher = threading.Thread(
+            target=flush_held, name="asr-console-flush", daemon=True
+        )
+        flusher.start()
+        try:
+            code = child.wait(context.cancel)
+        finally:
+            stop_flush.set()
+            flusher.join(2)
+            with lock:
+                if held:
+                    publish(monotonic())
         if code is None:
             raise cancelled()
         outcome = whisperjav.read_outcome(out_dir, code, " | ".join(tail))
