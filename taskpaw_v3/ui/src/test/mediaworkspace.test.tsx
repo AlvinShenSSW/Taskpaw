@@ -737,6 +737,39 @@ describe("图文确认 review fixes", () => {
     ...pf, performer_id: "1", target_path: STAR_TARGET, absent: true, ...over,
   });
 
+  it.each(["running", "pending"] as const)("the receipt shows archive progress only while the step is %s", async (state) => {
+    const m = mockApi();
+    let after = false;
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
+      ? detail(id, {
+        can_confirm: false, archive: { status: state, error: null, target_path: STAR_TARGET },
+        steps: steps("archive", state, { progress: state === "running" ? {
+          phase: "copying", copied_bytes: 2e9, verified_bytes: 0, total_bytes: 4e9,
+          files_done: 0, files_total: 1, items: [{ name: "ABF-406", bytes: 2e9, total: 4e9 }],
+          target: STAR_TARGET, started_at: "2026-10-24T08:00:00Z",
+        } : null }),
+      })
+      : detail(id)));
+    m.confirm.mockImplementation(async () => { after = true; return { approval_id: "a1" }; });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    fireEvent.click(ok);
+    const receipt = within(await screen.findByRole("dialog", { name: "已确认，等待归档" }));
+    const notice = "后台正在归档并校验；完成后显示入库回执。";
+    if (state === "running") {
+      const panel = within(await receipt.findByRole("region", { name: "归档进度" }));
+      expect(panel.getByText("25%")).toBeInTheDocument();
+      expect(panel.getByRole("progressbar", { name: "归档进度" })).toHaveAttribute("aria-valuenow", "25");
+      expect(panel.getByText("已复制").closest("li")).toHaveTextContent("2.0 / 4.0 GB");
+      expect(receipt.queryByText(notice)).not.toBeInTheDocument();
+    } else {
+      expect(await receipt.findByText(notice)).toBeInTheDocument();
+      expect(receipt.queryByRole("region", { name: "归档进度" })).not.toBeInTheDocument();
+    }
+  });
+
   it.each([
     ["failed", "上次入库未完成：NAS 写入中断。可重新确认入库。", true],
     ["unknown", "入库结果待核对，暂不能重新上传。", false],

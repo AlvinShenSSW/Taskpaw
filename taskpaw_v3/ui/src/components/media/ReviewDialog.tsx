@@ -9,7 +9,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode, type TargetPreflight,
 } from "../../api";
-import { packageNote, type StatusKey } from "./mediaModel";
+import { packageNote, runningArchiveStep, type StatusKey } from "./mediaModel";
+import { ArchiveLivePanel } from "./ArchiveLivePanel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
 import {
@@ -290,6 +291,7 @@ function Candidates({ candidates, selected, actor, onSelect }: {
 // After 「确认入库」: 「已确认，等待归档」 until the receipt, then 入库完成 or 已入库 · 待清理.
 function Receipt({ film, onClose }: { film: FilmDetail; onClose: () => void }) {
   const ws = useWorkspace();
+  const archive = runningArchiveStep(film);
   const archived = film.archive.status === "succeeded" || Boolean(film.receipt_id);
   const cleaned = film.cleanup.input === "succeeded";
   const pendingCleanup = archived && !cleaned && film.cleanup.input !== null && film.cleanup.input !== "pending" && film.cleanup.input !== "running";
@@ -305,7 +307,7 @@ function Receipt({ film, onClose }: { film: FilmDetail; onClose: () => void }) {
             <p>{film.archive.target_path ?? ""}</p>
             {film.receipt_id && <p className="mono">回执 {film.receipt_id}</p>}
           </div>
-        ) : (
+        ) : archive ? <ArchiveLivePanel step={archive} /> : (
           <Notice>后台正在归档并校验；完成后显示入库回执。</Notice>
         )}
         {archived && (

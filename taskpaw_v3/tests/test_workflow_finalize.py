@@ -566,3 +566,48 @@ def test_shutdown_stops_finalization(world):
         fin.cancel.set()
         world.ticks(fin)
     assert world.status("archive") == "pending" and world.fake.posts == 0
+
+
+def test_cas_conflict_is_retried_quietly(monkeypatch, tmp_path):
+    """A lost optimistic-lock race is retried on the next tick; it is not shown
+    as 「归档/清理暂停」 (operator, 2026-10-24)."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow import models as wm
+    from taskpaw_v3.workflow.finalize import Finalizer
+
+    job = SimpleNamespace(film_id="film")
+    store = SimpleNamespace(list_jobs=lambda *a, **k: [job])
+    fin = Finalizer(
+        SimpleNamespace(data_dir=tmp_path, store=store, operator=None),
+        None,
+        SimpleNamespace(),
+    )
+    fin.waiting = {"film": "归档中"}
+
+    def conflict(film_id, waiting):
+        raise wm.WorkflowError("cas_conflict")
+
+    monkeypatch.setattr(fin, "_advance", conflict)
+    monkeypatch.setattr(fin, "_reclaim_pending", lambda: None)
+    assert fin.run_once() is False
+    assert fin.waiting == {"film": "归档中"}
+
+
+def test_empty_actor_folder_goes_with_its_last_film(tmp_path):
+    """Operator 2026-10-24: after a film's INBOX folder is cleaned, its actor
+    folder is removed only when no other film is left in it; the root stays."""
+    from taskpaw_v3.workflow.finalize import _rmdir_parents
+
+    inbox = tmp_path / "TODO"
+    last = inbox / "actor-a"
+    last.mkdir(parents=True)
+    busy = inbox / "actor-b"
+    (busy / "OTHER-001").mkdir(parents=True)
+    _rmdir_parents(last / "FILM-001", inbox)
+    _rmdir_parents(busy / "FILM-002", inbox)
+    assert not last.exists()
+    assert (busy / "OTHER-001").is_dir()
+    assert inbox.is_dir()
+    _rmdir_parents(inbox / "FILM-003", inbox)  # a root-level package: root kept
+    assert inbox.is_dir()
