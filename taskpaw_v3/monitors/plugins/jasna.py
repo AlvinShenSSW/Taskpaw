@@ -15,8 +15,8 @@ progress) but is built around Jasna's CLI:
     crashed run never leaves a "done" marker (constitution §2 atomic publish).
     #187: a `<stem>_restored.mp4` written by 3.5.1 and earlier still counts as
     restored (never renamed, never restored again; the new name wins when both
-    exist). #303: a file whose tier runs with LTX is named `<stem>-无码.mp4`
-    (staging `<stem>-无码.tmp.mp4`) instead; it counts as restored too;
+    exist). #303: a `<stem>-无码.mp4` (the media workflow's LTX restore) counts as
+    restored too; this monitor itself always writes `-破解`;
   - **outcome-based degrade**: with capture off the plugin cannot read Jasna's
     output, so a failed unet-4x launch is simply retried without unet-4x; if that
     succeeds, unet-4x is disabled for THAT TIER for the rest of the run and one
@@ -283,7 +283,8 @@ _STAGING_SUFFIX = "-破解.tmp.mp4"
 # (never renamed); a legacy staging file is only ever swept / cleared.
 _LEGACY_FINAL_SUFFIX = "_restored.mp4"
 _LEGACY_STAGING_SUFFIX = "_restored.tmp.mp4"
-# #303: a film restored with LTX is 无码, not 破解 (the tier of THAT file decides).
+# #303: the media workflow (always LTX) names its restore `-无码`; this monitor never
+# writes that name, but a file carrying it still counts as restored.
 _LTX_FINAL_SUFFIX = "-无码.mp4"
 _LTX_STAGING_SUFFIX = "-无码.tmp.mp4"
 
@@ -397,7 +398,8 @@ Phase = Literal["restore", "subs", "translate"]
 # ── pure helpers (unit-tested without a GPU) ──────────────────────────────
 def output_path_for(output_folder: str, video: Path, ltx: bool = False) -> Path:
     """The FINAL (published) name a restore of `video` writes:
-    `<out>/<stem>-破解.mp4`, or `<stem>-无码.mp4` for an LTX launch (#303)."""
+    `<out>/<stem>-破解.mp4`; `ltx` (#303, the media workflow only) gives
+    `<stem>-无码.mp4`. The monitor always uses the default."""
     suffix = _LTX_FINAL_SUFFIX if ltx else _FINAL_SUFFIX
     return Path(output_folder) / f"{video.stem}{suffix}"
 
@@ -695,7 +697,6 @@ def plan_subs(
     output_folder: str,
     pending: list[Path],
     excluded: Iterable[Path],
-    ltx: bool = False,
 ) -> SubsPlan:
     """Pure second planning layer (C6/D19/D21) — `plan_queue` is untouched.
 
@@ -711,9 +712,7 @@ def plan_subs(
     files owning their subtitles too: its subtitles exist (a 0-byte `.srt`
     counts) → `none`; its `.ja.srt` there (reused by existence only) →
     `translate_only`; else `full`. Raises `OSError` when the input folder
-    cannot be scanned or the output folder cannot be listed. `ltx` (#303): the
-    name a pending file is predicted to publish under; the launch corrects it
-    when its tier decides otherwise."""
+    cannot be scanned or the output folder cannot be listed."""
     pending_set = set(pending)
     skip = pending_set | set(excluded)
     entries = sorted(
@@ -739,9 +738,7 @@ def plan_subs(
 
     # CX3: a pending file's subtitles belong to the file its restore will
     # publish — never to an older file whose name only looks the same.
-    media: dict[Path, Path] = {
-        v: output_path_for(output_folder, v, ltx) for v in pending
-    }
+    media: dict[Path, Path] = {v: output_path_for(output_folder, v) for v in pending}
     for video in entries:
         if video not in skip:
             final = restored(video)
@@ -825,7 +822,6 @@ def sweep_orphan_staging(
         for f in Path(input_folder).iterdir():
             if f.is_file() and f.suffix.lower() in JASNA_VIDEO_EXTENSIONS:
                 keep.add(str(staging_path_for(output_folder, f)).casefold())
-                keep.add(str(staging_path_for(output_folder, f, ltx=True)).casefold())
                 keep.add(str(legacy_staging_path_for(output_folder, f)).casefold())
         candidates = [p for p in Path(output_folder).iterdir() if p.is_file()]
     except OSError as e:
@@ -833,10 +829,7 @@ def sweep_orphan_staging(
         return []
     now = time.time()
     removed: list[Path] = []
-    suffixes = tuple(
-        s.casefold()
-        for s in (_STAGING_SUFFIX, _LTX_STAGING_SUFFIX, _LEGACY_STAGING_SUFFIX)
-    )
+    suffixes = tuple(s.casefold() for s in (_STAGING_SUFFIX, _LEGACY_STAGING_SUFFIX))
     for cand in candidates:
         if not cand.name.casefold().endswith(suffixes):
             continue
@@ -2180,9 +2173,7 @@ class JasnaInstance(MonitorInstance):
         cfg = self._cfg
         out = cfg.jasna_output_folder
         try:
-            plan = plan_subs(
-                cfg.jasna_input_folder, out, pending, excluded, uses_ltx(cfg)
-            )
+            plan = plan_subs(cfg.jasna_input_folder, out, pending, excluded)
         except (OSError, ValueError) as e:
             # A race on the input folder plan_queue just scanned, or (#191) an
             # output folder that cannot be listed (an unreachable share, an
@@ -2536,9 +2527,7 @@ class JasnaInstance(MonitorInstance):
     def _delete_current_staging(self) -> None:
         if self._current is None:
             return
-        staging = staging_path_for(
-            self._cfg.jasna_output_folder, self._current, self._current_ltx
-        )
+        staging = staging_path_for(self._cfg.jasna_output_folder, self._current)
         try:
             staging.unlink(missing_ok=True)
         except OSError as e:
@@ -2666,14 +2655,11 @@ class JasnaInstance(MonitorInstance):
             self._current_dims = dims
             self._current_bitrate = bitrate
 
-            ltx = ltx_launch(cfg, tier)
-            self._current_ltx = ltx  # #265 D2: a failed LTX launch is not retried
-            staging = staging_path_for(cfg.jasna_output_folder, video, ltx)
+            staging = staging_path_for(cfg.jasna_output_folder, video)
             # A stale partial from an earlier run — and a 3.5.1-or-earlier one
             # under the legacy name, which nothing writes any more (#187).
             for stale in (
                 staging,
-                staging_path_for(cfg.jasna_output_folder, video, not ltx),
                 legacy_staging_path_for(cfg.jasna_output_folder, video),
             ):
                 try:
@@ -2682,6 +2668,8 @@ class JasnaInstance(MonitorInstance):
                     log.warning("jasna: could not clear staging file %s: %s", stale, e)
 
             exe_dir = self._exe_dir()
+            ltx = ltx_launch(cfg, tier)
+            self._current_ltx = ltx  # #265 D2: a failed LTX launch is not retried
             if ltx:
                 # #263: LTX takes no secondary restoration — an LTX launch is
                 # never a unet-4x launch (no degrade path for this tier).
@@ -3131,9 +3119,8 @@ class JasnaInstance(MonitorInstance):
         video = self._current
         if video is None:
             return None
-        ltx = self._current_ltx
-        staging = staging_path_for(self._cfg.jasna_output_folder, video, ltx)
-        final = output_path_for(self._cfg.jasna_output_folder, video, ltx)
+        staging = staging_path_for(self._cfg.jasna_output_folder, video)
+        final = output_path_for(self._cfg.jasna_output_folder, video)
         # Retag BEFORE the rename, so the published file is never briefly the
         # unpreviewable `hev1` variant and a failure here costs nothing. A
         # missing staging file is reported by the os.replace below — don't add a
@@ -3167,7 +3154,6 @@ class JasnaInstance(MonitorInstance):
                 data={"exit_code": 0, "reason": "publish_failed"},
             )
             return f"could not publish {final.name}: {e}"
-        self._retarget_subs(video, final)
         get_task_log().record(
             self.instance_id,
             "restore.finished",
@@ -3179,20 +3165,6 @@ class JasnaInstance(MonitorInstance):
             },
         )
         return None
-
-    def _retarget_subs(self, video: Path, final: Path) -> None:
-        """#303: the plan named the restored file before its tier was known; the
-        subtitles follow the name that was actually published."""
-        job = self._jobs.get(video.name)
-        if job is None or job.media == final:
-            return
-        old = job.media
-        if job.ja_target == ja_target_for(old):  # an existing transcript keeps its name
-            job.ja_target = ja_target_for(final)
-        job.zh_target = zh_target_for(final)
-        job.media = final
-        if self._plan is not None and video in self._plan.media:
-            self._plan.media[video] = final
 
     def _handle_success(self, emit: EventEmitter) -> None:
         tier = self._current_tier or "1080p"
@@ -3268,9 +3240,7 @@ class JasnaInstance(MonitorInstance):
             },
         )
         if self._current is not None:
-            staging = staging_path_for(
-                cfg.jasna_output_folder, self._current, self._current_ltx
-            )
+            staging = staging_path_for(cfg.jasna_output_folder, self._current)
             try:
                 staging.unlink(missing_ok=True)
             except OSError as e:

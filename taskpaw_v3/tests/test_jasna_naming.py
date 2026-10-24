@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
-from test_jasna import _events, _Launcher, _ltx_model, _managed, _patch, _probe, _videos
+from test_jasna import _events, _Launcher, _managed, _patch, _videos
 from test_jasna_subs import _done, _ja, _setup, _zh
 
 from taskpaw_v3.monitors.plugins import jasna as J
@@ -505,7 +505,7 @@ def test_field_descriptions_state_the_new_names():
     assert "delete its old .srt files first" in av
 
 
-# ── #303: a film restored with LTX is 无码 ────────────────────────────────
+# ── #303: the workflow names an LTX restore 无码; the monitor only recognises it ──
 def test_ltx_output_and_staging_names_are_wu_ma(tmp_path):
     out = str(tmp_path / "out")
     v = tmp_path / "in" / "SDAB-312.mp4"
@@ -538,61 +538,3 @@ def test_plan_queue_and_plan_subs_count_a_wu_ma_output_as_restored(tmp_path):
     plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
     assert [p.name for p in plan.subs_only] == ["a.mp4"]
     assert plan.media[inp / "a.mp4"] == out / "a-无码.mp4"
-
-
-def test_sweep_orphan_staging_covers_the_wu_ma_staging_name(tmp_path):
-    inp, out = tmp_path / "in", tmp_path / "out"
-    inp.mkdir()
-    out.mkdir()
-    _videos(inp, "keep.mp4")
-    gone, keep = out / "gone-无码.tmp.mp4", out / "keep-无码.tmp.mp4"
-    for p in (gone, keep):
-        p.write_bytes(b"x")
-    _age(gone, keep)
-    removed = sweep_orphan_staging(str(inp), str(out))
-    assert [p.name for p in removed] == [gone.name]
-    assert keep.exists()
-
-
-def test_the_tier_decides_the_name_an_ltx_launch_publishes(tmp_path, monkeypatch):
-    # only the 1080p tier runs LTX: the 4K file is 破解, the 1080p file 无码
-    cfg, inp, out, home = _managed(tmp_path, ltx_1080p=True)
-    _ltx_model(home)
-    _videos(inp, "a.mp4", "b.mp4")
-    launcher = _Launcher([0, 0])
-    dims = {"a.mp4": (1920, 1080), "b.mp4": (3840, 2160)}
-    probe = _probe(mapping=dims)
-    _patch(monkeypatch, launcher, probe)
-    monkeypatch.setattr(J, "query_gpus", lambda: None)
-    inst = JasnaInstance("j1", cfg)
-    _evs, emit = _events()
-    inst.start(emit)
-    assert launcher.arg(0, "--output") == str(out / "a-无码.tmp.mp4")
-    inst.check(emit)
-    assert launcher.arg(1, "--output") == str(out / "b-破解.tmp.mp4")
-    inst.check(emit)
-    assert _files(out) == ["a-无码.mp4", "b-破解.mp4"]
-    inst.stop(timeout=0.5)
-
-
-@pytest.mark.parametrize(
-    ("tier_on", "stem"), [("ltx_1080p", "e-无码"), ("ltx_4k", "e-破解")]
-)
-def test_subtitles_follow_the_name_the_launch_published(
-    tmp_path, monkeypatch, tier_on, stem
-):
-    # the plan predicts the name before the tier is known (ltx_4k: wrongly, for
-    # this 1080p file); publishing corrects the job to the real name
-    r = _setup(tmp_path, monkeypatch, pending=["e.mp4"], **{tier_on: True})
-    monkeypatch.setattr(J, "query_gpus", lambda: None)
-    _ltx_model(Path(r.cfg.jasna_exe_path).parent)
-    r.inst.start(r.emit)
-    r.inst.check(r.emit)  # restored → ASR on the restored file
-    media = r.out / f"{stem}.mp4"
-    assert media.exists()
-    job = r.inst._jobs["e.mp4"]
-    assert job.media == media
-    assert job.zh_target == r.out / f"{stem}.zh.srt"
-    assert job.ja_target == r.out / f"{stem}.ja.srt"
-    assert r.spawner.argvs[0][1] == str(media)
-    r.inst.stop(timeout=1)
