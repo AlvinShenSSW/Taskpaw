@@ -359,6 +359,7 @@ class WorkerHost:
         settings: WorkflowSettings,
         data_dir: Path,
         *,
+        agent_port: int | None = None,
         probe: ProbeFn = default_probe,
         gpu_live: GpuLive = default_gpu_live,
         client_factory: Callable[..., WorkerClient] = WorkerClient,
@@ -381,6 +382,7 @@ class WorkerHost:
         from taskpaw_v3 import __version__
 
         self.settings, self.data_dir = settings, data_dir
+        self.agent_port = agent_port
         self.identity_path = data_dir / IDENTITY_NAME
         self.pending_path = data_dir / PENDING_NAME
         self.probe_seconds, self.pending_seconds = probe_seconds, pending_seconds
@@ -574,6 +576,7 @@ class WorkerHost:
                 parsed.ticket,
                 identity.credential_id,
                 identity.secret,
+                agent_port=self.agent_port,
             )
             worker_id = str(reply["worker_id"])
         except ApiError as exc:
@@ -877,7 +880,9 @@ class WorkerHost:
         next beat posts it again (IR6)."""
         dispatcher = self.dispatcher
         reports = dispatcher.reports() if dispatcher is not None else []
-        reply = self._retry(lambda: client.boot(self.boot_id, reports))
+        reply = self._retry(
+            lambda: client.boot(self.boot_id, reports, agent_port=self.agent_port)
+        )
         if reply is None:
             return None
         self.reconciled = bool(reply.get("reconciled"))
@@ -1130,7 +1135,7 @@ def _load_paused(path: Path) -> bool:
 
 
 def start_worker_host(
-    settings: WorkflowSettings, config_dir: Path | None
+    settings: WorkflowSettings, config_dir: Path | None, *, agent_port: int
 ) -> WorkerHost | None:
     """A worker's host (role=worker and enabled); None without a data dir."""
     if not settings.enabled or settings.role != "worker":
@@ -1141,7 +1146,7 @@ def start_worker_host(
         data_dir = config_dir / "workflow"
     else:
         return None
-    host = WorkerHost(settings, data_dir)
+    host = WorkerHost(settings, data_dir, agent_port=agent_port)
     host.start()
     return host
 

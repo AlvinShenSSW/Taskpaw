@@ -375,8 +375,11 @@ class WorkerCommands(ReadCommands):
                 request_digest=digest(command),
             )
             old = self._worker(command.worker_id)
+            port = command.agent_port or old.port
             worker = old.model_copy(
                 update={
+                    "port": port,
+                    "network_revision": old.network_revision + int(port != old.port),
                     "enrollment_state": "pending_validation",
                     "admission_state": "disabled",
                     "boot_id": None,
@@ -497,8 +500,11 @@ class WorkerCommands(ReadCommands):
                 "UPDATE principals SET boot_id=?,version=version+1 WHERE principal_id=?",
                 (command.boot_id, principal["principal_id"]),
             )
+            port = command.agent_port or old.port
             worker = old.model_copy(
                 update={
+                    "port": port,
+                    "network_revision": old.network_revision + int(port != old.port),
                     "boot_id": command.boot_id,
                     "version": command.expected_version + 1,
                 }

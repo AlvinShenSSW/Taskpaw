@@ -158,7 +158,13 @@ class WorkerClient:
 
     # ── enrollment and live state ────────────────────────────────────────
     def pair(
-        self, pairing_id: str, ticket: SecretStr, credential_id: str, secret: SecretStr
+        self,
+        pairing_id: str,
+        ticket: SecretStr,
+        credential_id: str,
+        secret: SecretStr,
+        *,
+        agent_port: int | None = None,
     ) -> dict[str, Any]:
         return self.call(
             "POST",
@@ -168,6 +174,7 @@ class WorkerClient:
                 "ticket": ticket.get_secret_value(),
                 "credential_id": credential_id,
                 "secret": secret.get_secret_value(),
+                **({"agent_port": agent_port} if agent_port is not None else {}),
             },
             auth=False,
         )
@@ -179,7 +186,11 @@ class WorkerClient:
         return self.call("POST", "/capabilities", dict(probe))
 
     def boot(
-        self, boot_id: str, attempts: Sequence[Mapping[str, Any]] | None = None
+        self,
+        boot_id: str,
+        attempts: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        agent_port: int | None = None,
     ) -> dict[str, Any]:
         """P2-3 §5: `attempts` reports the local attempt files."""
         return self.call(
@@ -190,6 +201,7 @@ class WorkerClient:
                 "assignment_ids": [],
                 "local_owners": [],
                 "attempts": list(attempts or []),
+                **({"agent_port": agent_port} if agent_port is not None else {}),
             },
         )
 

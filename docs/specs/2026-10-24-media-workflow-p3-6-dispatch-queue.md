@@ -103,3 +103,4 @@ This is scheduler policy plus copy only. Use no store migration unless unavoidab
 | ID | Finding | Disposition |
 |---|---|---|
 | V1 | The one requested full pytest run ended with 7,270 passed, 182 skipped and 4 failed; a full green run after the fixes has not been obtained. | Restored the pinned/reassign time estimate and updated the three old automatic-prefetch test scenarios. All 248 tests in the affected regression files now pass. The full suite was not repeated, respecting the operator’s explicit “run once” constraint. No store migration or implementation-contract deviation. |
+| P2 | Real machine: a worker on LAN port 5678 showed ?? in ?? (controller polled the 5680 default). | The worker reports its agent port; the controller records and polls it. |
