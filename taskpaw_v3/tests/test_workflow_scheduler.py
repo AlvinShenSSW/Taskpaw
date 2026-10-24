@@ -149,7 +149,7 @@ def test_an_8gb_card_takes_nothing_and_asr_is_never_routed():
     films = [film(i) for i in range(10)]
     result = run(films, ws)
     assert small.worker_id not in routed(result).values()
-    assert len(result.routes) == 8  # 4 × 16 GB, 2 routes each (S4)
+    assert len(result.routes) == 4  # P3-6: auto uses only each free active slot
     asr_only = film(20, restore="succeeded")
     queued = [open_route(f, ws[i]) for i, f in enumerate(films[:4])]
     result = run([asr_only, *films[:4]], ws, routes=queued)
@@ -165,17 +165,17 @@ def test_a_restore_pinned_to_an_8gb_card_waits_with_the_reason():
 
 
 # ── one open route, capacity, ordering ───────────────────────────────────
-def test_at_most_one_route_per_film_and_two_per_worker():
+def test_at_most_one_auto_route_per_film_and_per_worker():
     ws = fleet()[:2]
     films = [film(i) for i in range(6)]
     result = run(films, ws)
-    assert len({r.film_id for r in result.routes}) == len(result.routes) == 4
+    assert len({r.film_id for r in result.routes}) == len(result.routes) == 2
     per_worker = {}
     for r in result.routes:
         per_worker[r.worker_id] = per_worker.get(r.worker_id, 0) + 1
-    assert set(per_worker.values()) == {2}
+    assert set(per_worker.values()) == {1}
     left = {f.film_id for f in films} - set(routed(result))
-    assert all(result.waiting[f].startswith("等待设备") for f in left)
+    assert all(result.waiting[f].startswith("第 ") for f in left)
 
 
 def test_a_film_with_an_open_route_is_not_routed_again():
@@ -185,13 +185,13 @@ def test_a_film_with_an_open_route_is_not_routed_again():
     assert result.routes == ()
 
 
-def test_4k_films_go_first_so_16gb_cards_are_not_starved():
+def test_confirm_order_applies_across_resolutions():
     w = fleet()[0]
     early = [film(i) for i in range(2)]
     late_4k = film(30, size=UHD)
     result = run([*early, late_4k], [w])
-    assert late_4k.film_id in routed(result)
-    assert routed(result).keys() == {late_4k.film_id, early[0].film_id}
+    assert routed(result).keys() == {early[0].film_id}
+    assert result.waiting[late_4k.film_id] == "第 2 位 · 哪台先空给哪台 · 只给 16 GB 卡"
 
 
 # ── prediction ───────────────────────────────────────────────────────────
@@ -290,14 +290,15 @@ def test_a_running_claim_counts_its_remaining_time():
         claimed_at=NOW - timedelta(hours=1),
     )
     short_queue = film(1, hours=1.0)
-    f = film(5)
+    f = film(5, pin=a.worker_id)
     result = run(
         [long_run, short_queue, f],
         [a, b],
         routes=[open_route(long_run, a), open_route(short_queue, b)],
         samples=samples,
     )
-    assert routed(result) == {f.film_id: b.worker_id}
+    assert routed(result) == {f.film_id: a.worker_id}
+    assert result.routes[0].finish_at > NOW + timedelta(hours=4)
 
 
 # ── pins ─────────────────────────────────────────────────────────────────
@@ -308,7 +309,7 @@ def test_a_pinned_film_routes_only_to_its_worker():
     pinned = film(5, pin=target.worker_id)
     result = run([*busy, pinned], ws, routes=[open_route(f, target) for f in busy])
     assert pinned.film_id not in routed(result)
-    assert result.waiting[pinned.film_id] == "等待 5060 Ti-3：设备队列已满"
+    assert result.waiting[pinned.film_id] == "第 1 位"
     result = run([pinned], ws)
     (decision,) = result.routes
     assert (decision.worker_id, decision.kind) == (target.worker_id, "pinned")
@@ -692,7 +693,7 @@ def test_films_with_a_changed_source_do_not_take_route_slots():
     bad = [film(i, source_admissible=False) for i in range(3)]
     fine = [film(10 + i) for i in range(2)]
     result = run([*bad, *fine], [w])
-    assert routed(result).keys() == {f.film_id for f in fine}
+    assert routed(result).keys() == {fine[0].film_id}
     assert {f.film_id for f in bad} <= set(result.waiting)
 
 

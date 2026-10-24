@@ -254,7 +254,8 @@ export function FilmRowView({ item }: { item: WorkItem }) {
     <article className="film-row">
       <ItemCover item={item} />
       <div className="film-body">
-        <div className="film-title"><h3>{title}</h3>{itemResolution(item) && <Chip>{itemResolution(item)}</Chip>}</div>
+        <div className="film-title"><h3>{title}</h3>{itemResolution(item) && <Chip>{itemResolution(item)}</Chip>}
+          {item.kind === "film" && isRemoteRow(item.row) && <StatusChip status={item.status} film={item.row} />}</div>
         <div className="meta">
           {itemNumber(item) && <span className="mono">{itemNumber(item)}</span>}
           {item.kind === "film" && isRemoteRow(item.row) && !REVIEW_STATES.includes(item.status)

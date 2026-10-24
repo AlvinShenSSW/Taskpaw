@@ -339,7 +339,7 @@ def test_reassign_options_and_plans_do_not_offer_a_held_film(world):
         "live_since": fleet.started_at,
     }
     auto = planning.plan_list(world.rt, remote=inputs)["plans"][0]["routing"]
-    assert auto["standard"]["auto"]["machine"] is not None
+    assert auto["standard"]["auto"]["waiting"] == "第 1 位 · 哪台先空给哪台"
     held = planning.plan_list(world.rt, remote=inputs, hold=frozenset({unplanned}))
     assert held["plans"][0]["routing"]["standard"]["auto"] == {
         "waiting": SOURCE_CHANGED

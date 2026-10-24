@@ -68,7 +68,7 @@ describe("功耗 tab", () => {
     expect(local).toHaveTextContent(`${fmtKwh(4550)}度`);
     const old = document.querySelector('[data-machine="peer:GPU-04"]') as HTMLElement;
     expect(within(old).getAllByText("无功耗数据（需升级 TaskPaw）").length).toBeGreaterThan(0);
-    expect(document.querySelector('[data-machine="peer:GPU-05"]')).toHaveTextContent("离线");
+    expect(document.querySelector('[data-machine="peer:GPU-05"]')).toHaveTextContent("连不上（检查网络 / 防火墙）");
     // the translation machine has no NVIDIA GPU
     expect(document.querySelector('[data-machine="peer:翻译机"]')).toHaveTextContent("GPU —");
     // PW08: a Mac running only the Hub has no row, and the tab says so
@@ -357,10 +357,10 @@ describe("power view model", () => {
     expect(times).toHaveLength(96);
     expect(series.map((s) => s.name)).toEqual(["HOME-PC", "GPU-02", "翻译机"]);
     expect(series[0].values[40]).toBeNull();
-    expect(stateChip({ state: "ok", stale: true })[0]).toBe("数据过期");
-    expect(stateChip({ state: "no_power", stale: false })[0]).toBe("无功耗数据（需升级 TaskPaw）");
-    expect(stateChip({ state: "self", stale: false })[0]).toBe("就是本机，不重复计入");
-    expect(stateChip({ state: "duplicate", stale: false, duplicateOf: "GPU-02" })[0]).toBe("与 GPU-02 是同一台机器，不重复计入");
+    expect(stateChip({ name: "GPU-02", state: "ok", stale: true })[0]).toBe("数据过期");
+    expect(stateChip({ name: "GPU-02", state: "no_power", stale: false })[0]).toBe("无功耗数据（需升级 TaskPaw）");
+    expect(stateChip({ name: "GPU-02", state: "self", stale: false })[0]).toBe("就是本机，不重复计入");
+    expect(stateChip({ name: "GPU-02", state: "duplicate", stale: false, duplicateOf: "GPU-02" })[0]).toBe("与 GPU-02 是同一台机器，不重复计入");
   });
 
   it("aggregates by timestamp only: an unmatched peer point is a gap, never shifted by index", () => {
@@ -412,4 +412,18 @@ describe("media power parts", () => {
     expect(block.querySelector('[data-energy="restore"]')).toHaveTextContent("部分");
     expect(block.querySelector('[data-energy="restore"]')).toHaveTextContent("2 次尝试");
   });
+});
+
+
+it.each([
+  ["unauthorized", "令牌不一致：在 GPU-02 的 设置 → 网络与访问 粘贴主控的访问令牌"],
+  ["unreachable", "连不上（检查网络 / 防火墙）"],
+  ["timeout", "连不上（检查网络 / 防火墙）"],
+])("#306 explains a peer without a reading: %s", async (state, expected) => {
+  mockApi();
+  const view = powerView("24h");
+  view.peers = [{ ...view.peers![0], name: "GPU-02", state, error: state, power: null }];
+  vi.spyOn(api, "power").mockResolvedValue(view);
+  wrap(<PowerPage />);
+  expect(await screen.findByText(expected, { selector: ".chip" })).toBeInTheDocument();
 });

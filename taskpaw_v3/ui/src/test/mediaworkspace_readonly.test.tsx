@@ -5,6 +5,8 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setDevControlCredential, type FilmDetail, type HubServer } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import { DEVICES_KEY } from "../components/media/workspace";
+import { REMOTE_DEVICES } from "./fixtures/multiMachine";
 import { HubDashboard } from "../views/HubDashboard";
 import { setLang } from "../i18n";
 import { theme } from "../theme";
@@ -106,7 +108,9 @@ describe("#286 Hub media read-only workspace", () => {
   });
 
   it("keeps recommendations, status, queue and exceptions without mutation or local-control reads", async () => {
-    mount(<MediaWorkspace readOnly server={SERVER} />);
+    const { qc } = mount(<MediaWorkspace readOnly server={SERVER} />);
+    // A cached local fleet must not turn the observed single-machine queue into a fleet board.
+    qc.setQueryData(DEVICES_KEY, REMOTE_DEVICES);
     await screen.findByRole("heading", { name: "概览", level: 1 });
     noControls();
     await go("待处理");

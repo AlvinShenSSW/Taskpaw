@@ -30,6 +30,9 @@ function deviceLine(d: PlanRouting["devices"][number], now: number, withName: bo
   const finish = d.finish_at ? `预计 ${clockText(d.finish_at, now)}${withName ? ` 在 ${d.name}` : ""} 完成` : null;
   return [finish, energyText(d.energy_wh)].filter(Boolean).join(" · ");
 }
+// Busy workers can still be pinned: confirmed films wait on the controller.
+const canPin = (d: PlanRouting["devices"][number]) => !d.reason
+  || ["正在修复", "正在修复，下一部已排好", "已有影片等开始"].includes(d.reason);
 const entryTitle = (e: PlanEntry) => e.title || e.name;
 const planKey = (e: Pick<PlanEntry, "film_id" | "input_revision">) => `${e.film_id}:${e.input_revision}`;
 
@@ -255,18 +258,18 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
   const now = Date.now();
   const options: Array<{ id: string; label: string; disabled?: boolean }> = routing ? [
     { id: "", label: autoText(routing) ? `自动（推荐）· ${autoText(routing)}` : "自动（推荐）" },
-    ...routing.devices.map((d) => ({ id: d.id, label: `${d.name} · ${deviceLine(d, now, false) || "可领取"}`, disabled: Boolean(d.reason) })),
+    ...routing.devices.map((d) => ({ id: d.id, label: `${d.name} · ${deviceLine(d, now, false) || "可领取"}`, disabled: !canPin(d) })),
   ] : rec.machine === null ? [{ id: "", label: "自动（推荐）" }, ...workers] : workers;
   const device = routing?.devices.find((d) => d.id === choice.machine);
   // The recommended machine shows the recommendation's reason (a 4K film: 「本机修复输出上限 1080p」).
   const machineReason = routing ? (choice.machine === null ? autoText(routing) : device ? deviceLine(device, now, true) : "该机器当前不可选")
     : choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
   const ready = choice.machine !== "" && (!e.needs_gpu || choice.tier !== null)
-    && (!routing || choice.machine === null || (device !== undefined && !device.reason));
+    && (!routing || choice.machine === null || (device !== undefined && canPin(device)));
   // A tier on which the chosen device is greyed out goes back to 自动.
   const pickTier = (tier: LtxTier) => {
     const next = routingOf(e, tier)?.devices.find((d) => d.id === choice.machine);
-    onChoice({ tier, machine: routing && choice.machine !== null && (!next || next.reason) ? null : choice.machine });
+    onChoice({ tier, machine: routing && choice.machine !== null && (!next || !canPin(next)) ? null : choice.machine });
   };
   const idLine = [e.number || (e.title ? e.name : null), e.actors.join("、")].filter(Boolean).join(" · ");
   const onKey = (ev: KeyboardEvent<HTMLButtonElement>, tier: LtxTier) => {

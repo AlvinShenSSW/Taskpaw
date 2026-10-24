@@ -1,7 +1,7 @@
 // 媒体处理中心 V3: the status vocabulary (build spec §3) and how a backend row maps onto it.
 // Pure functions only; the components and tests share them.
 import type {
-  FilmGroup, FilmRouteInfo, FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
+  FilmGroup, FilmRemote, FilmRouteInfo, FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
   WorkflowStep,
 } from "../../api";
 import { LTX_STAGES, plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
@@ -20,7 +20,7 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
   receiving: ["等待收件检查", "blue"],
   postprocess_error: ["成品封面待处理", "amber"],
-  inbox: ["待领取", "blue"],
+  inbox: ["排队中", "blue"],
   // Not in the V3 vocabulary (U1c): Jasna runs but no LTX stage yet (loading, mosaic scan, BasicVSR++).
   restore: ["修复中", "green"],
   encode: ["LTX · Encode", "green"],
@@ -68,6 +68,18 @@ export const EXCEPTION_STATES: StatusKey[] = [
   "device_lost", "source_missing",
 ];
 export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match", "archiving"];
+
+// P3-6: shared by queue, overview and drawer; local stage labels stay unchanged.
+export function statusLabel(status: StatusKey, film?: FilmRemote & { note?: string | null }): string {
+  if (film && isRemoteRow(film)) {
+    if (status === "inbox") {
+      if (film.route && film.route.live !== "local") return film.note || `下载到 ${film.route.machine.name} · 0%`;
+      return film.pin?.worker_id ? `排队中 · 等 ${film.pin.name}` : "排队中（自动）";
+    }
+    if (isRestoring(status) && film.route && film.route.live !== "local") return `修复中 · ${film.route.machine.name}`;
+  }
+  return STATUS_META[status][0];
+}
 
 // ── tiers (U1 V2) ───────────────────────────────────────────────────────
 export const TIER_ORDER: LtxTier[] = ["standard", "good", "high"];
@@ -435,7 +447,7 @@ export const itemResolution = (item: WorkItem) => (item.kind === "film" ? item.r
 export type StageFilter =
   | "all" | "inbox" | "pending" | "processing" | "preparing" | "review" | "archive" | "completed" | "skipped";
 export const STAGE_OPTIONS: Array<[StageFilter, string]> = [
-  ["all", "全部阶段"], ["inbox", "收件待领取"], ["processing", "修复 / 字幕"], ["preparing", "回传 / 刮削 / 匹配"],
+  ["all", "全部阶段"], ["inbox", "收件 / 排队"], ["processing", "修复 / 字幕"], ["preparing", "回传 / 刮削 / 匹配"],
   ["review", "待确认"], ["archive", "入库 / 来源清理"], ["completed", "已完成"], ["skipped", "已跳过"],
 ];
 export function matchesStage(item: WorkItem, filter: StageFilter): boolean {
@@ -495,7 +507,7 @@ export function stageLine(item: WorkItem): string {
     case "scrape": return "Miko 正在整理元数据、字幕与最终封面";
     case "receiving": return "后台检查收件内容，稍后自动继续";
     case "postprocess_error": return "最终封面尚未通过检查";
-    case "inbox": return row.note || "等待设备领取";
+    case "inbox": return row.note || "等待设备空闲";
     case "asr": return row.note ? `语音识别 · ${row.note}` : "语音识别";
     default: return row.note || STATUS_META[item.status][0];
   }
@@ -617,6 +629,7 @@ export function machineOf(row: FilmRow): string | null {
   if (row.route) return row.route.live === "local" ? "本机" : row.route.machine.name || "工作机";
   const running = (row.steps ?? []).find((s) => s.state === "running" && s.machine);
   if (running?.machine) return running.machine.name;
+  if (row.pin) return row.pin.worker_id ? row.pin.name : "自动";
   return unroutedMachine(row);
 }
 

@@ -675,7 +675,7 @@ def test_cx33_reassign_keeps_the_films_confirm_time_and_route_position(world):
         o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)
     }
     assert options["5070 Ti"]["finish_at"] is not None
-    assert options["自动"]["machine"] == {"id": only.worker_id, "name": "5070 Ti"}
+    assert options["自动"]["machine"] is None  # P3-6: no automatic prefetch
     route(world.rt, film_id, only.worker_id)
     kept = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
     snap = world.rt.store.routing_snapshot(world.rt.operator)

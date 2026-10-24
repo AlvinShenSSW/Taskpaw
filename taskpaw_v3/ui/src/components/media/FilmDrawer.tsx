@@ -11,7 +11,7 @@ import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
-  machineLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
+  machineLabel, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
@@ -244,7 +244,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
         <div>
           <h2>{title}</h2>
           <div className="chips">
-            <StatusChip status={status} />
+            <StatusChip status={status} film={film} />
             {changed && <Chip tone="red">输入变化 · 禁止清理</Chip>}
             {film.resolution && <Chip>{film.resolution}</Chip>}
           </div>
@@ -268,7 +268,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
       ) : film.source_missing ? null : (
         <Notice icon={InfoOutlinedIcon}>
           {status === "pending" ? "待处理 · 确认画质与设备后才进入影片队列。"
-            : [STATUS_META[status][0], item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}
+            : [statusLabel(status, film), item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}
         </Notice>
       )}
       {energyBlock || null}
