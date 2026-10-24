@@ -331,7 +331,8 @@
           "running": false,
           "estimated": true
         },
-        "live_power": null
+        "live_power": null,
+        "completed_at": null
       },
       {
         "film_id": "film-failed",
@@ -527,7 +528,8 @@
           "running": false,
           "estimated": true
         },
-        "live_power": null
+        "live_power": null,
+        "completed_at": null
       },
       {
         "film_id": "film-restoring",
@@ -744,7 +746,8 @@
           "week_wh": 50400.0,
           "month_wh": 291000.0,
           "activity": "restore"
-        }
+        },
+        "completed_at": null
       },
       {
         "film_id": "film-planning",
@@ -860,7 +863,8 @@
         },
         "duration_ms": 120000,
         "energy": null,
-        "live_power": null
+        "live_power": null,
+        "completed_at": null
       },
       {
         "film_id": "film-planning-unknown",
@@ -973,7 +977,8 @@
         },
         "duration_ms": 120000,
         "energy": null,
-        "live_power": null
+        "live_power": null,
+        "completed_at": null
       }
     ],
     "packages": [
