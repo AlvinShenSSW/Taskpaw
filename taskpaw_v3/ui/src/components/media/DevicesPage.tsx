@@ -80,7 +80,7 @@ function gpuLoad(row: DeviceRow): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
-// 领取资格 (1080p by tier; 4K waits for P2-5): what this worker would take now.
+// 领取资格 (1080p by tier): what this worker would take now.
 function eligibilityCell(row: DeviceRow, tier: string): [string, ChipTone] {
   if (!row.eligible) return [row.eligibility, "amber"];
   if (!row.restore_allowed) return ["显存不足", "amber"];
@@ -318,10 +318,8 @@ function WorkerCard({ row, remote, serverTime, busy, progressOf, onApprove, onAd
                   const [text, tone] = eligibilityCell(row, t);
                   return <td key={t}><Chip tone={tone}>{text}</Chip></td>;
                 })}</tr>
-                <tr><th scope="row">4K</th>{TIER_ORDER.map((t) => <td key={t}><Chip>暂不派发</Chip></td>)}</tr>
               </tbody>
             </table>
-            <p className="small muted">4K 派发在后续版本开放。</p>
           </section>
           <section aria-label={`${row.name} 配对与生命周期`}>
             <h4>配对与生命周期</h4>
