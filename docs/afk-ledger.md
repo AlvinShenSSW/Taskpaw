@@ -123,3 +123,15 @@ rebase this branch onto main before merging. Leave open, never deploy.
   its intentional timeout stays three seconds, all descendant PID/handle checks
   remain, and production helper limits are unchanged. The controlled delayed
   case passes after that change. A fresh complete CI matrix is required.
+- The next CI passed Windows Rust/interop and macOS Python, but both Linux
+  matrices caught a race in the new temperature snapshot test: three queued
+  history requests could finish while it counted calls around a cache read.
+  A history barrier reproduced that false attribution; the test now waits for
+  those futures before measuring snapshot IO and asserts the exact accrued age.
+  Linux 3.12 also reported two restore attempts in the existing controller-restart
+  E2E case; its truncated output did not identify the first attempt's cause or
+  evaluate the Jasna count. Three coverage-enabled baseline controls and three
+  current controls all retained one attempt/one Jasna invocation across restart.
+  The original CI cause remains unknown. That test retains both strict single-run
+  assertions and now reports before-restart evidence and the independent Jasna
+  count on failure; no production retry, lease or restart behavior changed.

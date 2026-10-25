@@ -1,5 +1,7 @@
 """#323: current temperatures travel independently of power and history."""
 
+import threading
+
 import pytest
 
 from taskpaw_v3.core.power_fleet import PowerFleet
@@ -32,8 +34,13 @@ def thermal(age=3.0):
 def test_temperature_request_and_cache_ages_accumulate_without_io():
     clock = Clock()
     calls = []
+    release_history = threading.Event()
 
     def fetch(url, token):
+        if "/power/history" in url:
+            assert release_history.wait(3)
+            calls.append(url)
+            return HISTORY
         calls.append(url)
         clock.now += 2
         return {"temperatures": thermal(4), "power": None}
@@ -42,17 +49,25 @@ def test_temperature_request_and_cache_ages_accumulate_without_io():
         lambda: [type("Peer", (), GPU02)()], lambda: "", fetch=fetch, clock=clock
     )
     try:
-        f._refresh((GPU02["name"], GPU02["address"]), "")
-        clock.now += 7
+        histories = f._refresh((GPU02["name"], GPU02["address"]), "")
+        release_history.set()
+        for pending in histories:
+            pending.result(timeout=3)
+        # The refresh's background history IO must finish before measuring a
+        # cache-only snapshot; otherwise unrelated completion races this check.
+        assert len(histories) == 3
         before = len(calls)
+        assert before == 4
+        clock.now += 7
         t = f.snapshot()[0]["temperatures"]
-        assert t["age_s"] >= 13
+        assert t["age_s"] == 13
         assert t["gpu"]["celsius"] == 62
         assert t["gpu"]["readable"] == 1 and t["gpu"]["total"] == 2
         assert len(calls) == before
         clock.now += 17
         assert f.snapshot()[0]["temperatures"]["stale"] is True
     finally:
+        release_history.set()
         f.stop()
 
 
