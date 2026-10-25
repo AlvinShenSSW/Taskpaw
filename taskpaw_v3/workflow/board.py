@@ -485,6 +485,10 @@ def film_row(
     `extra`: the route, pin and 失联 state of remote mode (P2-4); `names`:
     worker id → name for the energy's devices (R10).
     """
+    # Confirmation can precede the finalizer's next tick while a local stage runs.
+    if film.approval_active and waiting.get(film.film_id) == "等待确认入库":
+        waiting = waiting.copy()
+        del waiting[film.film_id]
     place = _place(film)
     stage = next((s for s in film.stages if s.stage == place["stage"]), None)
     # confirmed again after a failed archive: the old failure is no longer the reason

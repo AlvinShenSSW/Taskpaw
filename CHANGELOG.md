@@ -9,6 +9,7 @@
 - Controller update: new intakes on the same NTFS volume use hard links without duplicating file data; unsupported links retain verified copies. Cleanup removes only the approved names, including read-only files. Existing snapshots and the version are unchanged (#314).
 - Controller update: worker upload, completion and stop phases display their current status instead of the Jasna model-loading placeholder (#316).
 - Controller update: reserve 50 GB instead of 100 GB for local post-processing when admitting remote restore work and returned outputs; existing output reservations and queue ordering are unchanged (#317).
+- Controller update: confirmed films no longer display an obsolete confirmation-needed note while awaiting archive; actual archive waits and errors remain visible (#318).
 - 派单：自动 = 哪台工作机先空就派给哪台（不提前绑定、不预取）；指定机器的影片留在主控排队、不限部数，那台机器修片时提前下载它的下一部，修完立即开始。
 - 队列状态改为「排队中（自动）」「排队中 · 等 <机器> · 第 N 位」「下载到 <机器>」「已到 <机器> · 等开始」「修复中 · <机器>」；不再出现「待领取」「设备队列已满」。
 - 功耗：读不到某台机器时显示原因（令牌不一致 / 连不上），不再只写「离线」；主控按工作机自己上报的局域网端口读取（不再默认 5680）。
