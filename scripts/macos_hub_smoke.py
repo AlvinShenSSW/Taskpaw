@@ -310,8 +310,9 @@ def smoke(sidecar, plan, isolation, env, version):
                 ):
                     raise mac.BuildError("macos_hub_smoke_descriptor")
                 await_condition(current_status, "poll_or_delivery")
-                if not (db.parent / "status.md").is_file():
-                    raise mac.BuildError("macos_hub_smoke_status_file")
+                await_condition(
+                    lambda: (db.parent / "status.md").is_file(), "status_file"
+                )
                 # Repeated installation of identical bytes must not restart.
                 manage("install")
                 if runtime()["created"] != initial["created"]:

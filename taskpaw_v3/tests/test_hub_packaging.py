@@ -109,3 +109,83 @@ def test_native_fixture_peers_use_real_protocol_and_join():
             connection.close()
     assert all(not thread.is_alive() for thread in peers.threads)
     assert all(server.fileno() == -1 for server in peers.servers)
+
+
+@pytest.mark.parametrize("publish_later", [True, False])
+def test_hub_smoke_waits_for_status_file_after_api_ready(
+    tmp_path, monkeypatch, publish_later
+):
+    import json
+
+    from scripts import macos_hub_smoke as smoke
+
+    class PassedFileGate(Exception):
+        pass
+
+    source = tmp_path / "source/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"never execute: fake manager only")
+    root = tmp_path / "fixture"
+    root.mkdir()
+    home = root / "HOME"
+    config = home / "Library/Application Support/TaskPaw/hub.yaml"
+    status_file = home / "data/status.md"
+    clock = {"now": 0.0, "api_ready_without_file": False, "published": False}
+    actions = []
+
+    def advance(seconds):
+        clock["now"] += seconds
+        if publish_later and clock["now"] >= 0.2:
+            status_file.write_text("Published after the first completed poll")
+            clock["published"] = True
+
+    def fake_cli(stage, argv, **kwargs):
+        assert argv[1] == "hub-service"
+        action = argv[2]
+        actions.append(action)
+        if action == "install":
+            if actions.count("install") == 2:
+                raise PassedFileGate  # Stop before unrelated lifecycle checks.
+            record = config.parent / "HubService/runtime.json"
+            record.parent.mkdir()
+            record.write_text(json.dumps({"state": "running", "created": 1}))
+        return json.dumps(
+            {"ok": True, "state": "running", "version": "3.10.2"}
+        ).encode(), b""
+
+    def reply(port, token, path):
+        if path == "/ping":
+            return {"version": "3.10.2"}
+        assert path == "/status"
+        clock["api_ready_without_file"] = not status_file.exists()
+        return {
+            "machine": "hub-native-smoke",
+            "servers": [{"online": True, "event_channel": {"state": "ready"}}],
+            "notifications": {"last_success_at": "fixture-delivered"},
+        }
+
+    monkeypatch.setattr(smoke.tempfile, "mkdtemp", lambda **kw: str(root))
+    monkeypatch.setattr(
+        smoke, "time", SimpleNamespace(monotonic=lambda: clock["now"], sleep=advance)
+    )
+    monkeypatch.setattr(smoke.mac, "tool", fake_cli)
+    monkeypatch.setattr(smoke, "request", reply)
+    monkeypatch.setattr(
+        smoke,
+        "read_control_descriptor",
+        lambda path: SimpleNamespace(
+            role="hub",
+            base_url=f"http://127.0.0.1:{json.loads(config.read_text())['control_port']}",
+        ),
+    )
+    expected = PassedFileGate if publish_later else mac.BuildError
+    with pytest.raises(
+        expected, match=None if publish_later else "macos_hub_smoke_status_file"
+    ):
+        smoke.smoke(source, None, SimpleNamespace(require=lambda: None), {}, "3.10.2")
+    assert clock["api_ready_without_file"]
+    assert actions[-2:] == ["stop", "uninstall"]
+    if publish_later:
+        assert clock["published"] and 0.2 <= clock["now"] < 35
+    else:
+        assert 35 <= clock["now"] < 36 and not clock["published"]
