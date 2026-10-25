@@ -89,7 +89,7 @@ export const POWER_CSS = `
 .mw .m-today{grid-area:today;text-align:right}
 .mw .m-today strong{font:500 16px/1.5 var(--mono)}
 .mw .m-today strong small{font:10px var(--sans);color:var(--muted);margin-left:3px}
-.mw .m-temperatures{grid-column:1/-1;display:grid;grid-template-columns:1fr 1.45fr 1fr;gap:12px 24px;border-top:1px solid #34485b;padding-top:12px;margin-top:2px;min-width:0}
+.mw .m-temperatures{grid-column:1/-1;display:grid;grid-template-columns:1fr;gap:12px;border-top:1px solid #34485b;padding-top:12px;margin-top:2px;min-width:0}
 .mw .temperature-sensor{min-width:0;overflow-wrap:anywhere}
 .mw .temperature-label{display:block;font-size:11px;color:#b2c3d5}
 .mw .temperature-reading{display:block;font:500 18px/1.8 var(--mono);color:#eaf2fc}
