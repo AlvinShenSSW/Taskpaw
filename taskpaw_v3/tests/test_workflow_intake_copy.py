@@ -1,6 +1,8 @@
 """Actual private file copies are independent and checked before publication."""
 
+import errno
 import hashlib
+import os
 import sys
 from uuid import uuid4
 
@@ -13,6 +15,14 @@ from taskpaw_v3.workflow import intake_files as files
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows native intake")
 package = fixtures.package
+
+
+@pytest.fixture
+def independent_copy(monkeypatch):
+    def unsupported(*_):
+        raise OSError(errno.EXDEV, "copy-only fixture")
+
+    monkeypatch.setattr(copies.os, "link", unsupported)
 
 
 def copy(source, tmp_path, **kwargs):
@@ -29,8 +39,51 @@ def copy(source, tmp_path, **kwargs):
     )
 
 
+def test_same_volume_links_need_only_reserve_and_keep_snapshot_after_input_unlink(
+    package, tmp_path, monkeypatch
+):
+    from collections import namedtuple
+
+    usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(copies.shutil, "disk_usage", lambda _: usage(1, 1, 0))
+    with held(package) as source:
+        with copy(source, tmp_path) as target:
+            target.copy_members()
+            for item in target.entries.values():
+                assert item.linked
+                assert files._key(item.source.identity) == files._key(
+                    item.copy.identity
+                )
+            target.publish(b"{}")
+    original = package[1] / "movie.mp4"
+    private = target.snapshot_path / "movie.mp4"
+    payload = original.read_bytes()
+    assert original.stat().st_nlink == 2
+    original.unlink()
+    assert private.read_bytes() == payload
+
+
+@pytest.mark.parametrize("error", [errno.EXDEV, errno.ENOTSUP])
+def test_unsupported_links_fall_back_to_verified_independent_copies(
+    package, tmp_path, monkeypatch, error
+):
+    def unsupported(*_):
+        raise OSError(error, "injected unsupported link")
+
+    monkeypatch.setattr(copies.os, "link", unsupported)
+    with held(package) as source:
+        with copy(source, tmp_path) as target:
+            target.copy_members()
+            assert all(not item.linked for item in target.entries.values())
+            assert all(
+                files._key(item.source.identity) != files._key(item.copy.identity)
+                for item in target.entries.values()
+            )
+            target.publish(b"{}")
+
+
 def test_copy_rechecks_bytes_and_publishes_only_complete_independent_files(
-    package, tmp_path
+    package, tmp_path, independent_copy
 ):
     _, directory, _, _ = package
     (directory / "CD1").mkdir()
@@ -131,7 +184,9 @@ def test_copy_interruption_preserves_source_and_does_not_create_completion(
     assert not (target.operation_path / "completion.json").exists()
 
 
-def test_verification_mismatch_is_not_a_successful_copy(package, tmp_path, monkeypatch):
+def test_verification_mismatch_is_not_a_successful_copy(
+    package, tmp_path, monkeypatch, independent_copy
+):
     with held(package) as source:
         with copy(source, tmp_path) as target:
             native_read = target.api.read
@@ -145,7 +200,9 @@ def test_verification_mismatch_is_not_a_successful_copy(package, tmp_path, monke
             assert not target.snapshot_path.exists()
 
 
-def test_capacity_check_precedes_file_creation(package, tmp_path, monkeypatch):
+def test_capacity_check_precedes_file_creation(
+    package, tmp_path, monkeypatch, independent_copy
+):
     from collections import namedtuple
 
     usage = namedtuple("Usage", "total used free")
@@ -185,7 +242,9 @@ def test_atomic_rename_failure_leaves_unpublished_complete_partial(
             assert not (target.operation_path / "completion.json").exists()
 
 
-def test_flush_failure_is_not_verified_or_published(package, tmp_path, monkeypatch):
+def test_flush_failure_is_not_verified_or_published(
+    package, tmp_path, monkeypatch, independent_copy
+):
     with held(package) as source:
         with copy(source, tmp_path) as target:
 
@@ -198,3 +257,78 @@ def test_flush_failure_is_not_verified_or_published(package, tmp_path, monkeypat
             with pytest.raises(files.IntakeFileError, match="copy_incomplete"):
                 target.publish(b"{}")
             assert not target.snapshot_path.exists()
+
+
+def test_link_failure_other_than_unsupported_is_not_silently_copied(
+    package, tmp_path, monkeypatch
+):
+    def denied(*_):
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(copies.os, "link", denied)
+    with held(package) as source:
+        with copy(source, tmp_path) as target:
+            with pytest.raises(PermissionError):
+                target.copy_members()
+            assert not tuple(target.partial_path.iterdir())
+
+
+def test_existing_input_aliases_keep_original_observations_and_independent_directories(
+    package, tmp_path
+):
+    directory = package[1]
+    (directory / "sub").mkdir()
+    os.link(directory / "movie.mp4", directory / "sub" / "alias.mp4")
+    with held(package) as source:
+        original = {key: item.signature for key, item in source.entries.items()}
+        with copy(source, tmp_path) as target:
+            target.copy_members()
+            source.recheck()
+            assert {
+                key: item.signature for key, item in source.entries.items()
+            } == original
+            assert target.entries["movie.mp4"].linked
+            assert target.entries["sub/alias.mp4"].linked
+            assert not target.entries["sub"].linked
+            target.publish(b"{}")
+
+
+def test_copy_fallback_enforces_capacity_after_an_earlier_successful_link(
+    package, tmp_path, monkeypatch
+):
+    from collections import namedtuple
+
+    usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(copies.shutil, "disk_usage", lambda _: usage(1, 1, 0))
+    real_link = os.link
+    calls = []
+
+    def first_only(source, target):
+        calls.append(target)
+        if len(calls) == 1:
+            real_link(source, target)
+        else:
+            raise OSError(errno.ENOTSUP, "fallback requires copy capacity")
+
+    monkeypatch.setattr(copies.os, "link", first_only)
+    with held(package) as source:
+        with copy(source, tmp_path) as target:
+            with pytest.raises(files.IntakeFileError, match="waiting_capacity"):
+                target.copy_members()
+            assert calls[0].is_file() and not calls[1].exists()
+            assert not (target.operation_path / "completion.json").exists()
+
+
+def test_linked_package_still_requires_reserve_before_creating_names(
+    package, tmp_path, monkeypatch
+):
+    from collections import namedtuple
+
+    usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(copies.shutil, "disk_usage", lambda _: usage(100, 1, 99))
+    with held(package) as source:
+        source.policy = source.policy.model_copy(update={"min_free_bytes": 100})
+        with copy(source, tmp_path) as target:
+            with pytest.raises(files.IntakeFileError, match="waiting_capacity"):
+                target.copy_members()
+            assert not tuple(target.partial_path.iterdir())

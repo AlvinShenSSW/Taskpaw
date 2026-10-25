@@ -124,11 +124,11 @@ def remove_work_tree(path: Path, root: Path, *, operation_id: str) -> None:
     contributes zero bytes: its target was never inspected or reclaimed.
     """
     path, root = path.absolute(), root.absolute()
-    freed = 0
+    unlinked_bytes = 0
     deleted = False
 
     def remove(target: Path) -> None:
-        nonlocal freed, deleted
+        nonlocal unlinked_bytes, deleted
         try:
             _guard(target, root)
             info = target.lstat()
@@ -144,7 +144,7 @@ def remove_work_tree(path: Path, root: Path, *, operation_id: str) -> None:
             elif stat.S_ISREG(info.st_mode):
                 if target == path:
                     raise ValueError("expected work directory; keep loose file")
-                # Windows refuses unlink of read-only files. Private copies only;
+                # Windows refuses unlink of read-only files. Owned work names only;
                 # never chmod a link (including a directory reparse point).
                 if (
                     os.name == "nt"
@@ -152,7 +152,7 @@ def remove_work_tree(path: Path, root: Path, *, operation_id: str) -> None:
                 ):
                     target.chmod(stat.S_IWRITE)
                 target.unlink()
-                freed += info.st_size
+                unlinked_bytes += info.st_size
             else:
                 raise ValueError("unrecognized work entry; keep")
             deleted = True
@@ -169,10 +169,10 @@ def remove_work_tree(path: Path, root: Path, *, operation_id: str) -> None:
     remove(path)
     if deleted:
         log.info(
-            "intake reclaim operation=%s path=%s bytes_freed=%d",
+            "intake reclaim operation=%s path=%s logical_bytes_unlinked=%d",
             operation_id,
             path,
-            freed,
+            unlinked_bytes,
         )
 
 

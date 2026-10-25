@@ -1,5 +1,6 @@
 """Real held-directory observations, with persistent identities reused explicitly."""
 
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -14,6 +15,63 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="Native source discovery"
 )
 package = fixtures.package
+
+
+def test_link_metadata_only_changes_preserve_observation_but_changed_bytes_do_not(
+    package, tmp_path, monkeypatch
+):
+    from taskpaw_v3.tests.test_workflow_intake_build import copied
+    from taskpaw_v3.tests.test_workflow_media_facts import parse
+    from taskpaw_v3.tests.test_workflow_media_facts import source as probe_source
+    from taskpaw_v3.workflow.intake_build import build_snapshot
+    from taskpaw_v3.workflow.intake_files import HeldPackage
+
+    with held(package) as source:
+        request = work_request(source, tmp_path)
+        with copied(source, request) as target:
+            target.copy_members()
+            snapshot = build_snapshot(
+                request,
+                source=source,
+                copy=target,
+                facts={v: parse(probe_source()) for v in request.video_ids},
+            )
+            target.publish(snapshot.model_dump_json().encode())
+    cache = {}
+    reads = []
+    actual_chunks = HeldPackage.chunks
+
+    def counted(self, relative):
+        reads.append(relative)
+        yield from actual_chunks(self, relative)
+
+    monkeypatch.setattr(HeldPackage, "chunks", counted)
+
+    def observe():
+        return discovery.observe_package(
+            request.root,
+            request.observation.relative_path,
+            previous=request.observation,
+            package_version=1,
+            observed_at=datetime.now(timezone.utc),
+            trigger="rescan",
+            snapshot=snapshot,
+            linked_tokens=cache,
+        )
+
+    assert observe().observation_digest == request.observation.observation_digest
+    assert reads == []  # exact stored post-link token needs no second full read
+    os.link(target.snapshot_path / "movie.mp4", tmp_path / "returned.mp4")
+    assert observe().observation_digest == request.observation.observation_digest
+    assert reads == ["movie.mp4"]
+    assert observe().observation_digest == request.observation.observation_digest
+    assert reads == ["movie.mp4"]  # accepted later token is cached
+    original = package[1] / "movie.mp4"
+    before = original.stat()
+    with original.open("r+b") as stream:
+        stream.write(b"changed")
+    os.utime(original, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert observe().observation_digest != request.observation.observation_digest
 
 
 def config_for(package, tmp_path):

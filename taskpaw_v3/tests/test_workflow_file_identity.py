@@ -1,8 +1,10 @@
 """C6 exact delete and the shared native identity (F02-P1 §4.2/§4.3)."""
 
+import ctypes
 import hashlib
 import os
 import sys
+from ctypes import wintypes as wt
 from pathlib import Path
 from uuid import uuid4
 
@@ -105,6 +107,84 @@ def test_delete_exact_removes_the_verified_file(member):
     assert not path.exists()
     assert fid.delete_exact(path, value) == "already_absent"
     assert fid.check(path, value) == "already_absent"
+
+
+def _attributes(path: Path) -> int:
+    api = fid._api()
+    handle = api.open(path, directory=False)
+    try:
+        info = fid._Basic()
+        api.check(
+            api.kernel.GetFileInformationByHandleEx(
+                handle, 0, ctypes.byref(info), ctypes.sizeof(info)
+            )
+        )
+        return info.attributes
+    finally:
+        api.close(handle)
+
+
+def _set_attributes(path: Path, attributes: int) -> None:
+    api = fid._api()
+    setter = api.kernel.SetFileAttributesW
+    setter.argtypes, setter.restype = [wt.LPCWSTR, wt.DWORD], wt.BOOL
+    api.check(setter(str(path), attributes))
+
+
+@WINDOWS
+@pytest.mark.parametrize("first", ("input", "workcopy"))
+@pytest.mark.parametrize("attributes", (0x1, 0x1 | 0x2 | 0x20))
+def test_readonly_hardlinks_delete_only_the_approved_name(tmp_path, first, attributes):
+    paths = {name: tmp_path / name / "movie.mp4" for name in ("input", "workcopy")}
+    for path in paths.values():
+        path.parent.mkdir()
+    paths["input"].write_bytes(PAYLOAD)
+    os.link(paths["input"], paths["workcopy"])
+    members = {name: _member(path, str(uuid4())) for name, path in paths.items()}
+    second = "workcopy" if first == "input" else "input"
+    _set_attributes(paths[first], attributes)
+    try:
+        assert _attributes(paths[second]) == attributes
+        assert fid.delete_exact(paths[first], members[first]) == "deleted"
+        assert not paths[first].exists()
+        assert paths[second].read_bytes() == PAYLOAD
+        assert _attributes(paths[second]) == (attributes & ~0x1 or 0x80)
+        # Either cleanup scope can be the remaining read-only name.
+        _set_attributes(paths[second], attributes)
+        assert fid.delete_exact(paths[second], members[second]) == "deleted"
+        assert not paths[second].exists()
+    finally:
+        for path in paths.values():
+            if path.exists():
+                _set_attributes(path, 0x80)
+
+
+@WINDOWS
+@pytest.mark.parametrize("mismatch", ("identity", "hash"))
+def test_rejected_readonly_hardlink_keeps_both_names_and_attributes(tmp_path, mismatch):
+    source, snapshot = tmp_path / "input.mp4", tmp_path / "snapshot.mp4"
+    source.write_bytes(PAYLOAD)
+    os.link(source, snapshot)
+    member = _member(snapshot, str(uuid4()))
+    if mismatch == "identity":
+        member = member.model_copy(
+            update={
+                "native_identity": member.native_identity.model_copy(
+                    update={"object_id": "0" * 32}
+                )
+            }
+        )
+    else:
+        member = member.model_copy(update={"sha256": "0" * 64})
+    attributes = 0x1 | 0x2 | 0x20
+    _set_attributes(source, attributes)
+    try:
+        expected = "blocked_identity" if mismatch == "identity" else "blocked_changed"
+        assert fid.delete_exact(snapshot, member) == expected
+        assert source.read_bytes() == snapshot.read_bytes() == PAYLOAD
+        assert _attributes(source) == _attributes(snapshot) == attributes
+    finally:
+        _set_attributes(source, 0x80)
 
 
 def test_missing_parent_is_already_absent(member, tmp_path):

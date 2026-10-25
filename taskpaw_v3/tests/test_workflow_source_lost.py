@@ -414,7 +414,10 @@ def test_the_shared_intake_snapshot_goes_with_the_last_film_of_its_package(
     assert h.store.package_films(h.operator, observed.package_id) == ()
     assert not snapshot.exists()
     assert metadata.read_text() == "{}"
-    assert result.operation_id in caplog.text and "bytes_freed=11" in caplog.text
+    assert (
+        result.operation_id in caplog.text
+        and "logical_bytes_unlinked=11" in caplog.text
+    )
 
 
 def test_delete_leaves_inbox_files_of_a_present_source(world):

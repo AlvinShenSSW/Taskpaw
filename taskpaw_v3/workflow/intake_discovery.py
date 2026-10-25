@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -27,11 +28,15 @@ def _uid() -> str:
 
 
 def _members(
-    source: HeldPackage, previous: im.IntakeObservation | None
+    source: HeldPackage,
+    previous: im.IntakeObservation | None,
+    snapshot: im.PackageSnapshot | None = None,
+    linked_tokens: dict[tuple[str, str], str] | None = None,
 ) -> tuple[im.ObservedMember, ...]:
     old = previous.members if previous else ()
     used: set[str] = set()
     result = []
+    linked = {v.member_id: v for v in snapshot.members if v.linked} if snapshot else {}
     for relative, entry in source.entries.items():
         same = [
             v
@@ -44,6 +49,41 @@ def _members(
         chosen = exact[0] if exact else same[0] if len(same) == 1 else None
         member_id = chosen.member_id if chosen else _uid()
         used.add(member_id)
+        actual_token = str(entry.change_filetime)
+        token: str | None = actual_token
+        proof = linked.get(member_id)
+        if (
+            chosen
+            and proof
+            and snapshot
+            and previous
+            and snapshot.admission.package_id == previous.package_id
+            and snapshot.admission.observation_digest == previous.observation_digest
+            and proof.relative_path == chosen.relative_path == relative
+            and _key(proof.source_identity) == _key(entry.identity)
+            and proof.size_bytes == chosen.size_bytes == entry.size_bytes
+            and chosen.mtime_ns == entry.mtime_ns
+            and not entry.directory
+        ):
+            cache_key = (snapshot.admission.snapshot_id, member_id)
+            unchanged = actual_token == proof.linked_change_token or (
+                linked_tokens is not None
+                and linked_tokens.get(cache_key) == actual_token
+            )
+            if not unchanged:
+                digest = hashlib.sha256()
+                for chunk in source.chunks(relative):
+                    digest.update(chunk)
+                unchanged = digest.hexdigest() == proof.sha256
+                if unchanged and linked_tokens is not None:
+                    if (
+                        cache_key not in linked_tokens
+                        and len(linked_tokens) >= source.policy.max_members
+                    ):
+                        linked_tokens.pop(next(iter(linked_tokens)))
+                    linked_tokens[cache_key] = actual_token
+            if unchanged:
+                token = chosen.change_token
         result.append(
             im.ObservedMember(
                 member_id=member_id,
@@ -52,7 +92,7 @@ def _members(
                 native_identity=entry.identity,
                 size_bytes=entry.size_bytes,
                 mtime_ns=entry.mtime_ns,
-                change_token=str(entry.change_filetime),
+                change_token=token,
                 temporary=entry.temporary,
             )
         )
@@ -169,6 +209,8 @@ def observe_package(
     trigger: Trigger,
     removed: frozenset[str] = frozenset(),
     reappeared: bool = False,
+    snapshot: im.PackageSnapshot | None = None,
+    linked_tokens: dict[tuple[str, str], str] | None = None,
 ) -> im.IntakeObservation:
     """The caller supplies persisted previous IDs; no database or default path.
     `removed`: previous film ids the operator deleted (never reused);
@@ -194,7 +236,7 @@ def observe_package(
                 != _key(source.package_identity)
             ):
                 compatible = None
-            members = _members(source, compatible)
+            members = _members(source, compatible, snapshot, linked_tokens)
             grouping = _group(
                 source,
                 members,

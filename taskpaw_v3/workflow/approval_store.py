@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from uuid import uuid4
 
+from . import intake_models as im
 from . import models as m
 from .auth import AuthProof
 from .film_store import FilmCommands, native_identity_key
@@ -685,7 +686,65 @@ class ApprovalCommands(FilmCommands):
                 if not releasable:
                     raise m.WorkflowError("precondition_failed")
 
-    def _workcopy_excludes_inputs(self, manifest: m.CleanupManifest) -> None:
+    def _linked_workcopy_members(
+        self, manifest: m.CleanupManifest, binding: m.ApprovalBinding
+    ) -> set[str]:
+        row = self._conn.execute(
+            "SELECT s.body_json FROM intake_films i JOIN intake_snapshots s ON s.snapshot_id=i.snapshot_id "
+            "WHERE i.film_id=? AND i.input_revision=?",
+            (binding.film_id, binding.input_revision),
+        ).fetchone()
+        if row is None:
+            return set()
+        snapshot = im.PackageSnapshot.model_validate_json(row[0])
+        source = next(
+            (
+                v
+                for v in snapshot.manifests
+                if v.film_id == binding.film_id
+                and v.revision == binding.input_revision
+                and v.manifest_hash == binding.input_hash
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.source_binding is None
+            or source.source_binding.snapshot_id != snapshot.admission.snapshot_id
+        ):
+            return set()
+        linked = {v.member_id: v for v in snapshot.members if v.linked}
+        approved = set()
+        for member in manifest.members:
+            for item in source.items:
+                proof = linked.get(item.item_id)
+                if proof is None:
+                    continue
+                identity = member.native_identity
+                if (
+                    member.root_id == proof.copy_identity.root_id
+                    and (
+                        identity.scheme,
+                        identity.volume_or_export_id,
+                        identity.object_id,
+                    )
+                    == (
+                        proof.copy_identity.scheme,
+                        proof.copy_identity.volume_or_export_id,
+                        proof.copy_identity.object_id,
+                    )
+                    and (member.size_bytes, member.sha256)
+                    == (proof.size_bytes, proof.sha256)
+                    and (member.root_id, member.relative_path.casefold())
+                    != (proof.source_identity.root_id, proof.relative_path.casefold())
+                ):
+                    approved.add(member.item_id)
+        return approved
+
+    def _workcopy_excludes_inputs(
+        self, manifest: m.CleanupManifest, binding: m.ApprovalBinding
+    ) -> None:
+        linked = self._linked_workcopy_members(manifest, binding)
         objects = {
             (
                 member.native_identity.scheme,
@@ -693,13 +752,15 @@ class ApprovalCommands(FilmCommands):
                 member.native_identity.object_id,
             )
             for member in manifest.members
+            if member.item_id not in linked
         }
         locations = {
             (member.root_id, member.relative_path.casefold()): member.native_identity
             for member in manifest.members
         }
         # Include this film and references admitted after its approval. Root and
-        # item labels cannot turn the same native object into a disposable copy.
+        # item labels cannot authorize aliases. Only this film's stored linked
+        # snapshot can authorize its separately bound work name.
         for row in self._conn.execute(
             "SELECT body_json FROM source_refs WHERE retained=1"
         ):
@@ -720,11 +781,13 @@ class ApprovalCommands(FilmCommands):
             )
             if location is not None and (
                 identity is None
+                or native_identity_key(identity) == native_identity_key(location)
                 or identity.scheme != location.scheme
                 or identity.volume_or_export_id != location.volume_or_export_id
             ):
                 # As with input sharing, only comparable native evidence can
                 # prove that the same controlled path refers to another object.
+                # An approved hard link never authorizes an input's own name.
                 raise m.WorkflowError("precondition_failed")
 
     def begin_cleanup(
@@ -803,7 +866,7 @@ class ApprovalCommands(FilmCommands):
             if command.scope == "input":
                 self._shared_sources(command.film_id, expected, now)
             else:
-                self._workcopy_excludes_inputs(expected)
+                self._workcopy_excludes_inputs(expected, approval.binding)
             candidates = self._conn.execute(
                 "SELECT principal_id FROM principals WHERE role='cleanup_adapter'"
             ).fetchall()
@@ -915,8 +978,15 @@ class ApprovalCommands(FilmCommands):
                 ):
                     member = members[item.item_id]
                     self._conn.execute(
-                        "UPDATE source_refs SET retained=0 WHERE source_root_id=? AND native_identity_key=?",
-                        (member.root_id, native_identity_key(member.native_identity)),
+                        "UPDATE source_refs SET retained=0 WHERE source_root_id=? AND native_identity_key=? "
+                        "AND EXISTS (SELECT 1 FROM manifest_items i WHERE i.film_id=source_refs.film_id "
+                        "AND i.kind=source_refs.manifest_kind AND i.revision=source_refs.input_revision "
+                        "AND i.item_id=source_refs.item_id AND i.path_key=?)",
+                        (
+                            member.root_id,
+                            native_identity_key(member.native_identity),
+                            member.relative_path.casefold(),
+                        ),
                     )
             statuses = [
                 row[0]

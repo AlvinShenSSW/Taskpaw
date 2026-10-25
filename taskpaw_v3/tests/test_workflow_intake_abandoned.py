@@ -268,7 +268,7 @@ def test_startup_dry_run_and_sweep_keep_every_non_orphan(orphan_tree, state, cap
         assert (path / "completion.json").read_text() == "{}"
     assert (work / "intake" / "loose.txt").read_text() == "keep"
     assert paths["orphan"].name in caplog.text
-    assert caplog.text.count("bytes_freed=3") == 2
+    assert caplog.text.count("logical_bytes_unlinked=3") == 2
     assert tuple(conn.iterdump()) == before
     assert intake_orphans(conn, work) == []  # metadata-only dirs are not orphans
 
