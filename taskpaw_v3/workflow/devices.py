@@ -32,7 +32,7 @@ from taskpaw_v3.core.state import atomic_json
 from . import models as m
 from . import scheduler as s
 from .auth import digest_secret
-from .fleet_live import FleetLive
+from .fleet_live import PROTOCOL, FleetLive
 from .local_runtime import _RESOURCE_NS, LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.devices")
@@ -472,6 +472,8 @@ def device_view(
                 else None,
                 "tiers_ready": list(beat.tiers_ready) if beat is not None else [],
                 "agent_version": beat.version if beat is not None else None,
+                "workflow_protocol": beat.protocol if beat is not None else None,
+                "required_protocol": PROTOCOL,
                 "version_ok": fleet.version_ok(beat)
                 if fleet is not None and beat is not None
                 else None,

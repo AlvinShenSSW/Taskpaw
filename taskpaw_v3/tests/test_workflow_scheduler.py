@@ -396,7 +396,7 @@ def test_a_worker_without_any_heartbeat_is_offline():
         ({"admission_state": "disabled"}, {}, "未启用"),
         ({"admission_state": "draining"}, {}, "停领"),
         ({}, {"paused": True}, "暂停领取"),
-        ({}, {"version_ok": False}, "版本不一致"),
+        ({}, {"version_ok": False}, "工作流协议不兼容"),
         ({"boot_reconciled": False}, {}, "等待对账"),
         ({}, {"tiers_ready": frozenset({"standard"})}, "缺少高画质模型"),
         ({}, {"free_bytes": 80 * GB}, "空间不足"),

@@ -4,6 +4,21 @@ Three roles, deployed independently. **Agents** observe a machine and expose a
 read API; the **Hub** polls all agents and drives notifications. A machine can be
 both (e.g. the Mac is the Hub *and* an agent for itself).
 
+Hub, Windows Agent, Mac Agent, Windows media controllers and GPU workers may
+run **different application versions**. Release and upgrade only the components
+affected by a change. A Hub-only update does not require upgrading Agents, and
+an unrelated controller update must not stop a compatible worker taking films.
+The version copies inside one installer still agree; installations on different
+machines need not. Upgrade busy Agents only at an operator-selected idle point.
+
+Compatibility follows the workflow protocol and actual feature requirements,
+not equal application version strings. A genuinely incompatible feature may
+require a documented minimum build (for example a future feature requiring
+4.0), but the message must identify the feature and affected endpoint. An
+upgrade notice must not cancel existing work. Optional readings, such as
+temperatures absent from an older Agent, remain unavailable without blocking
+the rest of monitoring.
+
 | Role          | Config file | Run command                         | Listens |
 |---------------|-------------|-------------------------------------|---------|
 | Agent         | `agent.yaml`| `python -m taskpaw_v3.agent`        | `bind_port` 5680 (LAN), control 5681 (loopback) |
@@ -119,7 +134,9 @@ Before this update a worker advertised at most 1080p, so every worker you alread
 approved holds a **1080p** profile. A 16 GB worker now probes 3840×2160, and 4K
 films go only to a worker whose approved profile says so.
 
-1. Update **every** machine to the same build first (see 版本不一致 below).
+1. Update only the controller/workers that lack the required 4K capability,
+   after their active work finishes; unrelated Agents and the Mac Hub need not
+   change. Different builds with compatible workflow protocols can cooperate.
 2. On each 16 GB worker the device page shows 待核验 again (the proposed max is
    above the approved max). Click 核验并启用 once per worker.
 3. After the update every worker re-posts its probe with the 4K max, and the controller
@@ -161,9 +178,19 @@ A card under 16 GB is refused before any profile check and cannot be approved.
   网络与访问. The other machines do not follow: update the Hub's server address and
   the worker's 配对 (重新配对 if it cannot reach the controller). Best fix: reserve a
   fixed address in your router.
-- **版本不一致.** A worker whose app version or protocol differs from the
-  controller's takes no film. Install the same build on all Windows machines
-  (and the Mac Hub), restart them, and the state clears.
+- **工作流协议不兼容.** New work requires the controller's supported workflow
+  protocol. The device row shows the worker and supported protocol numbers;
+  check which endpoint needs a compatible build. Application versions may
+  differ, and neither unrelated machines nor the Mac Hub need matching builds.
+  A missing current-boot heartbeat is an unverified state: wait for the heartbeat
+  rather than upgrading. Existing claims can still replay, renew, upload and
+  finish; the compatibility check does not cancel them.
+- **Older controllers.** This policy is implemented by 3.10.5 and later
+  controllers. Older controller binaries keep their previous same-build gate;
+  pre-3.10.2 controllers can also reject newer pair/boot fields. Update the
+  controller to adopt the policy. Actual 3.10.2 worker source has been exercised
+  against the updated controller; this is not a promise that every historical
+  or future protocol is compatible.
 
 > **Legacy / manual path.** The yaml-based steps from here on (hand-written
 > `agent.yaml` and `hub.yaml`, bootstrap scripts) still work and are kept for

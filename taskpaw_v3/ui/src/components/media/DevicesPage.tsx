@@ -213,6 +213,9 @@ function WorkerCard({ row, remote, serverTime, busy, progressOf, onApprove, onAd
   const unresolved = (lost || revoked || row.heartbeat.state === "off") && assignments.length > 0;
   const panel = `device-more-${row.worker_id}`;
   const load = gpuLoad(row);
+  const protocolMismatch = row.version_ok === false &&
+    Number.isInteger(row.workflow_protocol) && Number.isInteger(row.required_protocol) &&
+    row.workflow_protocol !== row.required_protocol;
   return (
     <article className="panel device-card" aria-label={row.name} data-worker={row.worker_id}>
       <div className="device-top">
@@ -228,12 +231,16 @@ function WorkerCard({ row, remote, serverTime, busy, progressOf, onApprove, onAd
             {state && <Chip tone={state[1]}>{state[0]}</Chip>}
             {!(pending && row.heartbeat.state === "online") && <Chip tone={beatTone}>{beat}</Chip>}
             {row.agent_version && <Chip tone={row.version_ok === false ? "amber" : "neutral"}>
-              v{row.agent_version}{row.version_ok === false ? " · 版本不一致" : ""}</Chip>}
+              v{row.agent_version}{row.version_ok === false ? ` · ${protocolMismatch ? "工作流协议不兼容" : "兼容性待确认"}` : ""}</Chip>}
           </div>
           {line && <p className="small muted">{line}</p>}
         </div>
       </div>
       <dl className="facts device-facts">
+        {protocolMismatch && <><dt>工作流协议</dt><dd>
+          工作机 {row.workflow_protocol} · 主控支持 {row.required_protocol}
+          <span className="small amber"> · 新任务暂不领取，请检查主控与工作机的升级要求。</span>
+        </dd></>}
         <dt>{lost ? "GPU（最后上报）" : "GPU"}</dt><dd>{gpuName(row)}{load && <span className="muted"> · {load}</span>}</dd>
         <dt>{lost ? "磁盘 · 暂存（最后上报）" : "磁盘 · 暂存"}</dt>
         <dd>{row.disk ? `可用 ${gbDisk(row.disk.free)} · 暂存 ${gbDisk(row.disk.staging_used)} / ${gbDisk(row.disk.cap)}` : "—"}</dd>

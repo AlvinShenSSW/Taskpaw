@@ -47,7 +47,7 @@ from taskpaw_v3.workflow.scheduler import CONTROLLER_DISK
 from taskpaw_v3.workflow.worker_client import ApiError, WorkerClient
 
 WORKER_GPU = LocalGpu("NVIDIA GeForce RTX 5060 Ti", "GPU-fake-16gb", 16311)
-VERSION = __version__  # the controller's own: no 「版本不一致」
+VERSION = __version__
 LONG = 60.0  # a condition wait's ceiling; never a timing budget
 # §11 Linux CI: the controller's free disk is injected, never the runner's
 # (a GitHub Linux runner has far less than the C8 reserve of 100 GB free)
@@ -248,7 +248,7 @@ class World:
             data,
             probe=self.probe,
             gpu_live=lambda: {"used_mib": 512, "util": 1.0, "power_w": 18.0},
-            version=VERSION,
+            version=kw.pop("version", VERSION),
             active_seconds=0.05,
             idle_seconds=0.05,
             backoff_base=0.02,
@@ -433,10 +433,13 @@ def wait_status(world: World, film: str, name: str, *states: str) -> None:
 
 
 # ── §7: the fake-worker end to end ──────────────────────────────────────
-def test_a_film_restores_remotely_transcribes_here_and_reaches_confirm(world):
+@pytest.mark.parametrize("worker_version", [VERSION, "3.10.2"])
+def test_a_film_restores_remotely_transcribes_here_and_reaches_confirm(
+    world, worker_version
+):
     """OD7 §5: restore on the worker → upload → ASR on the controller →
     translate → return → scrape → 待确认."""
-    worker = world.join()
+    worker = world.join(version=worker_version)
     film = routed_film(world)
     wait_status(world, film, "scrape", "succeeded")
     row = world.row(film)

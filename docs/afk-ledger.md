@@ -146,3 +146,45 @@ rebase this branch onto main before merging. Leave open, never deploy.
   timeout/old-owner completion passed the delayed control. All owner-identity and
   stale-emitter isolation assertions remain. This is a test-budget repair, not a
   proven explanation of the original CI trigger or a production behavior change.
+
+## 2026-10-26 — independently upgraded protocol-compatible workers (3.10.5)
+
+- Operator scope explicitly includes Hub, Windows/Mac Agents and media
+  controller/GPU workers. Compatibility follows protocol or actual feature
+  requirements, never equality of application build numbers. No deployment,
+  installation, live media or running Agent was touched. Root owns release.
+- Design and adversarial review preceded code. A 3.10.2 worker against a 3.10.4
+  controller reproduced the unnecessary routing refusal. Protocol mismatch also
+  previously allowed a fresh claim on an already existing route before scheduler
+  withdrawal; missing/current-boot-mismatched heartbeats reproduced that gap.
+- The existing `version_ok` field now means supported workflow protocol. The
+  fresh-claim guard is a trusted controller snapshot applied after authorization,
+  exact idempotent replay and existing ownership checks, before fence/attempt
+  writes. A denied request is not cached. Renew, upload and finish are unchanged.
+  Device protocol metadata is additive; older payloads show compatibility as
+  unconfirmed instead of inventing a protocol mismatch.
+- RED regressions covered app-version-only refusal/withdrawal and fresh claim
+  bypass. GREEN covered 147 backend cases, plus 14 focused admission/recovery
+  cases, and two complete fake-media flows. A refused claim neither fails a film
+  nor deletes staged input; it resumes without redownload after verification.
+  Owned claim replay, renew, upload and finish survive a changed app version,
+  changed protocol or lost in-memory heartbeat state after a controller restart.
+- A separate process using untouched historical 3.10.2 worker source actually
+  paired, booted, heartbeated, downloaded, claimed, renewed, uploaded and finished
+  two films against the modified controller. Both reached confirmation with two
+  attempts/two fake Jasna runs and the same worker PID. All processes and the
+  temporary server stopped normally. This candidate probe imported controller
+  version 3.10.4 before the final cosmetic 3.10.5 stamp; source hashes were saved.
+  This is historical-source interoperability evidence, not a claim about all
+  older/future builds or an installed-user-machine upgrade.
+- Full UI: 1,124 tests / 43 files passed. Lock, Ruff, format, mypy (182 sources),
+  syntax, UI lint and build passed. UI lint retains two pre-existing Fast Refresh
+  warnings. Canonical full Python passed: 7,511 passed / 182 skipped / one
+  existing dependency warning in 1,024.43 seconds. The Hub's app-version-only
+  upgrade warning was also removed after a seven-case RED/GREEN check, then all
+  1,124 UI tests, UI lint and build passed again. Final immutable CI/review
+  evidence is recorded in the delivery PR when complete; no pending check is
+  called passed.
+- Six V3 version sources advance to 3.10.5; V2 and the existing v3.10.4 tag stay
+  unchanged. AGENTS and deployment guidance preserve independent releases and
+  clarify that old controllers keep their old checks until updated.

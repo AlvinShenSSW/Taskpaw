@@ -581,7 +581,12 @@ class FilmCommands(WorkerCommands):
         return self._execute(auth, meta, command, "put_final_manifest", apply)
 
     def claim(
-        self, auth: AuthProof, meta: CommandMeta, command: ClaimRequest
+        self,
+        auth: AuthProof,
+        meta: CommandMeta,
+        command: ClaimRequest,
+        *,
+        admission_error: str | None = None,
     ) -> CommandResult:
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
             job = self._current_job(command.job_id)
@@ -617,6 +622,11 @@ class FilmCommands(WorkerCommands):
                 or command.boot_id != principal["boot_id"]
             ):
                 raise WorkflowError("stale_attempt")
+            # Trusted controller live-state snapshot, never a worker wire field.
+            # Existing ownership checks and exact idempotent replays keep their
+            # precedence. Denial rolls back before any fence or attempt is made.
+            if admission_error is not None:
+                raise WorkflowError(admission_error)
             authority = self._one("SELECT * FROM authority WHERE singleton=1")
             fence = authority["next_fence"]
             self._update(

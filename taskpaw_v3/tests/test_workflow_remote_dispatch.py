@@ -258,6 +258,52 @@ def _route(film, position):
 
 
 # ── R7 prefetch, R6 gate ────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "code, reason",
+    [
+        ("workflow_protocol_unverified", "等待主控确认工作流协议"),
+        (
+            "workflow_protocol_incompatible",
+            "工作流协议不兼容，请检查主控与工作机的升级要求",
+        ),
+    ],
+)
+def test_protocol_admission_wait_keeps_staged_input_and_retries_without_failure(
+    tmp_path, code, reason
+):
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    dispatcher, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    allowed, denied = threading.Event(), threading.Event()
+    original_claim = client.claim
+
+    def admission(body):
+        if not allowed.is_set():
+            denied.set()
+            raise ApiError(409, code)
+        return original_claim(body)
+
+    client.claim = admission
+    dispatcher.start()
+    try:
+        _observe(dispatcher, [_route(film, 0)])
+        assert denied.wait(10)
+        until(lambda: dispatcher.reason == reason)
+        assert dispatcher.index.complete(film, 1)
+        assert client.claims == client.finishes == []
+        assert executor.runs == 0
+        allowed.set()
+        assert executor.running.wait(10)
+        assert len(client.claims) == 1 and executor.runs == 1
+        assert client.downloads == [film]  # no staged-input deletion / redownload
+    finally:
+        allowed.set()
+        executor.release.set()
+        assert dispatcher.stop(10)
+
+
 def test_position_one_is_fetched_while_position_zero_runs(tmp_path):
     executor = Blocking()
     client = Scripted.__new__(Scripted)

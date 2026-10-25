@@ -94,10 +94,10 @@ def test_snapshot_feeds_the_scheduler():
     assert entry is not None and entry.beat.gpu.power_w == 21.5
 
 
-@pytest.mark.parametrize("change", [{"version": "1.0.0"}, {"protocol": PROTOCOL + 1}])
-def test_a_version_or_protocol_mismatch_is_not_version_ok(change):
+@pytest.mark.parametrize("protocol", [0, PROTOCOL + 1])
+def test_an_unsupported_protocol_is_not_version_ok(protocol):
     fleet_live = FleetLive(START, VERSION)
-    fleet_live.observe("w1", beat(**change), START)
+    fleet_live.observe("w1", beat(protocol=protocol), START)
     assert fleet_live.snapshot()["w1"].version_ok is False
 
 

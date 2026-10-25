@@ -72,6 +72,8 @@ def api(host):
 @pytest.fixture
 def world(api, rt):
     joined, booted = enrol(api, rt)
+    response = api.post(f"{P}/heartbeat", json=beat(booted), headers=joined.headers)
+    assert response.status_code == 200
     film_id, manifest = real_film(rt)
     route(rt, film_id, joined.worker_id)
     return joined, booted, film_id, manifest

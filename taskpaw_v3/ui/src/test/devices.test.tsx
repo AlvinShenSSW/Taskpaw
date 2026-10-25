@@ -93,6 +93,38 @@ beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementa
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("设备 v1", () => {
+  it("allows a different application build when the workflow protocol is compatible", async () => {
+    mockApi({ ...VIEW, workers: [device({ name: "旧版工作机", agent_version: "3.10.2", version_ok: true,
+      workflow_protocol: 1, required_protocol: 1 })] });
+    await openDevices();
+    const worker = card("旧版工作机");
+    expect(worker).toHaveTextContent("v3.10.2");
+    expect(worker).toHaveTextContent("可接单");
+    expect(worker).not.toHaveTextContent("升级");
+    expect(worker).not.toHaveTextContent("不兼容");
+  });
+
+  it("names the incompatible workflow protocols without requiring equal application builds", async () => {
+    mockApi({ ...VIEW, workers: [device({ name: "新协议工作机", agent_version: "4.0.0", version_ok: false,
+      workflow_protocol: 2, required_protocol: 1, eligibility: "工作流协议不兼容", eligible: false })] });
+    await openDevices();
+    const worker = card("新协议工作机");
+    expect(worker).toHaveTextContent("v4.0.0 · 工作流协议不兼容");
+    expect(worker).toHaveTextContent("工作机 2 · 主控支持 1");
+    expect(worker).toHaveTextContent("请检查主控与工作机的升级要求");
+    expect(worker).not.toHaveTextContent("版本不一致");
+    expect(worker).not.toHaveTextContent("必须升级工作机");
+  });
+
+  it("does not invent a protocol mismatch from an older backend's version flag", async () => {
+    mockApi({ ...VIEW, workers: [device({ name: "旧接口设备", version_ok: false })] });
+    await openDevices();
+    const worker = card("旧接口设备");
+    expect(worker).toHaveTextContent("兼容性待确认");
+    expect(worker).not.toHaveTextContent("工作流协议不兼容");
+    expect(worker).not.toHaveTextContent("主控支持");
+  });
+
   it("is live in the rail, with one compact title and the 本机 row without actions", async () => {
     mockApi();
     const local = await openDevices();
@@ -129,7 +161,7 @@ describe("设备 v1", () => {
     expect(lost).toHaveTextContent("后台重连中");
     expect(lost).toHaveTextContent("GPU（最后上报）");
     expect(lost).toHaveTextContent("未知（失联）");
-    expect(lost).toHaveTextContent("3.9.18 · 版本不一致");
+    expect(lost).toHaveTextContent("3.9.18 · 兼容性待确认");
     expect(lost).toHaveTextContent("离线");
     expect(within(card("旧卡")).getByRole("button", { name: "退休" })).toBeInTheDocument();
     expect(within(card("旧卡")).queryByRole("button", { name: "撤销" })).toBeNull();
