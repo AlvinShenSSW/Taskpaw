@@ -559,8 +559,8 @@ class RemoteDispatcher:
             return None
         return active.state.film_id, active.state.stage
 
-    def current(self) -> dict[str, Any] | None:
-        """The heartbeat's typed `current` (§2)."""
+    def current(self, *, for_monitor: bool = False) -> dict[str, Any] | None:
+        """The typed heartbeat current; revision is local-monitor-only."""
         with self._lock:
             active = self._active
         if active is None:
@@ -577,6 +577,8 @@ class RemoteDispatcher:
             "power": _watts(self._live_power()) if active.uses_gpu else None,
             "uses_gpu": active.uses_gpu,
         }
+        if for_monitor:
+            value["rev"] = active.state.rev
         return _bounded(value)
 
     def transfers(self) -> list[dict[str, Any]]:
@@ -622,7 +624,7 @@ class RemoteDispatcher:
                 state = "fetching"
             elif self.index.complete(*key):
                 state = "staged"
-            if active is not None and active.state.film_id == key[0]:
+            if active is not None and (active.state.film_id, active.state.rev) == key:
                 state = active.phase
             rows.append(
                 {

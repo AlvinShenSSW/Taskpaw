@@ -5,7 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api, type WorkerConsole, type WorkerFilm, type WorkflowStep } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
-import { workerSteps } from "../components/media/workerModel";
+import { focusedWorkerFilm, workerSteps } from "../components/media/workerModel";
+import { presentWorkerStatus } from "../components/media/statusPresentation";
 import { WorkerMonitor } from "../components/WorkerMonitor";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
@@ -57,9 +58,128 @@ describe("worker 媒体处理 monitor", () => {
     expect(within(primary).getByTestId("restore-live")).toBeInTheDocument();
     expect(within(primary).queryByText(/610 MB\/s/)).not.toBeInTheDocument();
     const secondary = screen.getByRole("region", { name: "预取与排队" });
-    expect(within(secondary).getByRole("listitem", { name: "ABF-402" })).toBeInTheDocument();
+    const download = within(secondary).getByRole("listitem", { name: "ABF-402" });
+    expect(within(download).getByText("下载源文件", { selector: ".status-badge" })).toBeInTheDocument();
+    expect(within(download).queryByText(/^(排队|预取)$/)).not.toBeInTheDocument();
     expect(within(secondary).getByText(/12.4\/38.0 GB · 610 MB\/s/)).toBeInTheDocument();
     expect(primary.compareDocumentPosition(secondary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("focuses the current revision when a newer route for the same film comes first", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w,
+      current: { ...w.current!, rev: 1 },
+      films: [
+        { ...w.films![0], rev: 2, name: "ABF-401 new route", state: "fetching", stages: { restore: "pending" } },
+        { ...w.films![0], position: 1 },
+      ],
+      transfers: [{ film: "f1", dir: "down", done: 2e9, total: 4e9, rate: 100e6 }],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByRole("listitem", { name: "ABF-401" })).toBeInTheDocument();
+    expect(within(primary).getByTestId("restore-live")).toBeInTheDocument();
+    expect(primary).not.toHaveTextContent(/new route|100 MB\/s/);
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    const download = within(secondary).getByRole("listitem", { name: "ABF-401 new route" });
+    expect(within(download).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    expect(download).toHaveTextContent("2.0/4.0 GB · 100 MB/s");
+    expect(within(download).queryByText("本次已用")).not.toBeInTheDocument();
+    expect(within(download).queryByTestId("restore-live")).not.toBeInTheDocument();
+    const steps = within(download).getByRole("list", { name: "ABF-401 new route 步骤" });
+    expect(within(steps).getAllByRole("listitem").map((step) => step.getAttribute("data-state")))
+      .toEqual(["current", "pending", "pending"]);
+  });
+
+  it("keeps a missing old revision as the current attempt and the new route as its own download", async () => {
+    const w = running();
+    const payload = { ...w, current: { ...w.current!, rev: 1, phase: "uploading" as const },
+      films: [{ ...w.films![0], rev: 2, name: "ABF-401 new route", state: "fetching" as const, stages: { restore: "pending" } }],
+      transfers: [
+        { film: "f1", dir: "up" as const, done: 1e9, total: 4e9, rate: 120e6 },
+        { film: "f1", dir: "down" as const, done: 2e9, total: 4e9, rate: 100e6 },
+      ],
+    };
+    expect(focusedWorkerFilm(payload)).toMatchObject({ film: "f1", rev: 1, name: "f1" });
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(payload);
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByRole("listitem", { name: "f1" })).toBeInTheDocument();
+    expect(within(primary).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "25");
+    expect(primary).toHaveTextContent("1.0/4.0 GB · 120 MB/s");
+    expect(primary).not.toHaveTextContent(/new route|100 MB\/s/);
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    expect(within(secondary).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    expect(secondary).toHaveTextContent("2.0/4.0 GB · 100 MB/s");
+    expect(secondary).not.toHaveTextContent(/120 MB\/s|本次已用|提交结果/);
+  });
+
+  it("preserves both same-film routes when a legacy current does not identify its revision", async () => {
+    const w = running();
+    const payload = { ...w, films: [
+      { ...w.films![0], rev: 2, name: "ABF-401 new route", state: "fetching" as const, stages: { restore: "pending" } },
+      { ...w.films![0], position: 1, state: "staged" as const, stages: { restore: "pending" } },
+    ], transfers: [{ film: "f1", dir: "down" as const, done: 2e9, total: 4e9, rate: 100e6 }] };
+    expect(focusedWorkerFilm(payload)).toMatchObject({ film: "f1", rev: 0, name: "f1" });
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(payload);
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByRole("listitem", { name: "f1" })).toBeInTheDocument();
+    expect(within(primary).getByTestId("restore-live")).toBeInTheDocument();
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    expect(within(secondary).getByRole("listitem", { name: "ABF-401 new route" })).toBeInTheDocument();
+    const staged = within(secondary).getByRole("listitem", { name: "ABF-401" });
+    expect(within(staged).getByText("源文件就绪")).toBeInTheDocument();
+    expect(within(staged).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(staged.querySelector('[aria-current="step"]')).toBeNull();
+    expect(within(secondary).queryByTestId("restore-live")).not.toBeInTheDocument();
+    expect(secondary).not.toHaveTextContent(/本次已用|LTX 2\/4 encode/);
+  });
+
+  it("does not apply an identified current revision to another revision's status or steps", () => {
+    const w = running();
+    const film: WorkerFilm = { ...w.films![0], rev: 2, state: "fetching", stages: { restore: "pending" } };
+    const current = { ...w.current!, rev: 1, phase: "uploading" as const };
+    expect(workerSteps(film, current).map((step) => step.state)).toEqual(["current", "pending", "pending"]);
+    expect(presentWorkerStatus(film, current, [
+      { film: "f1", dir: "up", done: 3, total: 4, rate: 1 },
+      { film: "f1", dir: "down", done: 1, total: 4, rate: 1 },
+    ])).toEqual({ key: "fetching", percent: 25 });
+  });
+
+  it("does not assign revisionless upload bytes shared by a synthetic current and a route", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w,
+      current: { ...w.current!, rev: 1, phase: "uploading" },
+      films: [{ ...w.films![0], rev: 2, name: "ABF-401 new route", state: "uploading" }],
+      transfers: [{ film: "f1", dir: "up", done: 3e9, total: 4e9, rate: 120e6 }],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(primary).toHaveTextContent("进度暂不可用");
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    expect(within(secondary).getByText("回传中", { selector: ".status-badge" })).toBeInTheDocument();
+    expect(within(secondary).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("worker-monitor")).not.toHaveTextContent(/120 MB\/s|3.0\/4.0 GB/);
+  });
+
+  it("leaves revisionless download bytes unavailable when two legacy routes could own them", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w,
+      films: [
+        { ...w.films![0], rev: 2, name: "ABF-401 new route", state: "fetching", stages: { restore: "pending" } },
+        { ...w.films![0], position: 1, state: "fetching", stages: { restore: "pending" } },
+      ],
+      transfers: [{ film: "f1", dir: "down", done: 2e9, total: 4e9, rate: 100e6 }],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByTestId("restore-live")).toBeInTheDocument();
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    expect(within(secondary).getAllByText("下载源文件", { selector: ".status-badge" })).toHaveLength(2);
+    expect(within(secondary).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(secondary).not.toHaveTextContent(/100 MB\/s|2.0\/4.0 GB|LTX 2\/4 encode/);
   });
 
   it.each(["uploading", "finishing", "settling"] as const)("gives current %s precedence over a stale envelope and stale compute", async (phase) => {
@@ -93,6 +213,7 @@ describe("worker 媒体处理 monitor", () => {
     const primary = await screen.findByRole("region", { name: "当前任务" });
     expect(primary).toHaveTextContent("orphan-film");
     expect(primary).toHaveTextContent("详细进度暂不可用");
+    expect(within(primary).getByText("本次已用", { selector: "dt" }).parentElement).toHaveTextContent("暂不可用");
     expect(primary).not.toHaveTextContent(/ABF-401|ABF-402|NaN|00:00/);
     expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
   });
@@ -107,6 +228,7 @@ describe("worker 媒体处理 monitor", () => {
     expect(screen.getByText(/等待 GPU：手动任务使用中/)).toBeInTheDocument();
     expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
     expect(within(primary).queryByTestId("restore-live")).not.toBeInTheDocument();
+    expect(within(primary).queryByText("本次已用")).not.toBeInTheDocument();
   });
 
   it("focuses a download before an attempt exists, using only that film's inbound transfer", async () => {
@@ -123,6 +245,7 @@ describe("worker 媒体处理 monitor", () => {
     expect(primary).toHaveTextContent("2.0/4.0 GB · 100 MB/s");
     expect(primary).not.toHaveTextContent(/900 MB\/s|00:00/);
     expect(within(primary).queryByTestId("restore-live")).not.toBeInTheDocument();
+    expect(within(primary).queryByText("本次已用")).not.toBeInTheDocument();
   });
 
   it("preserves local work while reconnecting and shows the legacy ASR phase and elapsed time", async () => {
@@ -213,7 +336,7 @@ describe("worker 媒体处理 monitor", () => {
     expect(screen.getByText("已对账")).toBeInTheDocument();
     const first = screen.getByRole("listitem", { name: "ABF-401" });
     expect(within(first).getByText("当前")).toBeInTheDocument();
-    expect(within(screen.getByRole("listitem", { name: "ABF-402" })).getByText("预取")).toBeInTheDocument();
+    expect(within(screen.getByRole("listitem", { name: "ABF-402" })).queryByText(/^(排队|预取)$/)).not.toBeInTheDocument();
     const line = within(first).getByRole("list", { name: "ABF-401 步骤" });
     expect(within(line).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["下载 ✓", "修复", "回传"]);
     expect(within(line).getAllByRole("listitem")[1]).toHaveAttribute("aria-current", "step");

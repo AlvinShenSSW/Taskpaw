@@ -47,7 +47,8 @@ The preview is `design-system/taskpaw-v3/preview/agent-status-322.html`.
    details; independent prefetch must not replace the current-film focus.
 5. Staging capacity and GPU hold remain a compact resource summary.
 
-Use the existing DTO and poll interval. Missing/non-finite elapsed, transfer
+Use the existing polling interval and DTOs, with the small local-console revision
+extension documented below. Missing/non-finite elapsed, transfer
 counts or rates display unavailable; they are never fabricated zero/NaN. No
 attempt to infer whole-film completion from removal of a worker queue entry.
 No new controller actions, backend mutations, ports or runtime dependencies.
@@ -107,3 +108,56 @@ brand, badge and version widths. This shared CSS also affects the Hub/controller
 header and browser role switcher; all role controls remain present. Existing App,
 control-credential and connection regressions plus native narrow/desktop checks
 cover the repair.
+
+## External review amendment: input revisions
+
+Claude reviewed commit `8d8024f` after all ten CI checks passed and returned
+APPROVE WITH COMMENTS. One presentation repair batch removes the redundant
+position-derived chip from secondary rows and hides attempt elapsed time until
+an attempt exists. Current attempts with missing timing still show unavailable.
+
+The third comment was initially an unverified multi-revision case. A pure
+scheduler/dispatcher experiment confirmed it: an actively claimed old input
+revision retains its route while a newly confirmed revision of the same film
+can occupy the same worker's pinned prefetch slot. Film ID alone is therefore
+not enough to identify or remove a row. This is a presentation correction,
+not a routing/scheduling change.
+
+The local worker console adds optional `current.rev` from the active attempt.
+`RemoteDispatcher.current(for_monitor=True)` exposes it only to the console;
+the default current value used by heartbeat and summary stays unchanged. The
+existing heartbeat schema forbids extra fields, so adding this field to the
+default heartbeat would break older controllers and is explicitly prohibited.
+`films()` marks an envelope active only when both film ID and revision match.
+
+The UI focuses that exact pair and retains all other revisions as secondary
+rows. An active pair absent from the route list keeps a synthetic current row
+with its known identity, rather than borrowing the new revision's envelope.
+For an older response without `current.rev`, one matching film is usable; if
+several revisions match, the UI must not guess which envelope belongs to the
+attempt. It keeps a separate current identity with unknown revision and retains
+all route rows. Current attempt details apply only to the primary row.
+
+Transfers have no revision field. Film ID plus direction can identify a transfer
+only when one displayed row owns that direction for that film; ambiguous legacy
+or inconsistent responses must leave transfer bytes/percent unavailable rather
+than attaching one transfer to several input revisions. Keep the transfer wire
+shape unchanged and cover this ambiguity in UI tests.
+
+Adversarial check: preserving rows alone would still attach the old attempt's
+phase to the new revision. Both backend presentation and shared UI matching must
+respect the revision. Extending the default heartbeat is rejected because of
+`extra=forbid`. The selected console-only field plus optional UI compatibility
+resolves both concerns without new endpoints or execution authority.
+
+Add RED-to-GREEN coverage for reversed revision ordering, a current revision
+absent from the routes, legacy ambiguous identities, and unchanged heartbeat
+validation. Then run relevant backend/full UI checks and the final complete CI,
+CTO and Claude-to-Kimi gates on the repaired commit.
+
+Repair validation: two backend and six revision-specific UI regressions went
+RED to GREEN. The relevant backend group passed 226 tests with one skip; all
+1,087 UI tests passed. Actual product fixtures covered 14 states at four widths,
+including an orphan current revision and legacy transfer ambiguity. No overflow,
+browser exceptions or live API traffic occurred. Static, build, retired-copy and
+version checks passed. Fresh full CI and review results belong to PR #324.

@@ -37,3 +37,24 @@ Validation evidence:
 Live read-only baseline: controller and four enrolled Agents reported 3.10.2;
 this did not establish identical repair-build UI bundles. Shipping/installing the
 new version is separate from source and fixture verification.
+
+Review repair batch:
+
+- Initial commit `8d8024f` passed all ten CI checks, including the full Windows,
+  macOS and Linux Python suites, frontend, static checks and packaging. CTO
+  self-review approved. Claude outer review returned APPROVE WITH COMMENTS.
+- All three comments were addressed together: remove the secondary position
+  chip, omit elapsed time before an attempt exists, and distinguish input
+  revisions of the same film. The last case was reproduced with the scheduler
+  and dispatcher before implementation. Console-only revision metadata preserves
+  the strict legacy heartbeat schema. Ambiguous legacy transfers stay unavailable.
+- Revision regressions: two backend and six UI failures reproduced before the
+  fix. Relevant backend checks passed 226 tests (one skip); full UI passed 1,087
+  tests in 42 files. UI lint/build, full Ruff/Mypy and lock consistency passed.
+  The retired-copy check and seven version checks passed again; V3 stays 3.10.3.
+- Actual product browser fixtures covered 14 states at 375/768/1024/1440 pixels,
+  including missing and ambiguous revisions, with no overflow or JS errors.
+  All product API requests were mocked; no backend or real database was started.
+- The repaired commit requires a fresh full CI matrix, CTO self-review and
+  Claude-to-Kimi review. Results are recorded on PR #324; the first commit's
+  approvals do not apply automatically to the repair. Leave open; no deployment.

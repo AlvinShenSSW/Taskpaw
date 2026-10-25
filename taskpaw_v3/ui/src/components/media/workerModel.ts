@@ -9,11 +9,16 @@ const LABEL: Record<WorkerStepKey, string> = { fetch: "下载", restore: "修复
 const DONE = ["succeeded", "skipped"];
 const UPLOADING = ["uploading", "finishing"];
 
+// Legacy currents need the caller to select an unambiguous primary before passing them here.
+export function matchingWorkerCurrent(film: WorkerFilm, current?: WorkerCurrent | null): WorkerCurrent | null {
+  return current?.film_id === film.film && (current.rev === undefined || current.rev === film.rev) ? current : null;
+}
+
 // 下载 → 修复 → 回传 (OD7: a GPU worker restores only; 识别 runs on the controller), from the
 // envelope's stage statuses and the running phase. An ASR claimed before the upgrade still finishes
 // here (its card names 识别): the line shows only its 回传 while it uploads.
 export function workerSteps(film: WorkerFilm, current: WorkerCurrent | null | undefined): WorkerStep[] {
-  const mine = current && current.film_id === film.film ? current : null;
+  const mine = matchingWorkerCurrent(film, current);
   const restoreDone = DONE.includes(film.stages?.restore ?? "");
   const now: WorkerStepKey | null = mine
     ? (UPLOADING.includes(mine.phase) ? "upload_restore" : mine.stage === "restore" ? "restore" : null)
@@ -45,14 +50,30 @@ export function focusedWorkerFilm(w: WorkerConsole): WorkerFilm | undefined {
   const films = w.films ?? [];
   const current = w.current;
   if (!current) return films.find((film) => film.position === 0);
-  return films.find((film) => film.film === current.film_id) ?? {
-    film: current.film_id, name: current.film_id, rev: 0, position: 0,
+  const matches = films.filter((film) => film.film === current.film_id);
+  const exact = current.rev === undefined
+    ? matches.length === 1 ? matches[0] : undefined
+    : matches.find((film) => film.rev === current.rev);
+  return exact ?? {
+    film: current.film_id, name: current.film_id, rev: current.rev ?? 0, position: 0,
     state: current.phase ?? "running", stages: {},
   };
 }
 
+const transferDirection = (phase: string) => phase === "fetching" ? "down" : phase === "uploading" ? "up" : null;
+
+// Transfers have no revision: require one displayed owner, including an orphan current.
+export function unambiguousWorkerTransfers(w: WorkerConsole, focused?: WorkerFilm): WorkerTransfer[] {
+  const films = w.films ?? [];
+  const rows = focused && !films.includes(focused) ? [focused, ...films] : films;
+  return (w.transfers ?? []).filter((transfer) => rows.filter((film) => {
+    const phase = (film === focused ? matchingWorkerCurrent(film, w.current)?.phase : null) ?? film.state;
+    return film.film === transfer.film && transferDirection(phase) === transfer.dir;
+  }).length === 1);
+}
+
 export function activeWorkerTransfer(film: string, phase: string, transfers: WorkerTransfer[] = []): WorkerTransfer | undefined {
-  const direction = phase === "fetching" ? "down" : phase === "uploading" ? "up" : null;
+  const direction = transferDirection(phase);
   return direction ? transfers.find((transfer) => transfer.film === film && transfer.dir === direction) : undefined;
 }
 

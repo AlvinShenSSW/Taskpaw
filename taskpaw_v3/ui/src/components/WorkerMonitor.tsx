@@ -1,10 +1,10 @@
 import { Alert, Box, Button, Card, CardContent, Chip, Stack, Typography } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, type WorkerConsole, type WorkerFilm } from "../api";
+import { api, type WorkerConsole, type WorkerCurrent, type WorkerFilm, type WorkerTransfer } from "../api";
 import { RestoreLivePanel } from "./media/RestoreLivePanel";
 import { elapsedClock } from "./media/mediaModel";
-import { activeWorkerTransfer, focusedWorkerFilm, stagingText, transferText, workerSteps } from "./media/workerModel";
+import { activeWorkerTransfer, focusedWorkerFilm, matchingWorkerCurrent, stagingText, transferText, unambiguousWorkerTransfers, workerSteps } from "./media/workerModel";
 import { presentWorkerStatus, StatusBadge, StatusProgress } from "./media/statusPresentation";
 import { DATA } from "./progressParts";
 
@@ -30,9 +30,9 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function StepRow({ film, w }: { film: WorkerFilm; w: WorkerConsole }) {
-  const steps = workerSteps(film, w.current);
-  const presentation = presentWorkerStatus(film, w.current);
+function StepRow({ film, current }: { film: WorkerFilm; current: WorkerCurrent | null }) {
+  const steps = workerSteps(film, current);
+  const presentation = presentWorkerStatus(film, current);
   return (
     <Box component="ol" aria-label={`${film.name} 步骤`}
       sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, ...LIST }}>
@@ -47,10 +47,12 @@ function StepRow({ film, w }: { film: WorkerFilm; w: WorkerConsole }) {
   );
 }
 
-function FilmRow({ film, w, primary = false }: { film: WorkerFilm; w: WorkerConsole; primary?: boolean }) {
-  const current = w.current?.film_id === film.film ? w.current : null;
-  const presentation = presentWorkerStatus(film, current, w.transfers);
-  const transfer = activeWorkerTransfer(film.film, presentation.key, w.transfers);
+function FilmRow({ film, w, transfers, primary = false }: {
+  film: WorkerFilm; w: WorkerConsole; transfers: WorkerTransfer[]; primary?: boolean;
+}) {
+  const current = primary ? matchingWorkerCurrent(film, w.current) : null;
+  const presentation = presentWorkerStatus(film, current, transfers);
+  const transfer = activeWorkerTransfer(film.film, presentation.key, transfers);
   const elapsed = typeof current?.elapsed_s === "number" && Number.isFinite(current.elapsed_s) && current.elapsed_s >= 0
     ? elapsedClock(current.elapsed_s * 1000) : "暂不可用";
   const liveRestore = current?.stage === "restore" && current.phase === "running" && current.step?.state === "running";
@@ -64,15 +66,15 @@ function FilmRow({ film, w, primary = false }: { film: WorkerFilm; w: WorkerCons
           </Typography>
         ) : <><Typography variant="body2" sx={{ ...DATA, overflowWrap: "anywhere", minWidth: 0 }}>{film.name}</Typography>
           <StatusBadge status={presentation.key} /></>}
-        <Chip size="small" variant="outlined" label={primary ? "当前" : film.position > 0 ? "预取" : "排队"} />
+        {primary && <Chip size="small" variant="outlined" label="当前" />}
       </Stack>
-      <StepRow film={film} w={w} />
+      <StepRow film={film} current={current} />
       <Box>
         <StatusProgress presentation={presentation} label={film.name} />
         {primary && presentation.percent === null && <Typography variant="body2" color="text.secondary">进度暂不可用</Typography>}
       </Box>
       {primary && <Box component="dl" sx={{ m: 0, display: "grid", gap: 0.75 }}>
-        <Row label="本次已用" value={<Box component="span" sx={DATA}>{elapsed}</Box>} />
+        {current && <Row label="本次已用" value={<Box component="span" sx={DATA}>{elapsed}</Box>} />}
         {phaseDetail && <Row label="当前阶段" value={phaseDetail} />}
         {transfer && <Row label={transfer.dir === "down" ? "下载" : "回传"} value={transferText(transfer)} />}
       </Box>}
@@ -100,7 +102,8 @@ export function WorkerMonitor() {
   if (!w) return null;
   const films = w.films ?? [];
   const focused = focusedWorkerFilm(w);
-  const secondary = films.filter((film) => film.film !== focused?.film);
+  const secondary = films.filter((film) => film !== focused);
+  const transfers = unambiguousWorkerTransfers(w, focused);
   const paused = Boolean(w.paused);
   const joined = Boolean(w.worker_id);
   const connection = CONNECTION[w.state] ?? w.state;
@@ -134,7 +137,7 @@ export function WorkerMonitor() {
       <Card component="section" aria-label="当前任务" sx={{ border: "1px solid", borderColor: focused ? "primary.main" : "divider" }}>
         <CardContent>
           <Typography variant="overline" color="text.secondary" sx={{ display: "block", mb: 1 }}>当前任务</Typography>
-          {focused ? <Box component="ul" sx={LIST}><FilmRow film={focused} w={w} primary /></Box> : (
+          {focused ? <Box component="ul" sx={LIST}><FilmRow film={focused} w={w} transfers={transfers} primary /></Box> : (
             <Typography variant="body2" color="text.secondary">
               {films.length === 0 ? `没有派到本机的影片${reason ? ` · ${reason}` : ""}` : "没有正在处理的影片"}
             </Typography>
@@ -146,7 +149,7 @@ export function WorkerMonitor() {
         <CardContent>
           <Typography variant="subtitle1" component="h2" sx={{ mb: 1 }}>预取与排队</Typography>
           <Stack spacing={1.5} component="ul" sx={LIST}>
-            {secondary.map((film) => <FilmRow key={`${film.film}/${film.rev}`} film={film} w={w} />)}
+            {secondary.map((film) => <FilmRow key={`${film.film}/${film.rev}`} film={film} w={w} transfers={transfers} />)}
           </Stack>
         </CardContent>
       </Card>}

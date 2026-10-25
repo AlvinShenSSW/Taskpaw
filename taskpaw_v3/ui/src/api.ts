@@ -206,7 +206,7 @@ export interface WorkerFilm {
 export interface WorkerTransfer { film: string; dir: "down" | "up"; done: number; total: number; rate: number }
 // The running stage; `step` is shaped like the board's running 修复 step (LtxProgress, 本片参数, 用时).
 export interface WorkerCurrent {
-  film_id: string; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
+  film_id: string; rev?: number; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
   progress: string; elapsed_s: number; uses_gpu: boolean; step: WorkflowStep; started_at: string;
   power?: LivePower | null; energy?: Record<string, unknown> | null;
 }

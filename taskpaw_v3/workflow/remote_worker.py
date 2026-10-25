@@ -1094,7 +1094,9 @@ class WorkerHost:
                 pass
         return {
             "films": dispatcher.films() if dispatcher else [],
-            "current": _monitor_current(dispatcher.current() if dispatcher else None),
+            "current": _monitor_current(
+                dispatcher.current(for_monitor=True) if dispatcher else None
+            ),
             "transfers": dispatcher.transfers() if dispatcher else [],
             "dispatch_reason": dispatcher.reason if dispatcher else None,
             # §11 IR3: what needs the operator (a refused failed finish)
