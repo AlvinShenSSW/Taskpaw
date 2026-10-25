@@ -43,14 +43,16 @@ afterEach(() => {
 });
 
 describe("current machine temperatures", () => {
-  it("shows measured GPU and unavailable CPU/board beside unchanged watts and energy", async () => {
+  it("shows only measured GPU temperature beside unchanged watts and energy", async () => {
     vi.spyOn(api, "power").mockResolvedValue(thermalView());
     mount(); await tick();
     expect(sensors()).toHaveTextContent("NVIDIA GPU 核心最高");
     expect(sensors()).toHaveTextContent("42 °C");
     expect(sensors()).toHaveTextContent("1 / 1 NVIDIA GPU 可读");
     expect(sensors()).toHaveTextContent("nvidia-smi");
-    expect(within(sensors()).getAllByText(/不可用 · 当前未提供传感器读数/)).toHaveLength(2);
+    expect(within(sensors()).queryByText("CPU")).not.toBeInTheDocument();
+    expect(within(sensors()).queryByText("主板 / 机箱")).not.toBeInTheDocument();
+    expect(sensors()).not.toHaveTextContent("不可用");
     expect(sensors()).not.toHaveTextContent("估算");
     expect(sensors()).not.toHaveTextContent("0 °C");
     expect(screen.getByTestId("stat-all")).toHaveTextContent("519W · 3 台");
@@ -74,6 +76,9 @@ describe("current machine temperatures", () => {
     expect(sensors("peer:GPU-02")).toHaveTextContent("1 / 2 NVIDIA GPU 可读");
     expect(sensors("peer:GPU-02")).toHaveTextContent("可读部分");
     expect(sensors("peer:GPU-02")).not.toHaveTextContent("已过期");
+    expect(sensors("peer:GPU-02")).not.toHaveTextContent("CPU");
+    expect(sensors("peer:GPU-02")).not.toHaveTextContent("主板 / 机箱");
+    expect(sensors("peer:GPU-02")).not.toHaveTextContent("不可用");
     expect(sensors("peer:GPU-04")).toHaveTextContent("温度未提供 · 需升级 TaskPaw");
   });
 
@@ -192,11 +197,20 @@ describe("current machine temperatures", () => {
       mount(); await tick(); expect(sensors()).not.toHaveTextContent("°C"); expect(sensors()).toHaveTextContent("不可用");
     });
 
-  it("preserves an actual board sensor's label rather than naming it chassis", async () => {
-    vi.spyOn(api, "power").mockResolvedValue(thermalView({ temperatures: temperatures({
+  it.each(["local", "peer:GPU-02"])("hides CPU and board readings from %s even when supplied", async (machine) => {
+    const measured = temperatures({
+      cpu: { celsius: 65, label: "CPU package sensor", source: "verified-reader", reason: null },
       board: { celsius: 35, label: "System board sensor", source: "verified-reader", reason: null },
-    }) }));
-    mount(); await tick(); expect(sensors()).toHaveTextContent("System board sensor");
-    expect(sensors()).toHaveTextContent("35 °C"); expect(sensors()).not.toHaveTextContent("主板 / 机箱");
+    });
+    const view = thermalView({ temperatures: measured });
+    view.peers = view.peers!.map((p, i) => i === 0 ? { ...p, temperatures: measured } : p);
+    vi.spyOn(api, "power").mockResolvedValue(view);
+    mount(); await tick();
+    expect(sensors(machine)).toHaveTextContent("42 °C");
+    expect(sensors(machine)).toHaveTextContent("nvidia-smi");
+    expect(sensors(machine)).not.toHaveTextContent("CPU package sensor");
+    expect(sensors(machine)).not.toHaveTextContent("System board sensor");
+    expect(sensors(machine)).not.toHaveTextContent("65 °C");
+    expect(sensors(machine)).not.toHaveTextContent("35 °C");
   });
 });
