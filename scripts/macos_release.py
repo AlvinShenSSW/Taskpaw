@@ -494,7 +494,13 @@ class Isolation:
                 and self.env.get("RUNNER_OS") == "macOS"
                 and self.env.get("RUNNER_ARCH")
                 == ("ARM64" if self.plan.arch == "arm64" else "X64")
-                and self.env.get("GITHUB_JOB") == "bundle"
+                and (
+                    self.env.get("GITHUB_JOB") == "bundle"
+                    or (
+                        self.env.get("GITHUB_JOB") == "hub"
+                        and self.env.get("TASKPAW_BUILD_ROLE") == "hub"
+                    )
+                )
                 and bool(re.fullmatch(r"[0-9]+", self.env.get("GITHUB_RUN_ID", "")))
             )
             if not valid:
