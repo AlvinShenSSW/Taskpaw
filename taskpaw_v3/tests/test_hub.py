@@ -86,8 +86,15 @@ class FakeResp:
     def __init__(self, payload):
         self._b = json.dumps(payload).encode("utf-8")
 
+    status = 200
+    headers: dict[str, str] = {}
+
     def read(self):
         return self._b
+
+    def read1(self, size):
+        part, self._b = self._b[:size], self._b[size:]
+        return part
 
     def __enter__(self):
         return self
@@ -243,6 +250,9 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
         monkeypatch.setattr(openclaw_mod._opener, "open", fake_urlopen)
         p.poll_once()
+        assert sent == []  # sampling only; the independent owner drains next
+        assert len(s.due_deliveries()) == 2
+        p.drain_outbox()
 
         assert seen == [
             "http://127.0.0.1:5680/events?ack=2&cursor_stream="

@@ -404,11 +404,38 @@ def openclaw_test(
     (`unreachable`, `token`, `timeout`, `http`). Never returns the token or
     exception text."""
     from taskpaw_v3.hub.server import openclaw
+    from taskpaw_v3.hub.server.upstream_worker import UpstreamError
 
     sender = send or openclaw.send_payload
     started = clock()
     try:
         sender(url, token, {"text": "TaskPaw Hub 测试通知"}, timeout)
+    except UpstreamError as exc:
+        reason = exc.reason
+        if reason in ("upstream_deadline", "socket_timeout"):
+            error = "timeout"
+        elif reason == "http_auth":
+            error = "token"
+        elif reason in (
+            "http_refused",
+            "http_incomplete",
+            "http_encoding",
+            "http_metadata_oversize",
+            "body_oversize",
+        ):
+            error = "http"
+        else:
+            error = "unreachable"
+            if reason not in (
+                "network_unreachable",
+                "delivery_busy",
+                "helper_cancelled",
+                "helper_cleanup_failed",
+                "helper_failed",
+                "request_invalid",
+            ):
+                reason = "upstream_failed"
+        return {"ok": False, "error": error, "reason": reason}
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             return {"ok": False, "error": "token", "status": exc.code}
@@ -431,6 +458,7 @@ def register_hub_settings(
     *,
     boot_id: Optional[str],
     on_restart: Optional[Callable[[], None]],
+    send: Optional[Sender] = None,
 ) -> None:
     def refusal(fields: dict[str, str]) -> JSONResponse:
         return JSONResponse(
@@ -482,7 +510,7 @@ def register_hub_settings(
             token = saved.openclaw_token
         elif _control(token):
             return refusal({"openclaw_token": "令牌格式不正确"})
-        return await run_in_threadpool(openclaw_test, url, token.strip())
+        return await run_in_threadpool(openclaw_test, url, token.strip(), send=send)
 
     @app.post("/restart")
     async def hub_restart(request: Request) -> Any:

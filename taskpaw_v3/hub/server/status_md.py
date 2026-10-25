@@ -431,11 +431,40 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
     return [*lines, ""]
 
 
-def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
+def render_status_md(
+    statuses: list[dict[str, Any]], now: str, *, notifications: dict | None = None
+) -> str:
     """Build the status.md text. `statuses` = snapshot rows
     ({name, reachable, status_json, last_seen}); offline servers render last_seen.
     `now` is a preformatted timestamp."""
     lines = ["# TaskPaw Hub Status", "", f"Last updated: {now}", ""]
+    if notifications is not None:
+        lines.extend(
+            [
+                "Notifications: " + _inline(str(notifications.get("state", "unknown"))),
+                "  pending "
+                + str(notifications.get("pending_count", "unknown"))
+                + " · failed "
+                + str(notifications.get("failed_count", "unknown"))
+                + " · dead letters "
+                + str(notifications.get("dead_letter_count", "unknown"))
+                + " · quarantined "
+                + str(notifications.get("quarantined_count", "unknown")),
+                "  oldest pending "
+                + (
+                    f"{int(notifications['oldest_pending_age_seconds'])}s"
+                    if _is_num(notifications.get("oldest_pending_age_seconds"))
+                    else "unknown/none"
+                )
+                + " · last success "
+                + _inline(str(notifications.get("last_success_at") or "never")),
+                "  last failure "
+                + _inline(str(notifications.get("last_failure_at") or "never"))
+                + " · "
+                + _inline(str(notifications.get("last_failure_reason") or "none")),
+                "",
+            ]
+        )
     for s in statuses:
         name = _inline(str(s.get("name", "unknown")))  # sanitized: no line injection
         if s.get("reachable"):
@@ -451,6 +480,19 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
                 else f"## {name}: OFFLINE"
             )
         health = s.get("status_health") or {}
+        if health:
+            age: Any = health.get("age_seconds")
+            lines.append(
+                "  Data: "
+                + _inline(str(health.get("state", "unknown")), 32)
+                + (
+                    f" · age {int(age)}s"
+                    if _is_num(age) and age >= 0
+                    else " · age unknown"
+                )
+                + " · last success "
+                + _inline(str(health.get("last_good_at") or "never"), 64)
+            )
         if health.get("error_code"):
             reason = _inline(str(health["error_code"]), 64)
             age = health.get("age_seconds")
@@ -465,7 +507,9 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
     return "\n".join(lines)
 
 
-def write_status_md(path, statuses: list[dict[str, Any]], now: str) -> None:
+def write_status_md(
+    path, statuses: list[dict[str, Any]], now: str, *, notifications: dict | None = None
+) -> None:
     """Atomically write status.md (tmp + os.replace) so OpenClaw never reads a
     half-written file."""
     from pathlib import Path
@@ -474,7 +518,10 @@ def write_status_md(path, statuses: list[dict[str, Any]], now: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(render_status_md(statuses, now), encoding="utf-8")
+        tmp.write_text(
+            render_status_md(statuses, now, notifications=notifications),
+            encoding="utf-8",
+        )
         os.replace(tmp, p)
     finally:
         tmp.unlink(missing_ok=True)  # no .tmp residue if render/write/replace fails

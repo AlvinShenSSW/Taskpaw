@@ -191,6 +191,24 @@ class HubStore:
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS upstream_summary(server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,evicted_count INTEGER NOT NULL,last_evicted_at TEXT NOT NULL,last_reason TEXT NOT NULL)"
                 )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS hub_availability("
+                    "server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,"
+                    "failure_count INTEGER NOT NULL DEFAULT 0,failure_started_at TEXT,"
+                    "last_failed_at TEXT,elapsed_seconds REAL NOT NULL DEFAULT 0,"
+                    "announced INTEGER NOT NULL DEFAULT 0,last_error TEXT)"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS hub_events("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "server_id INTEGER REFERENCES servers(id) ON DELETE SET NULL,"
+                    "server_name TEXT NOT NULL,monitor TEXT NOT NULL,message TEXT NOT NULL,"
+                    "level TEXT NOT NULL,received_at TEXT NOT NULL)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_hub_events_time "
+                    "ON hub_events(received_at,id)"
+                )
                 had_cursors = c.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_cursors'"
                 ).fetchone()
@@ -384,12 +402,7 @@ class HubStore:
 
     def set_server_enabled(self, server_id: int, enabled: bool) -> bool:
         """Enable/disable polling of a server. Returns True if a row changed."""
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE servers SET enabled=? WHERE id=?", (int(enabled), server_id)
-            )
-            self._conn.commit()
-            return cur.rowcount > 0
+        return self.update_server(server_id, enabled=enabled)
 
     def update_server(
         self,
@@ -423,9 +436,19 @@ class HubStore:
         params.append(server_id)
         with self._lock:
             try:
+                previous = self.get_server(server_id)
                 cur = self._conn.execute(
                     f"UPDATE servers SET {', '.join(sets)} WHERE id=?", params
                 )
+                if previous and any(
+                    value is not None and value != previous[key]
+                    for key, value in (("enabled", enabled), ("ip", ip), ("port", port))
+                ):
+                    # Even disable/re-enable between poll cycles ends the old
+                    # incident. A replacement endpoint has no proven recovery.
+                    self._conn.execute(
+                        "DELETE FROM hub_availability WHERE server_id=?", (server_id,)
+                    )
                 self._conn.commit()
                 return cur.rowcount > 0
             except Exception:
@@ -923,6 +946,80 @@ class HubStore:
             return cur.rowcount
 
     # ── events ────────────────────────────────────────────────────────────
+    def _insert_hub_event(
+        self,
+        server_name: str,
+        monitor: str,
+        message: str,
+        level: str,
+        active: bool,
+        server_id: int | None = None,
+    ) -> int:
+        """Caller owns the lock and transaction (including any incident state)."""
+        stamp = outbox_time()
+        message = message[:32768]
+        cur = self._conn.execute(
+            "INSERT INTO hub_events(server_id,server_name,monitor,message,level,received_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (server_id, server_name[:200], monitor[:200], message, level[:32], stamp),
+        )
+        assert cur.lastrowid is not None
+        event_id = cur.lastrowid
+        if active:
+            self._conn.execute(
+                "INSERT INTO delivery_outbox(server_name,payload_json,kind,"
+                "next_attempt_at,created_at,dedupe_key) VALUES(?,?,'event',?,?,?)",
+                (
+                    server_name[:200],
+                    json.dumps(
+                        {"text": f"TaskPaw Event | {server_name[:200]}: {message}"}
+                    ),
+                    stamp,
+                    stamp,
+                    f"hub:{event_id}",
+                ),
+            )
+        # Small local history, separate from active outbox ownership/retention.
+        self._conn.execute(
+            "DELETE FROM hub_events WHERE received_at < ?",
+            (outbox_time(datetime.now(timezone.utc) - timedelta(days=30)),),
+        )
+        self._conn.execute(
+            "DELETE FROM hub_events WHERE id IN "
+            "(SELECT id FROM hub_events ORDER BY id DESC LIMIT -1 OFFSET 10000)"
+        )
+        return event_id
+
+    def record_hub_event(
+        self,
+        server_name: str,
+        monitor: str,
+        message: str,
+        level: str,
+        active: bool,
+        server_id: int | None = None,
+    ) -> int:
+        with self._lock:
+            try:
+                event_id = self._insert_hub_event(
+                    server_name, monitor, message, level, active, server_id
+                )
+                self._conn.commit()
+                return event_id
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def recent_hub_events(self, limit: int = 200) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id,server_id,server_name,monitor,message,level,received_at "
+                "FROM hub_events ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 1000)),),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def recent_events(
         self,
         server_id: Optional[int] = None,
@@ -1069,6 +1166,89 @@ class HubStore:
                 self._conn.rollback()
                 raise
 
+    def _delivery_receipt(self, key: str, value: str) -> None:
+        # Transaction-owned; never call set_config() here (it commits early).
+        self._conn.execute(
+            "INSERT INTO config(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+    def complete_delivery(self, delivery_id: int) -> None:
+        """A success receipt and queue removal are one durable operation."""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "DELETE FROM delivery_outbox WHERE id=?", (delivery_id,)
+                )
+                if cur.rowcount:
+                    self._delivery_receipt("delivery_last_success_at", outbox_time())
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _failed_delivery_receipt(self, reason: str) -> None:
+        safe = (
+            reason
+            if reason
+            in {
+                "http_auth",
+                "http_refused",
+                "body_oversize",
+                "http_metadata_oversize",
+                "http_encoding",
+                "upstream_deadline",
+                "network_unreachable",
+                "upstream_timeout",
+                "request_invalid",
+                "helper_failed",
+                "attempt cap",
+                "age>24h",
+            }
+            else "delivery_failed"
+        )
+        self._delivery_receipt("delivery_last_failure_at", outbox_time())
+        self._delivery_receipt("delivery_last_failure_reason", safe)
+
+    def notification_health(self, now: datetime | None = None) -> dict:
+        """Persisted evidence only; the service adds enabled/worker state."""
+        with self._lock:
+            pending, failed, dead, oldest = self._conn.execute(
+                "SELECT COUNT(CASE WHEN delivery_state IN ('pending','failed') THEN 1 END),"
+                "COUNT(CASE WHEN delivery_state='failed' THEN 1 END),"
+                "COUNT(CASE WHEN delivery_state='dead_letter' THEN 1 END),"
+                "MIN(CASE WHEN delivery_state IN ('pending','failed') THEN created_at END) "
+                "FROM delivery_outbox WHERE NOT EXISTS "
+                "(SELECT 1 FROM outbox_quarantine q WHERE q.delivery_id=delivery_outbox.id)"
+            ).fetchone()
+            quarantined = self._conn.execute(
+                "SELECT COUNT(*) FROM outbox_quarantine"
+            ).fetchone()[0]
+            age = None
+            if oldest:
+                try:
+                    stamp = datetime.fromisoformat(oldest)
+                    candidate = (
+                        (now or datetime.now(timezone.utc)) - stamp
+                    ).total_seconds()
+                    if candidate >= 0:
+                        age = candidate
+                except (ValueError, TypeError):
+                    log.error("Invalid outbox age evidence")
+            return {
+                "pending_count": pending,
+                "failed_count": failed,
+                "dead_letter_count": dead,
+                "quarantined_count": quarantined,
+                "oldest_pending_at": oldest,
+                "oldest_pending_age_seconds": age,
+                "last_success_at": self.get_config("delivery_last_success_at") or None,
+                "last_failure_at": self.get_config("delivery_last_failure_at") or None,
+                "last_failure_reason": self.get_config("delivery_last_failure_reason")
+                or None,
+            }
+
     def mark_delivery_failed(
         self,
         delivery_id: int,
@@ -1083,6 +1263,7 @@ class HubStore:
                     "last_error=?, next_attempt_at=? WHERE id=?",
                     (attempts, last_error, outbox_time(next_attempt_at), delivery_id),
                 )
+                self._failed_delivery_receipt(last_error)
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -1107,6 +1288,7 @@ class HubStore:
                     "last_error=?, dead_letter_alerted=1 WHERE id=?",
                     (attempts, last_error, delivery_id),
                 )
+                self._failed_delivery_receipt(last_error)
                 self._conn.commit()
                 return should_alert
             except Exception:

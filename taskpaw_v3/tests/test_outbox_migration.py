@@ -63,6 +63,7 @@ def test_real_v2_naive_rows_do_not_stop_two_agent_poll_cycles(tmp_path, monkeypa
         )
         for _ in range(2):
             poller.poll_once()
+            poller.drain_outbox()
         assert sampled == ["one", "two", "one", "two"]
         assert with_store._conn.execute(
             "SELECT attempts,created_at FROM delivery_outbox"
@@ -85,6 +86,7 @@ def test_real_v2_bad_json_is_preserved_instead_of_deleted(tmp_path, monkeypatch)
     try:
         poller = Poller(store, "http://invalid", lambda: True, lambda: "fake")
         poller.poll_once()
+        poller.drain_outbox()
         assert store._conn.execute(
             "SELECT payload_json,attempts FROM delivery_outbox"
         ).fetchall() == [("broken fake json", 3)]
@@ -557,6 +559,7 @@ def test_runtime_corrupt_row_state_failure_and_send_failure_do_not_stop_healthy_
         )
         for _ in range(2):
             poller.poll_once()
+            poller.drain_outbox()
         assert order == ["one", "two", "failing", "healthy", "one", "two", "failing"]
         assert store._conn.execute(
             "SELECT id FROM delivery_outbox ORDER BY id"
@@ -604,9 +607,11 @@ def test_drain_failure_boundaries_leave_polling_live(tmp_path, monkeypatch, faul
             store._conn.commit()
             monkeypatch.setattr(store, "quarantine_delivery", fail)
         elif fault == "delete":
-            delete = store.delete_delivery
+            delete = store.complete_delivery
             monkeypatch.setattr(
-                store, "delete_delivery", lambda i: fail() if i == first else delete(i)
+                store,
+                "complete_delivery",
+                lambda i: fail() if i == first else delete(i),
             )
         else:
             validate = poller_module.validate_row
@@ -621,6 +626,7 @@ def test_drain_failure_boundaries_leave_polling_live(tmp_path, monkeypatch, faul
             monkeypatch.setattr(poller_module, "validate_row", fail_age)
         for _ in range(2):
             poller.poll_once()
+            poller.drain_outbox()
         assert sampled == ["one", "two", "one", "two"]
         if fault != "query":
             assert "second" in sent
@@ -703,6 +709,7 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
             "SELECT * FROM delivery_outbox ORDER BY id"
         ).fetchall()
         poller.poll_once()
+        poller.drain_outbox()
         assert (
             not sent
             and before
@@ -716,7 +723,9 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
         assert store._conn.execute("SELECT COUNT(*) FROM events").fetchone() == (1,)
         switch.update(enabled=True, token="fake")
         poller.poll_once()
+        poller.drain_outbox()
         poller.poll_once()
+        poller.drain_outbox()
         assert len(requests) == 3
         assert [
             parse_qs(urlsplit(request["url"]).query)["ack"] for request in requests
@@ -934,6 +943,7 @@ def test_deep_json_legacy_preview_startup_double_start_and_healthy_polling(
                 lambda url, token, payload, timeout: sent.append(payload),
             )
             poller.poll_once()
+            poller.drain_outbox()
             assert store._conn.execute(
                 "SELECT id,payload_json,attempts,created_at,next_attempt_at FROM delivery_outbox"
             ).fetchall() == [(1, original, 3, timestamp, timestamp)]
@@ -968,7 +978,9 @@ def test_runtime_deep_json_quarantined_while_healthy_row_continues(
             lambda url, token, payload, timeout: sent.append(payload),
         )
         poller.poll_once()
+        poller.drain_outbox()
         poller.poll_once()
+        poller.drain_outbox()
         assert store._conn.execute(
             "SELECT delivery_id,reason FROM outbox_quarantine"
         ).fetchall() == [(invalid, "invalid_payload")]
