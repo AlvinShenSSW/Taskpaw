@@ -1,6 +1,7 @@
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import PanToolAltOutlinedIcon from "@mui/icons-material/PanToolAltOutlined";
 import SearchIcon from "@mui/icons-material/Search";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { Dialog } from "@mui/material";
@@ -10,6 +11,7 @@ import {
   api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode, type TargetPreflight,
 } from "../../api";
 import { archiveLive, packageNote, runningArchiveStep, type StatusKey } from "./mediaModel";
+import { inTauri, pickPath } from "../nativePicker";
 import { ArchiveLivePanel } from "./ArchiveLivePanel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
@@ -81,6 +83,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const [seenRev, setSeenRev] = useState<FilmRevisions | undefined>(undefined);
   // The operator's own choice, bound to the final revision it was made against.
   const [manual, setManual] = useState<{ performer: Performer; rev: string | null } | null>(null);
+  const [targetDir, setTargetDir] = useState<string | null>(null);
   const [phase, setPhase] = useState<"review" | "submitted">("review");
   // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
   const [submittedAt, setSubmittedAt] = useState(0);
@@ -106,26 +109,34 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   // Exactly one candidate is selected automatically (also when it arrives after an empty or failed
   // first load); several are never pre-selected, and an operator's choice is never replaced.
   // The automatic choice is derived from the current candidates, so it always belongs to this revision.
-  const selected: Performer | null | undefined = manual && manual.rev === final ? manual.performer
+  const selected: Performer | null | undefined = targetDir ? null : manual && manual.rev === final ? manual.performer
     : candidates === null ? undefined : candidates.length === 1 ? candidates[0] : null;
   // The chosen performer's check: the shared answer when the backend checked that very candidate,
   // else its own query (once the shared one has answered), keyed by the revision as well.
   const shared = Boolean(selected) && target.data?.performer_id != null
     && String(target.data.performer_id) === String(selected?.id);
   const own = useQuery({
-    queryKey: [...mediaTargetKey(filmId, final), selected?.id ?? null],
-    queryFn: () => api.workflowTarget(filmId, (selected as Performer).id),
-    enabled: Boolean(selected) && !shared && (target.data !== undefined || target.isError), retry: false,
+    queryKey: [...mediaTargetKey(filmId, final), targetDir ? `manual:${targetDir}` : selected?.id ?? null],
+    queryFn: () => targetDir ? api.workflowTarget(filmId, undefined, targetDir) : api.workflowTarget(filmId, (selected as Performer).id),
+    enabled: Boolean(selected || targetDir) && !shared && (target.data !== undefined || target.isError), retry: false,
     refetchInterval: (q) => (passes(q.state.data) ? false : PREFLIGHT_MS),
   });
   const preflight = shared ? target : own;
+  const hasTarget = Boolean(selected || targetDir);
   const choose = (p: Performer) => {
     // the same candidate again asks the NAS again
     if (selected && String(selected.id) === String(p.id)) void preflight.refetch();
+    setTargetDir(null);
     setManual({ performer: p, rev: final });
   };
+  const chooseDirectory = async () => {
+    const path = await pickPath(true, "选择入库目录");
+    if (path === null) return;
+    if (path === targetDir) void preflight.refetch();
+    setTargetDir(path);
+  };
   const confirm = useMutation({
-    mutationFn: (p: Performer) => api.workflowConfirm(filmId, p.id),
+    mutationFn: () => targetDir ? api.workflowConfirm(filmId, undefined, targetDir) : api.workflowConfirm(filmId, (selected as Performer).id),
     onSuccess: () => {
       setPhase("submitted");
       setSubmittedAt(detail.dataUpdatedAt);
@@ -157,24 +168,25 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
 
   const status: StatusKey | undefined = archiveStatus === "unknown" ? "unknown" : item?.status;
   // the chosen performer's own answer only: never an older or another target's
-  const errorCode = (selected ? preflight.data?.error_code : target.data?.error_code) ?? null;
+  const errorCode = (hasTarget ? preflight.data?.error_code : target.data?.error_code) ?? null;
   const changed = seenRev !== undefined && !sameRevisions(seenRev, film.revisions);
   const earlier =
     status === "unknown" ? "入库结果待核对，暂不能重新上传。"
       : !film.can_confirm ? "影片尚未完成准备，稍后自动继续。"
         : !film.has_poster || film.files.length === 0 ? "最终封面或文件包尚未准备好，请先处理。"
           : changed ? "成品或来源已更新，请重新查看后确认。" : "";
-  const targetBlock = errorCode ? TARGET_BLOCK[errorCode]
-    : !selected ? (candidates === null ? "正在检查目标…" : "请选择演员与目标路径。")
+  const targetBlock = errorCode ? targetDir && errorCode === "duplicate" ? "目标目录下已有同名目录"
+    : targetDir && errorCode === "missing" ? "目标目录已不存在，请重新选择。" : TARGET_BLOCK[errorCode]
+    : !hasTarget ? (candidates === null ? "正在检查目标…" : "请选择演员与目标路径。")
       : targetCheck(preflight.data, preflight.isError ? preflight.error : null);
   const blocked = earlier || targetBlock;
   // 重新检查: a target check that did not pass is asked again on demand (it is also polled)
-  const rechecking = (selected ? preflight : target).isFetching;
-  const recheck = !earlier && targetBlock && (selected || errorCode)
-    ? () => void (selected ? preflight : target).refetch() : null;
+  const rechecking = (hasTarget ? preflight : target).isFetching;
+  const recheck = !earlier && targetBlock && (hasTarget || errorCode)
+    ? () => void (hasTarget ? preflight : target).refetch() : null;
   const title = film.title || film.name;
   // the backend's target already ends in the film folder (`film_dir`)
-  const targetPath = selected ? preflight.data?.target_path ?? null : null;
+  const targetPath = hasTarget ? preflight.data?.target_path ?? null : null;
   // only a real revision conflict (`cas_conflict`) says the film changed; other refusals keep their own message
   const conflict = confirm.error instanceof HttpError && confirm.error.status === 409 && confirm.error.code === "cas_conflict";
 
@@ -197,6 +209,11 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           </div>
         </div>
         <Candidates candidates={candidates} selected={selected ?? null} actor={actor} onSelect={choose} />
+        {inTauri() && !ws.readOnly && (
+          <div className="spacer-top">
+            <button type="button" className="btn ghost" onClick={() => void chooseDirectory()}>手动入库</button>
+          </div>
+        )}
         {archiveStatus === "failed" && film.can_confirm && (
           <Notice tone="red">上次入库未完成：{film.archive.error || "原因未知"}。可重新确认入库。</Notice>
         )}
@@ -209,7 +226,9 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
         {confirm.error && <Notice tone="red">{conflict ? "成品或来源已更新，请重新查看后确认。" : errorText(confirm.error)}</Notice>}
         <div className="target-box">
           <h3><Icon of={FolderOpenIcon} />入库到</h3>
-          <div className="target-path">{targetPath ?? "尚未选择完整目标"}</div>
+          <div className="target-path">{targetPath ?? "尚未选择完整目标"}{targetPath && preflight.data?.manual && (
+            <PanToolAltOutlinedIcon fontSize="small" aria-label="手动入库" titleAccess="手动入库" />
+          )}</div>
           <p className="small muted spacer-top">保留所有已有片源；同名冲突不会覆盖。</p>
         </div>
         <details open>
@@ -231,7 +250,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
           {changed && <button type="button" className="btn ghost" onClick={() => { setSeenRev(film.revisions); confirm.reset(); }}>重新查看</button>}
           <button type="button" className="btn primary" disabled={Boolean(blocked) || confirm.isPending}
-            onClick={() => { if (selected && !blocked) confirm.mutate(selected); }}>确认入库</button>
+            onClick={() => { if (hasTarget && !blocked) confirm.mutate(); }}>确认入库</button>
         </div>
       </div>
     </>
@@ -261,7 +280,7 @@ function Candidates({ candidates, selected, actor, onSelect }: {
     queryKey: ["mediaPerformers", query], queryFn: () => api.performers(query), enabled: manual && query !== "", retry: false,
   });
   if (candidates === null) return <p className="small muted">正在查找演员与目标…</p>;
-  if (candidates.length === 1) return null;
+  if (candidates.length === 1 && selected) return null;
   const list = manual ? found.data?.items ?? [] : candidates;
   return (
     <>

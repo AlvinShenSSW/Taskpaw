@@ -1539,6 +1539,7 @@
       "archive": {
         "status": "pending",
         "error": null,
+        "manual": false,
         "target_path": null
       },
       "cleanup": {
@@ -1820,6 +1821,7 @@
       "archive": {
         "status": "pending",
         "error": null,
+        "manual": false,
         "target_path": null
       },
       "cleanup": {
@@ -2122,6 +2124,7 @@
       "archive": {
         "status": "pending",
         "error": null,
+        "manual": false,
         "target_path": null
       },
       "cleanup": {
@@ -2326,6 +2329,7 @@
       "archive": {
         "status": "pending",
         "error": null,
+        "manual": false,
         "target_path": null
       },
       "cleanup": {
@@ -2524,6 +2528,7 @@
       "archive": {
         "status": "pending",
         "error": null,
+        "manual": false,
         "target_path": null
       },
       "cleanup": {
@@ -2690,6 +2695,8 @@
     "candidates": {
       "film_dir": "ABC-123",
       "performer_id": "actor",
+      "target_dir": null,
+      "manual": false,
       "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
       "absent": true,
       "error_code": null,
@@ -2713,6 +2720,8 @@
     "selected": {
       "film_dir": "ABC-123",
       "performer_id": "actor",
+      "target_dir": null,
+      "manual": false,
       "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
       "absent": true,
       "error_code": null,
@@ -2736,6 +2745,8 @@
     "missing": {
       "film_dir": "ABC-123",
       "performer_id": "gone",
+      "target_dir": null,
+      "manual": false,
       "target_path": null,
       "absent": null,
       "error_code": "missing",
@@ -2759,6 +2770,8 @@
     "offline": {
       "film_dir": "ABC-123",
       "performer_id": "actor",
+      "target_dir": null,
+      "manual": false,
       "target_path": null,
       "absent": null,
       "error_code": "offline",

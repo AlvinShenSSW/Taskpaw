@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from taskpaw_v3.core.config import WorkflowSettings
@@ -32,7 +32,14 @@ from .workflow_reads import off_state as off_state  # retained for callers
 
 class ConfirmBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    performer_id: str = Field(min_length=1, max_length=256)
+    performer_id: str | None = Field(default=None, min_length=1, max_length=256)
+    target_dir: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def one_target(self) -> ConfirmBody:
+        if (self.performer_id is None) == (self.target_dir is None):
+            raise ValueError("exactly one of performer_id and target_dir is required")
+        return self
 
 
 class RetryBody(BaseModel):
@@ -250,13 +257,15 @@ def register_workflow_routes(
         return {"paused": body.paused}
 
     @app.get("/control/workflow/films/{film_id}/target")
-    def workflow_target(film_id: str, performer_id: str = "") -> dict[str, Any]:
+    def workflow_target(
+        film_id: str, performer_id: str = "", target_dir: str | None = None
+    ) -> dict[str, Any]:
         """V3 §7.3: the archive target preflight and the NFO actor's candidates."""
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
         with _mapped():
-            return host.finalizer.preflight(film_id, performer_id or None)
+            return host.finalizer.preflight(film_id, performer_id or None, target_dir)
 
     @app.get("/control/workflow/performers")
     def workflow_performers(q: str = "") -> dict[str, Any]:
@@ -279,7 +288,9 @@ def register_workflow_routes(
     def workflow_confirm(film_id: str, body: ConfirmBody) -> dict[str, str]:
         host = _host()
         with _mapped():
-            return {"approval_id": host.confirm(film_id, body.performer_id)}
+            return {
+                "approval_id": host.confirm(film_id, body.performer_id, body.target_dir)
+            }
 
     @app.post("/control/workflow/films/{film_id}/retry")
     def workflow_retry(film_id: str, body: RetryBody) -> dict[str, bool]:

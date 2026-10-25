@@ -194,7 +194,12 @@ class WorkflowHostLike(Protocol):
 
     def status(self) -> dict[str, Any]: ...
 
-    def confirm(self, film_id: str, performer_id: str) -> str: ...
+    def confirm(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> str: ...
 
     def retry(self, film_id: str, stage: str) -> None: ...
 
@@ -460,11 +465,16 @@ class LocalWorkflowHost:
             self.runtime.close()
         self.state = "stopped"
 
-    def confirm(self, film_id: str, performer_id: str) -> str:
+    def confirm(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> str:
         """确认入库 (F02-P1 C1); raises ConfirmError with the reason when refused."""
         if self.finalizer is None:
             raise RuntimeError("媒体流水线尚未启动")
-        approval_id = self.finalizer.confirm(film_id, performer_id)
+        approval_id = self.finalizer.confirm(film_id, performer_id, target_dir)
         if self.dispatcher is not None:
             self.dispatcher.wake()
         return approval_id

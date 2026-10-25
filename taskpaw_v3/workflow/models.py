@@ -277,7 +277,9 @@ class AuthorityBootstrap(Model):
 
 
 class NativeIdentity(Model):
-    scheme: Literal["windows_file_id", "posix_inode", "export_object_id"]
+    scheme: Literal[
+        "windows_file_id", "posix_inode", "export_object_id", "manual_directory"
+    ]
     root_id: Id
     volume_or_export_id: Text
     object_id: Text

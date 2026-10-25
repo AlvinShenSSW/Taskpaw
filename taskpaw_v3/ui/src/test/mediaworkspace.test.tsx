@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import * as nativePicker from "../components/nativePicker";
 import {
   ACTIVE_STATES, filmStatus, lifecycle, matchesStage, progressText, reviewStatus, stageLine, STATUS_META, workItems,
 } from "../components/media/mediaModel";
@@ -32,8 +33,9 @@ function mockApi() {
   vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS_RESPONSE);
   vi.spyOn(api, "workflowPlans").mockResolvedValue(PLANS);
   vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id));
-  vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) => {
+  vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer, targetDir) => {
     const pf = PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+    if (targetDir) return { ...pf, target_dir: targetDir, manual: true, target_path: `${targetDir}/${pf.film_dir}`, absent: true };
     if (pf.error_code) return pf;
     // as the backend: exactly one candidate is checked without a performer too (F4)
     const items = pf.candidates?.items ?? [];
@@ -101,7 +103,7 @@ describe("#302 finished history", () => {
     vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
       has_poster: true, poster_source: "retained-poster", marks: { restored: true, chinese_subtitles: true, uhd: true },
       files: [{ role: "main_video", path: "ABC-123-无码-C.mp4", size: 1000, volume: null }],
-      duration_ms: 7293000, archive: { status: "succeeded", target_path: "fake-NAS/Actor/ABC-123", error: null },
+      duration_ms: 7293000, archive: { status: "succeeded", target_path: "fake-NAS/Actor/ABC-123", error: null, manual: energy },
       history: { completed_at: "2026-10-24T07:42:00Z", total_seconds: 7200,
         steps: keys.map((key) => ({ key, device: key === "restore" ? "工作机" : "本机", seconds: key === "confirm" ? null : 60,
           result: key === "archive" ? "已校验入库" : key === "cleanup" ? "来源与工作副本已清理" : "已完成" })) },
@@ -118,6 +120,7 @@ describe("#302 finished history", () => {
     fireEvent.click(await screen.findByRole("button", { name: "查看 留存标题 详情" }));
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
     expect(await within(drawer).findByRole("heading", { name: "ABC-123" })).toBeInTheDocument();
+    expect(within(drawer).queryByRole("img", { name: "手动入库" }) !== null).toBe(energy);
     expect(drawer).toHaveTextContent(/4K · 画质 高 · 2:01:33 · 已完成/);
     expect(await within(drawer).findByAltText("留存标题 封面")).toBeInTheDocument();
     for (const text of ["无码", "字幕", "演员", "留存演员", "归档到", "fake-NAS/Actor/ABC-123", "✓ 全部完成", "总用时 2:00:00"]) {
@@ -783,6 +786,7 @@ describe("drawer and 图文确认", () => {
     const dialog = await openReview("星河慢行");
     await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
     expect(within(dialog).queryByText("选择演员与目标")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "手动入库" })).toBeNull();
     await waitFor(() => expect(within(dialog).getByText("\\\\nas-a\\actors\\演员星河\\ABF-406")).toBeInTheDocument());
     expect(within(dialog).queryByRole("checkbox")).toBeNull();
     const ok = within(dialog).getByRole("button", { name: "确认入库" });
@@ -790,6 +794,91 @@ describe("drawer and 图文确认", () => {
     fireEvent.click(ok);
     await waitFor(() => expect(m.confirm).toHaveBeenCalledWith("abf-406", 1));
     expect(await screen.findByRole("dialog", { name: "已确认，等待归档" })).toBeInTheDocument();
+  });
+
+  it("手动入库 picks a directory, preflights it and posts target_dir", async () => {
+    const readTarget = api.workflowTarget;
+    const postConfirm = api.workflowConfirm;
+    const m = mockApi();
+    const original = vi.mocked(api.workflowTarget).getMockImplementation()!;
+    vi.mocked(api.workflowTarget).mockImplementation((id, performer, targetDir) =>
+      targetDir ? readTarget(id, performer, targetDir) : original(id, performer));
+    m.confirm.mockImplementation(postConfirm);
+    const directory = "D:/自选 目录";
+    vi.spyOn(nativePicker, "inTauri").mockReturnValue(true);
+    const picker = vi.spyOn(nativePicker, "pickPath").mockResolvedValue(directory);
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => Response.json(init?.method === "POST"
+      ? { approval_id: "manual-approval" }
+      : preflight("ABF-406", PREFLIGHTS["abf-406"].candidates!.items, {
+        target_dir: directory, manual: true, target_path: `${directory}/ABF-406`, absent: true,
+      })));
+    vi.stubGlobal("fetch", fetch);
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "手动入库" }));
+    expect(picker).toHaveBeenCalledWith(true, "选择入库目录");
+    const icon = await within(dialog).findByRole("img", { name: "手动入库" });
+    expect(icon.parentElement).toHaveTextContent(`${directory}/ABF-406`);
+    const targetUrl = new URL(fetch.mock.calls[0][0]);
+    expect(targetUrl.pathname).toMatch(/\/abf-406\/target$/);
+    expect([...targetUrl.searchParams]).toEqual([["target_dir", directory]]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认入库" }));
+    await screen.findByRole("dialog", { name: "已确认，等待归档" });
+    const post = fetch.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(post[0]).toMatch(/\/abf-406\/confirm$/);
+    expect(JSON.parse(String(post[1]?.body))).toEqual({ target_dir: directory });
+  });
+
+  it("cancelling changes nothing, and choosing the sole performer leaves manual mode", async () => {
+    const m = mockApi();
+    vi.spyOn(nativePicker, "inTauri").mockReturnValue(true);
+    const picker = vi.spyOn(nativePicker, "pickPath").mockResolvedValueOnce(null).mockResolvedValue("D:/manual");
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    const calls = vi.mocked(api.workflowTarget).mock.calls.length;
+    const manual = within(dialog).getByRole("button", { name: "手动入库" });
+    await act(async () => { fireEvent.click(manual); });
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.workflowTarget).mock.calls).toHaveLength(calls);
+    expect(ok).toBeEnabled();
+    expect(within(dialog).queryByRole("img", { name: "手动入库" })).toBeNull();
+    fireEvent.click(manual);
+    await within(dialog).findByRole("img", { name: "手动入库" });
+    fireEvent.click(within(dialog).getByRole("button", { name: /演员星河/ }));
+    await waitFor(() => expect(ok).toBeEnabled());
+    expect(within(dialog).queryByRole("img", { name: "手动入库" })).toBeNull();
+    fireEvent.click(ok);
+    await waitFor(() => expect(m.confirm).toHaveBeenCalledWith("abf-406", 1));
+  });
+
+  it("a duplicate manual target blocks confirmation with the manual message", async () => {
+    mockApi();
+    vi.spyOn(nativePicker, "inTauri").mockReturnValue(true);
+    vi.spyOn(nativePicker, "pickPath").mockResolvedValue("D:/manual");
+    const original = vi.mocked(api.workflowTarget).getMockImplementation()!;
+    vi.mocked(api.workflowTarget).mockImplementation(async (id, performer, targetDir) => ({
+      ...await original(id, performer, targetDir), ...(targetDir ? { absent: false, error_code: "duplicate" as const } : {}),
+    }));
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "手动入库" }));
+    expect(await within(dialog).findByText("目标目录下已有同名目录")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();
+  });
+
+  it("the detail target row marks a manual archive", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id, {
+      archive: { status: "pending", error: null, target_path: "D:/manual/ABF-406", manual: true },
+    }));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看 浮光之间 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const icon = await within(drawer).findByRole("img", { name: "手动入库" });
+    expect(icon.parentElement).toHaveTextContent("D:/manual/ABF-406");
   });
 
   it("several candidates are never pre-selected", async () => {
@@ -851,7 +940,7 @@ describe("图文确认 review fixes", () => {
     let after = false;
     vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
       ? detail(id, {
-        can_confirm: false, archive: { status: state, error: null, target_path: STAR_TARGET },
+        can_confirm: false, archive: { status: state, error: null, target_path: STAR_TARGET, manual: false },
         steps: steps("archive", state, { progress: live ? {
           phase: "copying", copied_bytes: 2e9, verified_bytes: 0, total_bytes: 4e9,
           files_done: 0, files_total: 1, items: [{ name: "ABF-406", bytes: 2e9, total: 4e9 }],
@@ -887,7 +976,7 @@ describe("图文确认 review fixes", () => {
     let after = false;
     vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
       ? detail(id, {
-        archive: { status, error: status === "failed" ? "NAS 写入中断" : null, target_path: null },
+        archive: { status, error: status === "failed" ? "NAS 写入中断" : null, target_path: null, manual: false },
         can_confirm: status === "failed",
       })
       : detail(id)));
@@ -1517,7 +1606,7 @@ describe("archive output (#301)", () => {
       steps: steps(archived ? "done" : "confirm", archived ? "done" : "waiting") });
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
     vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
-      archive: { status: archived ? "succeeded" : "pending", target_path: archived ? "fake-NAS/ABC-123" : null, error: null },
+      archive: { status: archived ? "succeeded" : "pending", target_path: archived ? "fake-NAS/ABC-123" : null, error: null, manual: false },
       revisions: revisions(1, 1) }));
     wrap(<MediaWorkspace />);
     await go("影片队列");

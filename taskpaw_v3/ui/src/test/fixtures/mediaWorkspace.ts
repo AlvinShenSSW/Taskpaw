@@ -146,7 +146,7 @@ export const performer = (id: number, name: string, label: string): Performer =>
 
 // The preflight without a performer: only the candidates (U1 §7.3).
 export const preflight = (filmDir: string, items: Performer[] | null, over: Partial<TargetPreflight> = {}): TargetPreflight => ({
-  film_dir: filmDir, performer_id: null, target_path: null, absent: null, error_code: null, message: null,
+  film_dir: filmDir, performer_id: null, target_dir: null, manual: false, target_path: null, absent: null, error_code: null, message: null,
   candidates: items === null ? null : { query: items.map((p) => p.name), items }, ...over,
 });
 
@@ -203,7 +203,7 @@ export function detail(id: string, over: Partial<FilmDetail> = {}): FilmDetail {
     inputs: [{ path: `${r.name}/${r.name}.mp4`, size: 7301444403 }, { path: `${r.name}/${r.name}.nfo`, size: 2048 }],
     workcopy_count: 0, has_poster: r.group === "confirm", group: r.group, can_confirm: r.can_confirm, can_retry: r.can_retry,
     retry_stage: r.retry_stage, note: r.note, stages: [], steps: r.steps,
-    archive: { status: null, error: null, target_path: null }, cleanup: { input: null, workcopy: null, kept: [] },
+    archive: { status: null, error: null, target_path: null, manual: false }, cleanup: { input: null, workcopy: null, kept: [] },
     resolution: r.resolution, receipt_id: r.receipt_id, revisions: r.revisions, plan: r.plan, poster_source: null, has_cover: false, cover_source: null, lookup: null,
     ...over,
   };

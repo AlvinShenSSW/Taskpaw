@@ -1188,6 +1188,9 @@ def film_detail(
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,
+            "manual": bool(
+                target and target.native_identity.scheme == "manual_directory"
+            ),
             "target_path": wf.archive_path
             or (
                 str(Path(target.export_identity) / target.relative_path)

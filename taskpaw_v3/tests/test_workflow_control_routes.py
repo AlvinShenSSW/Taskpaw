@@ -71,10 +71,15 @@ class Host:
             },
         }
 
-    def confirm(self, film_id: str, performer_id: str) -> str:
+    def confirm(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> str:
         if self.confirm_error is not None:
             raise self.confirm_error
-        return self.finalizer.confirm(film_id, performer_id)
+        return self.finalizer.confirm(film_id, performer_id, target_dir)
 
     def retry(self, film_id: str, stage: str) -> None:
         retry_failed_stage(self.runtime, film_id, stage)
@@ -292,7 +297,12 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
     assert (data["group"], data["can_confirm"]) == ("confirm", True)
     stages = {s["stage"]: s["status"] for s in data["stages"]}
     assert stages["scrape"] == "succeeded" and stages["archive"] == "pending"
-    assert data["archive"] == {"status": "pending", "error": None, "target_path": None}
+    assert data["archive"] == {
+        "status": "pending",
+        "error": None,
+        "target_path": None,
+        "manual": False,
+    }
     assert data["cleanup"] == {"input": "pending", "workcopy": "pending", "kept": []}
 
 
@@ -383,6 +393,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         "status": "succeeded",
         "error": None,
         "target_path": str(world.nas / FILM_DIR),
+        "manual": False,
     }
     assert data["cleanup"] == {
         "input": "succeeded",
@@ -451,6 +462,35 @@ def test_filmpaw_client_maps_performers_and_raw_thumbs(tmp_path):
 
 
 # ── confirm (U4, D05) ────────────────────────────────────────────────────
+def test_manual_confirm_and_detail(world, host, client):
+    world.scrape()
+    destination = world.tmp / "manual"
+    destination.mkdir()
+    with world.fake:
+        response = client.post(
+            f"{BASE}/films/{world.film}/confirm", json={"target_dir": str(destination)}
+        )
+        assert response.status_code == 200, response.text
+        world.ticks(host.finalizer)
+    archive = client.get(f"{BASE}/films/{world.film}").json()["archive"]
+    assert archive == {
+        "status": "succeeded",
+        "error": None,
+        "target_path": str(destination / FILM_DIR),
+        "manual": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"performer_id": "actor", "target_dir": "C:/library"}, {"target_dir": ""}],
+)
+def test_confirm_requires_exactly_one_target(world, client, body):
+    response = client.post(f"{BASE}/films/{world.film}/confirm", json=body)
+    assert response.status_code == 422
+    assert world.rt.store.film_workflow(world.rt.operator, world.film).approval is None
+
+
 def test_confirm_once_then_refusals_are_409_with_the_reason(world, host, client):
     early = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}

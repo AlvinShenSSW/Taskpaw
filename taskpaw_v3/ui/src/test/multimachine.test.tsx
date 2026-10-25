@@ -34,7 +34,7 @@ function mockApi(films = REMOTE_FILMS, film: (id: string) => FilmDetail = (id) =
   vi.spyOn(api, "workflowFilms").mockResolvedValue(films);
   vi.spyOn(api, "workflowPlans").mockResolvedValue(REMOTE_PLANS);
   vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => film(id));
-  vi.spyOn(api, "workflowTarget").mockResolvedValue({ film_dir: "X", performer_id: null, target_path: null, absent: null,
+  vi.spyOn(api, "workflowTarget").mockResolvedValue({ film_dir: "X", performer_id: null, target_dir: null, manual: false, target_path: null, absent: null,
     error_code: null, message: null, candidates: { query: [], items: [] } });
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
   vi.spyOn(api, "workflowDevices").mockResolvedValue(REMOTE_DEVICES);

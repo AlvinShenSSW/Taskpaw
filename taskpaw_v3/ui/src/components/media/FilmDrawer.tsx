@@ -1,5 +1,6 @@
 import CloseIcon from "@mui/icons-material/Close";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import PanToolAltOutlinedIcon from "@mui/icons-material/PanToolAltOutlined";
 import { Drawer } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
@@ -149,7 +150,9 @@ function HistoryBody({ film }: { film: FilmDetail }) {
           <h2>{title}</h2>
           <dl className="facts">
             <dt>演员</dt><dd>{film.actors.join("、") || "—"}</dd>
-            <dt>归档到</dt><dd className="mono">{film.archive.target_path || "—"}</dd>
+            <dt>归档到</dt><dd className="mono">{film.archive.target_path || "—"}{film.archive.manual && (
+              <PanToolAltOutlinedIcon fontSize="small" aria-label="手动入库" titleAccess="手动入库" />
+            )}</dd>
           </dl>
           <p>总用时 {fmtDuration(history?.total_seconds)}{energy && <> · 修复耗电 {(energy.wh / 1000).toFixed(3)} kWh{energy.partial ? "（部分估算）" : "（估算）"}</>}</p>
         </div>
@@ -281,7 +284,9 @@ function DrawerBody({ film, item, status, plan, onClose }: {
       </section>
       <dl className="facts spacer-top">
         {plannedFacts}
-        <dt>目标</dt><dd>{film.archive.target_path || "尚未确定目标"}</dd>
+        <dt>目标</dt><dd>{film.archive.target_path || "尚未确定目标"}{film.archive.manual && (
+          <PanToolAltOutlinedIcon fontSize="small" aria-label="手动入库" titleAccess="手动入库" />
+        )}</dd>
         <dt>原始来源</dt><dd>主控 INBOX / {film.name} · 本次收件 {film.inputs.length} 项</dd>
         <dt>入库结果</dt><dd>{receipt || "尚未入库"}</dd>
         <dt>来源清理</dt><dd>{film.cleanup.input ? CLEANUP_STATE[film.cleanup.input] ?? film.cleanup.input : "入库完成后自动检查并清理本次来源"}</dd>
