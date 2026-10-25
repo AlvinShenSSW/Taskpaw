@@ -130,7 +130,7 @@ def test_documented_sql_uses_current_evidence_not_success_history(tmp_path, caps
     store.record_status(sid, '{"monitors":{}}', None)
     guide = Path("docs/guides/openclaw-integration.md").read_text(encoding="utf-8")
     example = guide.split("```python\n", 1)[1].split("```", 1)[0]
-    example = example.replace("~/.taskpaw-hub/hub.db", str(store.db_path))
+    example = example.replace('"~/.taskpaw-hub/hub.db"', repr(str(store.db_path)))
     try:
         exec(compile(example, "guide-example", "exec"), {})
         assert "current: True" in capsys.readouterr().out
