@@ -332,6 +332,23 @@ def test_orphan_junction_never_deletes_its_outside_target(
             link.rmdir()  # unlink the junction so pytest never cleans its target
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junction")
+def test_a_link_above_the_reclamation_root_does_not_block_it(orphan_tree, tmp_path):
+    """Kimi F1: like macOS /var, a linked prefix above the work dir is not a reason to keep."""
+    import _winapi
+
+    _, work, paths = orphan_tree
+    via = tmp_path / "via"
+    _winapi.CreateJunction(str(work), str(via))
+    try:
+        snapshot = via / "intake" / paths["orphan"].name / "snapshot"
+        remove_work_tree(snapshot, via / "intake", operation_id="fixture")
+        assert not (paths["orphan"] / "snapshot").exists()
+        assert paths["live"].exists()
+    finally:
+        via.rmdir()  # the junction only, never its target
+
+
 @pytest.mark.parametrize("target", ["root", "outside", "traversal", "file"])
 def test_reclamation_rejects_root_and_paths_outside_it(
     orphan_tree, tmp_path, target, caplog
