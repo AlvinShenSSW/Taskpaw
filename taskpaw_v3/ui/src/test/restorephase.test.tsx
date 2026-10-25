@@ -45,6 +45,11 @@ describe("restoreLive", () => {
     expect(heartbeatText(live, Date.now())).toBe("修复中");
   });
 
+  it.each(["uploading", "finishing", "settling"] as const)("does not treat remote %s as Jasna work", (phase) => {
+    expect(restoreLive({ ...step("starting"), phase })).toBeNull();
+    expect(restoreLive({ ...step("ltx"), phase })).toBeNull();
+  });
+
   it("strips terminal controls from the console line", () => {
     expect(restoreLive({ ...step("working"), console: "\u001b[33mloading\u001b[0m" })?.console).toBe("loading");
   });

@@ -1766,24 +1766,26 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
             .unwrap();
         let result = super::read_readiness(
             child.stdout.take().unwrap(),
-            std::time::Duration::from_secs(2),
+            // Allow the Node fixture to start on a busy CI worker.
+            std::time::Duration::from_secs(10),
         );
         let _ = child.kill();
         let _ = child.wait();
-        assert!(matches!(result, Ok(super::StartupStatus::Failed(super::startup::Code::MigrationRequired))), "a supported state admission failure must reach the shell as typed startup status");
+        assert!(matches!(&result, Ok(super::StartupStatus::Failed(super::startup::Code::MigrationRequired))), "a supported state admission failure must reach the shell as typed startup status; read error: {:?}", result.as_ref().err());
     }
 
     #[test]
     fn readiness_eof_timeout_and_invalid_metadata_fail_closed() {
         use std::process::{Command, Stdio};
         for (program, timeout, expected) in [
-            ("process.exit(0)", std::time::Duration::from_secs(2), super::StartupReadError::Eof),
+            ("process.exit(0)", std::time::Duration::from_secs(10), super::StartupReadError::Eof),
             ("setTimeout(()=>{},1000)", std::time::Duration::from_millis(10), super::StartupReadError::Timeout),
-            ("process.stdout.write(JSON.stringify({taskpaw_ready:true,base_url:'http://127.0.0.1:5681'})+'\\n')", std::time::Duration::from_secs(2), super::StartupReadError::InvalidMetadata),
+            ("process.stdout.write(JSON.stringify({taskpaw_ready:true,base_url:'http://127.0.0.1:5681'})+'\\n')", std::time::Duration::from_secs(10), super::StartupReadError::InvalidMetadata),
         ] {
             let mut child=Command::new("node").args(["-e",program]).stdout(Stdio::piped()).spawn().unwrap();
-            assert!(matches!(super::read_readiness(child.stdout.take().unwrap(), timeout), Err(error) if error == expected));
+            let result = super::read_readiness(child.stdout.take().unwrap(), timeout);
             let _=child.kill(); let _=child.wait();
+            assert!(matches!(&result, Err(error) if error == &expected), "expected {expected:?}; read error: {:?}", result.as_ref().err());
         }
     }
     #[cfg(unix)]

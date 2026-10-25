@@ -11,7 +11,7 @@ import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDateTime, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDateTime, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreLive, restorePhaseText, restoreStep,
   machineLabel, runningArchiveStep, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
@@ -189,7 +189,8 @@ function DrawerBody({ film, item, status, plan, onClose }: {
   const restore = restoreStep(film);
   const archive = runningArchiveStep(film);
   const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
-  const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
+  const running = restoreLive(restore) ? restore : null;
+  const phaseText = restorePhaseText(restore);
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
   // P2-4 §4: remote mode's 设备 line (route, 失联, 改派, 判定已停止)
@@ -262,7 +263,8 @@ function DrawerBody({ film, item, status, plan, onClose }: {
           <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
-      ) : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
+      ) : phaseText ? <Notice icon={InfoOutlinedIcon}>{phaseText}</Notice>
+        : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
       ) : film.source_missing ? null : (
