@@ -4,6 +4,12 @@
 
 ---
 
+## V3 3.10.3 — Agent 当前任务与处理详情（#322）
+
+- 当前影片、真实阶段、进度、用时与对应传输集中展示；预取与排队影片保留在次要区域，继续复用主控修复进度组件。
+- 回传、提交结果和停止确认优先于残留计算信息；等待原因、连接状态及暂停领取失败有明确反馈。提交结果不表示已入库。
+- 按本次交付要求同步提升 V3 后端、UI 与桌面壳版本；V2 保持不变。
+
 ## V3 3.10.2 — 派单队列：自动给最先空出的机器、指定机器在主控排队；功耗离线原因
 
 - Controller update: new intakes on the same NTFS volume use hard links without duplicating file data; unsupported links retain verified copies. Cleanup removes only the approved names, including read-only files. Existing snapshots and the version are unchanged (#314).

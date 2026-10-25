@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from taskpaw_v3.core.config import WorkflowSettings
 from taskpaw_v3.core.gpu_lease import GpuLease
 from taskpaw_v3.tests.test_workflow_films import input_manifest
 from taskpaw_v3.tests.test_workflow_remote_worker import (
@@ -27,7 +28,7 @@ from taskpaw_v3.tests.test_workflow_remote_worker import (
 from taskpaw_v3.tests.worker_api_helpers import VERSION, beat
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.executors import ExecOutcome, SyntheticExecutor
-from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
+from taskpaw_v3.workflow.fleet_live import CurrentLive, FleetLive, Heartbeat
 from taskpaw_v3.workflow.keep_awake import (
     ES_CONTINUOUS,
     ES_SYSTEM_REQUIRED,
@@ -35,6 +36,7 @@ from taskpaw_v3.workflow.keep_awake import (
 )
 from taskpaw_v3.workflow.local_dispatch import run_stage
 from taskpaw_v3.workflow.remote_dispatch import RemoteDispatcher, WorkerRuntime
+from taskpaw_v3.workflow.remote_worker import WorkerHost
 from taskpaw_v3.workflow.routing import RoutingThread
 from taskpaw_v3.workflow.stage_results import StageResultError
 from taskpaw_v3.workflow.staging import Staging
@@ -273,6 +275,78 @@ def test_position_one_is_fetched_while_position_zero_runs(tmp_path):
         ]  # only the position-0 route is claimed
         assert d.current()["film_id"] == first
         assert d.claimed()
+    finally:
+        executor.release.set()
+        assert d.stop(10)
+
+
+def test_monitor_distinguishes_active_and_fetching_revisions(tmp_path):
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    next_revision = client.envelope(film, 1)
+    next_revision.update(
+        rev=2, manifest=input_manifest(film, revision=2).model_dump(mode="json")
+    )
+    client.films[film, 2] = next_revision
+    fetching, release_download = threading.Event(), threading.Event()
+    download = client.download_film
+
+    def hold_prefetch(envelope, staging, **kwargs):
+        if envelope["rev"] == 2:
+            fetching.set()
+            assert release_download.wait(10)
+        return download(envelope, staging, **kwargs)
+
+    client.download_film = hold_prefetch
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)
+        _observe(d, [_route(film, 0), {**_route(film, 1), "rev": 2}])
+        assert fetching.wait(10)
+        assert [(row["rev"], row["state"]) for row in d.films()] == [
+            (1, "running"),
+            (2, "fetching"),
+        ]
+    finally:
+        release_download.set()
+        executor.release.set()
+        assert d.stop(10)
+
+
+def test_console_current_revision_preserves_heartbeat_schema(tmp_path):
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    host = WorkerHost(
+        WorkflowSettings(enabled=True, role="worker", staging_dir=str(staging.root)),
+        tmp_path / "host",
+        gpu_live=lambda: {"hold": "workflow"},
+    )
+    host.dispatcher = d
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)
+        wire = d.current()
+        assert "rev" not in wire
+        assert CurrentLive.model_validate(wire).film_id == film
+        beat_body = host._beat(staging)
+        assert "rev" not in beat_body["current"]
+        assert (
+            Heartbeat.model_validate_json(json.dumps(beat_body)).current.film_id == film
+        )
+        assert "rev" not in host.summary()["current"]
+        current = host.status()["current"]
+        assert current["rev"] == 1
+        assert current["attempt_id"] == wire["attempt_id"]
+        assert current["step"]["state"] == "running"
+        assert d.current(for_monitor=True)["rev"] == 1
     finally:
         executor.release.set()
         assert d.stop(10)
