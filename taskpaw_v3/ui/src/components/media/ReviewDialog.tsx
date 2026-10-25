@@ -145,6 +145,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     },
   });
   const open = useMutation({ mutationFn: () => api.workflowOpen(filmId, "output"), onError: (e) => ws.toast(errorText(e)) });
+  const play = useMutation({ mutationFn: () => api.workflowPlay(filmId), onError: (e) => ws.toast(errorText(e)) });
   // The phase follows the refreshed detail: an archive that then fails (and the film is
   // confirmable again) or ends unknown brings the review back with its reason.
   const archiveStatus = film?.archive.status ?? null;
@@ -247,6 +248,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       <div className="modal-foot">
         <p>{blocked ? "处理后重新确认即可。" : "一次确认即可，剩余步骤由后台完成。"}</p>
         <div className="actions">
+          {!ws.readOnly && <button type="button" className="btn ghost" disabled={play.isPending} onClick={() => play.mutate()}>预览播放</button>}
           <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
           {changed && <button type="button" className="btn ghost" onClick={() => { setSeenRev(film.revisions); confirm.reset(); }}>重新查看</button>}
           <button type="button" className="btn primary" disabled={Boolean(blocked) || confirm.isPending}

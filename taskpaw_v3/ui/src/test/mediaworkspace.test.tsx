@@ -796,6 +796,32 @@ describe("drawer and 图文确认", () => {
     expect(await screen.findByRole("dialog", { name: "已确认，等待归档" })).toBeInTheDocument();
   });
 
+  it("预览播放 sits immediately before 打开文件夹 and posts workflowPlay", async () => {
+    mockApi();
+    const play = vi.spyOn(api, "workflowPlay");
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetch);
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const preview = await within(dialog).findByRole("button", { name: "预览播放" });
+    expect(preview).toHaveClass("btn", "ghost");
+    expect(preview.nextElementSibling).toBe(within(dialog).getByRole("button", { name: "打开文件夹" }));
+    fireEvent.click(preview);
+    await waitFor(() => expect(play).toHaveBeenCalledWith("abf-406"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/control\/workflow\/films\/abf-406\/play$/), expect.objectContaining({ method: "POST" }),
+    ));
+  });
+
+  it("预览播放 reports VLC errors through the workspace toast", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowPlay").mockRejectedValue(new HttpError("未找到 VLC 播放器", 404));
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "预览播放" }));
+    expect(await screen.findByText("未找到 VLC 播放器")).toBeInTheDocument();
+  });
+
   it("手动入库 picks a directory, preflights it and posts target_dir", async () => {
     const readTarget = api.workflowTarget;
     const postConfirm = api.workflowConfirm;

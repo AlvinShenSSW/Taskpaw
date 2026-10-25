@@ -866,6 +866,8 @@ export const api = {
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open-folder`, { which }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  workflowPlay: (filmId: string) =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/play`),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
   workflowPlans: () => get<WorkflowPlans>("agent", "/control/workflow/plans"),
   // At most PLAN_BATCH_MAX items per request (the route's `PlansBody` max_length).
