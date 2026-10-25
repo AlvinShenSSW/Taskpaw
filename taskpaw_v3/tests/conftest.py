@@ -82,6 +82,18 @@ def _power_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _temperature_isolation(monkeypatch):
+    """#323: launcher tests never invoke the machine's native thermal reader."""
+    from taskpaw_v3.core import temperatures
+
+    monkeypatch.setattr(
+        temperatures,
+        "_gpu_reader",
+        lambda: temperatures.GpuReading(reason="provider_missing", valid=False),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _media_workflow_everywhere(monkeypatch):
     """#299 §12 OD: the media workflow is Windows-only in the product; its
     settings tests exercise the rules on every CI OS. The refusal off Windows

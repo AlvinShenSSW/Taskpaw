@@ -594,6 +594,10 @@ def test_case_4_the_worker_runs_on_while_the_controller_restarts(world):
     worker = world.join()
     film = routed_film(world)
     until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
+    before_restart = [
+        (a.status, [e.kind for e in a.evidence])
+        for a in world.attempts(film, "restore")
+    ]
     world.restart_controller()
     # the restart came while the restore was still the worker's, unresolved;
     # a slow runner may already have it settling or finishing (CI 39939505823)
@@ -606,7 +610,11 @@ def test_case_4_the_worker_runs_on_while_the_controller_restarts(world):
     }
     release.touch()
     wait_status(world, film, "restore", "succeeded")
-    assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
+    attempts, jasna_runs = world.attempts(film, "restore"), world.jasna_runs()
+    assert len(attempts) == 1 and jasna_runs == 1, (
+        f"before restart: {before_restart}; Jasna runs: {jasna_runs}; "
+        f"{world.explain(film)}"
+    )
     world.invariants()
 
 

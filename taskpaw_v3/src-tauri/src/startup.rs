@@ -391,7 +391,9 @@ mod tests {
                     .args(["-e", parent_script, child_script])
                     .arg(&path)
                     .arg(if timeout { "timeout" } else { "exit" }),
-                Duration::from_secs(3),
+                // Allow a cold Node parent + child startup on shared Windows CI.
+                // The deliberate timeout branch keeps its original short budget.
+                Duration::from_secs(if timeout { 3 } else { 10 }),
             );
             assert_eq!(result, !timeout);
             let pid: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
