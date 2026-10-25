@@ -14,6 +14,7 @@ from taskpaw_v3.tests.test_workflow_approvals import (
 from taskpaw_v3.tests.test_workflow_films import (
     claim,
     complete_return,
+    evidence,
     film,
     final_manifest,
     input_manifest,
@@ -256,3 +257,58 @@ def test_workcopy_checks_retained_input_arriving_after_approval(h, relation, blo
     else:
         assert h.store.begin_cleanup(h.operator, h.meta(), command).status == "admitted"
     assert h.store.get_film(h.operator, other_id) == other_before
+
+
+def test_input_result_releases_only_the_deleted_name_of_a_shared_file(h):
+    prepared = archived(h)
+    source, _, approval, _, receipt, cleaner = prepared
+    command = cleanup_command(h, approval, receipt, "input", cleaner.principal_id)
+    admitted = h.store.begin_cleanup(h.operator, h.meta(), command)
+    original = source.items[0]
+    other_id, _, _, intake = film(h, intake=False)
+
+    def renamed(data):
+        data["items"][0].update(
+            native_identity=original.native_identity.model_dump(mode="json"),
+            source_root_id=original.source_root_id,
+            relative_path="another-name/" + original.relative_path,
+        )
+
+    other = input_manifest(other_id, change=renamed)
+    h.store.put_input_manifest(
+        intake,
+        h.meta(),
+        m.InputManifestPut(film_id=other_id, expected_version=1, manifest=other),
+    )
+    h.store.record_cleanup_result(
+        cleaner,
+        h.meta(),
+        m.CleanupResult(
+            operation_id=command.operation_id,
+            expected_version=admitted.version,
+            items=(
+                m.CleanupItemResult(
+                    item_id=original.item_id,
+                    status="deleted",
+                    evidence=evidence(h, cleaner.principal_id),
+                    error_code=None,
+                    recorded_at=h.clock.now(),
+                ),
+            ),
+        ),
+    )
+    with sqlite3.connect(h.path) as conn:
+        assert (
+            conn.execute(
+                "SELECT retained FROM source_refs WHERE film_id=? AND item_id=?",
+                (approval.film_id, original.item_id),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT retained FROM source_refs WHERE film_id=? AND item_id=?",
+                (other_id, other.items[0].item_id),
+            ).fetchone()[0]
+            == 1
+        )

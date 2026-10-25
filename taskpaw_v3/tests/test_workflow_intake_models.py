@@ -399,6 +399,42 @@ def test_same_object_copy_alias_is_rejected_across_logical_roots():
         im.SnapshotMember.model_validate(payload)
 
 
+def test_explicit_linked_member_allows_equal_ids_and_legacy_digests_stay_unchanged():
+    from taskpaw_v3.workflow.intake_snapshot import completion_digest
+
+    old = im.PackageSnapshot(**snapshot_payload())
+    assert all(not member.linked for member in old.members)
+    assert all("linked" not in member.model_dump() for member in old.members)
+    expected = "e7f0f644fcc507c1d1d8b7c44ad7499f8b884fc48d3bc96933841b08585bd619"
+    assert completion_digest(old) == expected
+    old = old.model_copy(update={"completion_digest": expected})
+    assert (
+        m.digest(old)
+        == "5593152e778cb0452eacbef11e476e8fdc7c64620c39a4f7c05a11ff73839332"
+    )
+    assert im.PackageSnapshot.model_validate_json(old.model_dump_json()) == old
+    payload = old.members[0].model_dump(mode="json")
+    payload["copy_identity"] = copy.deepcopy(payload["source_identity"])
+    payload["copy_identity"]["root_id"] = UID
+    payload.update(linked=True, linked_change_token="12345")
+    member = im.SnapshotMember.model_validate(payload)
+    assert member.linked and member.model_dump()["linked"] is True
+
+
+@pytest.mark.parametrize("change", ["different_object", "directory", "no_token"])
+def test_linked_marker_requires_actual_file_alias_and_postlink_metadata(change):
+    payload = snapshot_payload()["members"][0].model_dump(mode="json")
+    payload.update(linked=True, linked_change_token="12345")
+    if change != "different_object":
+        payload["copy_identity"] = copy.deepcopy(payload["source_identity"])
+    if change == "directory":
+        payload.update(entry_kind="directory", sha256=None, size_bytes=0)
+    elif change == "no_token":
+        payload.pop("linked_change_token")
+    with pytest.raises(ValidationError, match="linked_file_identity_required"):
+        im.SnapshotMember.model_validate(payload)
+
+
 def test_probe_ack_matches_exact_birth_and_owner_result():
     birth = im.IntakeProcessBirth(
         pid=100, creation_filetime_100ns=200, role="probe", item_id=UID, sequence=1

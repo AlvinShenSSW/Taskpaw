@@ -79,3 +79,16 @@ def test_lost_response_is_unavailable_and_lookup_finds_the_work(tmp_path, nas):
             client.archive("op-1", root, "actor", proof["expected_target"], files)
         assert client.lookup("op-1")["status"] == "completed"
         assert fake.copies == 1
+
+
+@pytest.mark.parametrize(
+    "performer_id,target_dir", [(None, None), ("actor", "C:/library")]
+)
+def test_target_and_archive_require_exactly_one_destination(
+    tmp_path, performer_id, target_dir
+):
+    client = FilmpawClient(tmp_path / "Filmpaw")
+    with pytest.raises(ValueError, match="exactly one"):
+        client.target(performer_id, "ABC-123", target_dir=target_dir)
+    with pytest.raises(ValueError, match="exactly one"):
+        client.archive("op", tmp_path, performer_id, {}, [], target_dir=target_dir)

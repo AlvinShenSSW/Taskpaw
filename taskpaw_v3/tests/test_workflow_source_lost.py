@@ -4,6 +4,8 @@ output directory or NAS. Fakes and tmp dirs only."""
 
 from __future__ import annotations
 
+import stat
+import sys
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -14,7 +16,10 @@ from fastapi.testclient import TestClient
 
 from taskpaw_v3.agent.server.app import create_control_app
 from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.tests import test_workflow_intake_store as intake_fixtures
+from taskpaw_v3.tests.test_workflow_f02_store import link_sibling
 from taskpaw_v3.tests.test_workflow_films import STAGES, input_manifest
+from taskpaw_v3.tests.test_workflow_intake_publication import snapshot_fixture
 from taskpaw_v3.tests.test_workflow_local_dispatch import (
     dispatcher,
     plan_film,
@@ -31,6 +36,7 @@ from taskpaw_v3.workflow.timing import WorkflowLog
 
 TOKEN = "control-token"
 FILES = ("movie.mkv", "movie.ja.srt")  # the fixture manifest's INBOX members
+intake = intake_fixtures.intake
 
 
 def files(stem: str) -> tuple[str, str]:
@@ -368,29 +374,50 @@ def test_delete_never_touches_inbox_and_reclaims_only_the_films_private_dirs(wor
     assert world.watch.ids() == frozenset()  # nothing left to show
 
 
+@pytest.mark.parametrize("siblings", [False, True])
+@pytest.mark.parametrize("readonly", [False, True])
 def test_the_shared_intake_snapshot_goes_with_the_last_film_of_its_package(
-    world, monkeypatch
+    intake, tmp_path, siblings, readonly, caplog
 ):
-    first, second = world.film("one"), world.film("two")
-    snapshot = world.rt.work_dir / "intake" / "op1"
-    snapshot.mkdir(parents=True)
-    (snapshot / "copy.bin").write_bytes(b"x")
-    store, real = world.rt.store, world.rt.store.film_workflow
-    monkeypatch.setattr(
-        store,
-        "film_workflow",
-        lambda auth, fid: real(auth, fid).model_copy(
-            update={"package_id": "p1", "snapshot_work_path": "intake/op1"}
-        ),
+    if readonly and sys.platform != "win32":
+        pytest.skip("Windows read-only unlink regression")
+    h, adapter, _, observed, result = snapshot_fixture(intake, eligible=True)
+    h.store.finish_intake_snapshot(adapter, h.meta(), result)
+    first = result.snapshot.manifests[0].film_id
+    second = link_sibling(h, observed.package_id) if siblings else None
+    rt = SimpleNamespace(
+        store=h.store,
+        operator=h.operator,
+        meta=h.meta,
+        work_dir=tmp_path / "work",
+        lookup=None,
     )
-    siblings = [object()]
-    monkeypatch.setattr(store, "package_films", lambda auth, pid: tuple(siblings))
-    remove(world, first)
-    assert snapshot.exists()  # a sibling still uses it
-    siblings.clear()
-    remove(world, second)
+    snapshot = rt.work_dir / result.snapshot.relative_work_path
+    snapshot.mkdir(parents=True)
+    copied = snapshot / "copy.bin"
+    copied.write_bytes(b"copied film")
+    if readonly:
+        copied.chmod(stat.S_IREAD)
+        with pytest.raises(PermissionError):
+            copied.unlink()  # the old ignore_errors=True silently left this behind
+    metadata = snapshot.parent / "completion.json"
+    metadata.write_text("{}")
+    caplog.set_level("INFO", logger="taskpaw.workflow.intake_reclaim")
+    assert ops.remove_film(rt, film_id=first) == {"ok": True, "leftover": 0}
+    assert h.store.get_film(h.operator, first).film.removed_at is not None
+    if second:
+        assert copied.read_bytes() == b"copied film"
+        assert [
+            f.film_id for f in h.store.package_films(h.operator, observed.package_id)
+        ] == [second]
+        assert ops.remove_film(rt, film_id=second) == {"ok": True, "leftover": 0}
+    assert h.store.package_films(h.operator, observed.package_id) == ()
     assert not snapshot.exists()
-    assert world.rt.work_dir.exists()
+    assert metadata.read_text() == "{}"
+    assert (
+        result.operation_id in caplog.text
+        and "logical_bytes_unlinked=11" in caplog.text
+    )
 
 
 def test_delete_leaves_inbox_files_of_a_present_source(world):

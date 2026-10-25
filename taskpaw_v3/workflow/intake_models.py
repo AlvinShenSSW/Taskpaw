@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import Self
 
 from .models import (
@@ -678,6 +684,17 @@ class SnapshotMember(Model):
     copy_identity: NativeIdentity
     size_bytes: BoundCount
     sha256: Digest | None
+    linked: bool = False
+    linked_change_token: Text | None = None
+
+    @model_serializer(mode="wrap")
+    def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if not self.linked:
+            payload.pop("linked", None)
+        if self.linked_change_token is None:
+            payload.pop("linked_change_token", None)
+        return payload
 
     @model_validator(mode="after")
     def _copy(self) -> Self:
@@ -686,12 +703,22 @@ class SnapshotMember(Model):
         ):
             raise ValueError("snapshot_member_hash_required")
         source, copy = self.source_identity, self.copy_identity
-        if (source.scheme, source.volume_or_export_id, source.object_id) == (
+        same = (source.scheme, source.volume_or_export_id, source.object_id) == (
             copy.scheme,
             copy.volume_or_export_id,
             copy.object_id,
-        ):
+        )
+        if self.linked:
+            if (
+                not same
+                or self.entry_kind != "file"
+                or self.linked_change_token is None
+            ):
+                raise ValueError("linked_file_identity_required")
+        elif same:
             raise ValueError("independent_copy_required")
+        elif self.linked_change_token is not None:
+            raise ValueError("linked_file_identity_required")
         return self
 
 

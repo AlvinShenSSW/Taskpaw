@@ -299,6 +299,7 @@ export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
+  completed_at?: string | null;
   // final NFO > lookup > input NFO; the cover by the same precedence
   number: string | null; title: string | null; actors: string[];
   has_poster: boolean; poster_source: string | null;
@@ -420,7 +421,7 @@ export interface FilmDetail extends FilmRemote {
   has_cover: boolean; cover_source: string | null;
   group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
   stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
-  archive: { status: string | null; error: string | null; target_path: string | null };
+  archive: { status: string | null; error: string | null; target_path: string | null; manual: boolean };
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
   timing?: FilmTiming | null;
@@ -437,11 +438,12 @@ export interface Performer {
   has_thumb: boolean; aliases: string[];
 }
 // U1 §7.3: the archive target preflight (read-only) and Filmpaw's candidates for the film's NFO
-// actors. Without a performer only `candidates` is filled; `target_path` already ends in `film_dir`.
-// `missing`: the chosen performer record is gone; `candidates` is null while Filmpaw is offline.
+// actors. With no explicit target, a sole candidate is checked; `target_path` ends in `film_dir`.
+// `missing`: the chosen performer or directory is gone; `candidates` is null while Filmpaw is offline.
 export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate";
 export interface TargetPreflight {
   film_dir: string; performer_id: string | null; target_path: string | null; absent: boolean | null;
+  target_dir: string | null; manual: boolean;
   error_code: TargetErrorCode | null; message: string | null;
   candidates: { query: string[]; items: Performer[] } | null;
 }
@@ -855,14 +857,17 @@ export const api = {
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>
     get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
-  workflowConfirm: (filmId: string, performer_id: Performer["id"]) =>
-    send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
+  workflowConfirm: (filmId: string, performer_id?: Performer["id"], target_dir?: string) =>
+    send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`,
+      target_dir === undefined ? { performer_id } : { target_dir }),
   workflowRetry: (filmId: string, stage: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
   workflowOpenFolder: (filmId: string, which: "output" | "archive") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open-folder`, { which }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  workflowPlay: (filmId: string) =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/play`),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
   workflowPlans: () => get<WorkflowPlans>("agent", "/control/workflow/plans"),
   // At most PLAN_BATCH_MAX items per request (the route's `PlansBody` max_length).
@@ -870,9 +875,10 @@ export const api = {
     send<{ results: PlanResult[] }>("agent", "POST", "/control/workflow/plans", { plans }),
   workflowLookup: (filmId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/lookup`),
-  workflowTarget: (filmId: string, performerId?: Performer["id"]) =>
+  workflowTarget: (filmId: string, performerId?: Performer["id"], targetDir?: string) =>
     get<TargetPreflight>("agent", `/control/workflow/films/${seg(filmId)}/target${
-      performerId === undefined ? "" : `?${new URLSearchParams({ performer_id: String(performerId) })}`}`),
+      targetDir !== undefined ? `?${new URLSearchParams({ target_dir: targetDir })}`
+        : performerId === undefined ? "" : `?${new URLSearchParams({ performer_id: String(performerId) })}`}`),
   workflowPause: (paused: boolean) =>
     send<{ paused: boolean }>("agent", "POST", "/control/workflow/pause", { paused }),
   // H3 M1: answer the model download offer of the workflow's own session.

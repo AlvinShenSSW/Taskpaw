@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setDevControlCredential, type FilmDetail, type HubServer } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import * as nativePicker from "../components/nativePicker";
 import { DEVICES_KEY } from "../components/media/workspace";
 import { REMOTE_DEVICES } from "./fixtures/multiMachine";
 import { HubDashboard } from "../views/HubDashboard";
@@ -16,7 +17,7 @@ const HUB_BASE = "http://127.0.0.1:15691";
 const SERVER: HubServer = { id: 7, name: "Windows controller", ip: "10.0.0.7", port: 5680, enabled: 1, online: true,
   snapshot: { machine: "WINDOWS-GPU", os: "Windows", monitors: {} } };
 const IMAGE = "data:image/png;base64,iVBORw0KGgo=";
-const MUTATIONS = /确认入队|全部按推荐确认|重新查询|图文核对|确认入库|核对入库|查看并处理|重试|下载并继续|稍后|暂停新领取|恢复新领取|停止.*任务|打开文件夹/;
+const MUTATIONS = /确认入队|全部按推荐确认|重新查询|图文核对|确认入库|手动入库|核对入库|查看并处理|重试|下载并继续|稍后|暂停新领取|恢复新领取|停止.*任务|打开文件夹|预览播放/;
 const clients: QueryClient[] = [];
 type Recorded = { path: string; method: string; origin: string; auth: string | null };
 let requests: Recorded[];
@@ -83,6 +84,7 @@ function onlyHubGets() {
 
 beforeEach(() => {
   setLang("zh-CN");
+  vi.spyOn(nativePicker, "inTauri").mockReturnValue(true);
   setDevControlCredential("hub", "test-hub-control", HUB_BASE);
   requests = []; servers = [SERVER]; available = new Set([7]); override = {}; filmsExtra = {}; planExtra = {};
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});

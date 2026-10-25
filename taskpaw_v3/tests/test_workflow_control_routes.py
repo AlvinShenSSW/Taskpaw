@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -71,10 +73,15 @@ class Host:
             },
         }
 
-    def confirm(self, film_id: str, performer_id: str) -> str:
+    def confirm(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> str:
         if self.confirm_error is not None:
             raise self.confirm_error
-        return self.finalizer.confirm(film_id, performer_id)
+        return self.finalizer.confirm(film_id, performer_id, target_dir)
 
     def retry(self, film_id: str, stage: str) -> None:
         retry_failed_stage(self.runtime, film_id, stage)
@@ -292,7 +299,12 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
     assert (data["group"], data["can_confirm"]) == ("confirm", True)
     stages = {s["stage"]: s["status"] for s in data["stages"]}
     assert stages["scrape"] == "succeeded" and stages["archive"] == "pending"
-    assert data["archive"] == {"status": "pending", "error": None, "target_path": None}
+    assert data["archive"] == {
+        "status": "pending",
+        "error": None,
+        "target_path": None,
+        "manual": False,
+    }
     assert data["cleanup"] == {"input": "pending", "workcopy": "pending", "kept": []}
 
 
@@ -383,6 +395,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         "status": "succeeded",
         "error": None,
         "target_path": str(world.nas / FILM_DIR),
+        "manual": False,
     }
     assert data["cleanup"] == {
         "input": "succeeded",
@@ -451,6 +464,35 @@ def test_filmpaw_client_maps_performers_and_raw_thumbs(tmp_path):
 
 
 # ── confirm (U4, D05) ────────────────────────────────────────────────────
+def test_manual_confirm_and_detail(world, host, client):
+    world.scrape()
+    destination = world.tmp / "manual"
+    destination.mkdir()
+    with world.fake:
+        response = client.post(
+            f"{BASE}/films/{world.film}/confirm", json={"target_dir": str(destination)}
+        )
+        assert response.status_code == 200, response.text
+        world.ticks(host.finalizer)
+    archive = client.get(f"{BASE}/films/{world.film}").json()["archive"]
+    assert archive == {
+        "status": "succeeded",
+        "error": None,
+        "target_path": str(destination / FILM_DIR),
+        "manual": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"performer_id": "actor", "target_dir": "C:/library"}, {"target_dir": ""}],
+)
+def test_confirm_requires_exactly_one_target(world, client, body):
+    response = client.post(f"{BASE}/films/{world.film}/confirm", json=body)
+    assert response.status_code == 422
+    assert world.rt.store.film_workflow(world.rt.operator, world.film).approval is None
+
+
 def test_confirm_once_then_refusals_are_409_with_the_reason(world, host, client):
     early = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
@@ -590,6 +632,138 @@ def test_open_failure_is_a_json_error_not_a_crash(world, client, monkeypatch):
     assert response.status_code == 500
     assert response.json()["detail"].startswith("无法打开文件夹：")
     assert "拒绝访问" in response.json()["detail"]
+
+
+@pytest.fixture
+def playback(world, monkeypatch):
+    world.scrape()
+    final = board.final_manifest(world.rt, world.film)
+    folder = world.rt.final_dir(final)
+    vlc = world.tmp / "VLC" / "vlc.exe"
+    lookup, launch = Mock(return_value=vlc), Mock()
+    monkeypatch.setattr(workflow_routes, "find_vlc", lookup)
+    monkeypatch.setattr(workflow_routes, "play_videos", launch)
+    return folder, final, vlc, lookup, launch
+
+
+@pytest.mark.parametrize("ordinals", [True, False])
+def test_play_uses_final_package_videos_in_volume_order(
+    world, client, playback, monkeypatch, ordinals
+):
+    folder, final, vlc, lookup, launch = playback
+    video = next(item for item in final.items if item.role == "main_video")
+    names = [f"影片 cd{n}.mp4" for n in (10, 2, 1)]
+    items = [
+        video.model_copy(
+            update={"relative_path": name, "volume_ordinal": n if ordinals else None}
+        )
+        for name, n in zip(names, (10, 2, 1))
+    ]
+    for name in names + ["unlisted.mp4"]:
+        (folder / name).write_bytes(b"video")
+    (folder / "nested").mkdir()
+    (folder / "nested" / "clip.mp4").write_bytes(b"video")
+    items.append(video.model_copy(update={"relative_path": "nested/clip.mp4"}))
+    changed = final.model_copy(
+        update={"items": (*items, *(i for i in final.items if i.role != "main_video"))}
+    )
+    monkeypatch.setattr(board, "final_manifest", lambda rt, film: changed)
+
+    response = client.post(f"{BASE}/films/{world.film}/play")
+    assert response.status_code == 204 and response.content == b""
+    lookup.assert_called_once_with()
+    launch.assert_called_once_with(vlc, [folder / name for name in reversed(names)])
+
+
+def test_play_missing_vlc_is_404(world, client, playback):
+    _, _, _, lookup, launch = playback
+    lookup.return_value = None
+    response = client.post(f"{BASE}/films/{world.film}/play")
+    assert (response.status_code, response.json()["detail"]) == (
+        404,
+        "未找到 VLC 播放器",
+    )
+    launch.assert_not_called()
+
+
+def test_play_no_video_is_409(world, client, playback):
+    folder, final, _, lookup, launch = playback
+    for item in final.items:
+        if item.role == "main_video":
+            (folder / item.relative_path).unlink()
+    response = client.post(f"{BASE}/films/{world.film}/play")
+    assert (response.status_code, response.json()["detail"]) == (
+        409,
+        "没有可播放的视频",
+    )
+    lookup.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_play_missing_folder_is_409(world, client, playback):
+    folder, _, _, lookup, launch = playback
+    folder.rename(folder.with_name("moved"))
+    response = client.post(f"{BASE}/films/{world.film}/play")
+    assert (response.status_code, response.json()["detail"]) == (409, "目录已不存在")
+    lookup.assert_not_called()
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error", [NotImplementedError("只支持 Windows"), PermissionError("拒绝访问")]
+)
+def test_play_launch_error_is_500(world, client, playback, error):
+    *_, launch = playback
+    launch.side_effect = error
+    response = client.post(f"{BASE}/films/{world.film}/play")
+    assert response.status_code == 500
+    assert str(error) in response.json()["detail"]
+
+
+@pytest.mark.parametrize("first", [0, 1, 2, 3, None])
+def test_vlc_lookup_order(monkeypatch, tmp_path, first):
+    candidates = [
+        tmp_path / "registered" / "vlc.exe",
+        tmp_path / "install" / "vlc.exe",
+        Path(r"C:\Program Files") / "VideoLAN" / "VLC" / "vlc.exe",
+        Path(r"C:\Program Files (x86)") / "VideoLAN" / "VLC" / "vlc.exe",
+    ]
+    registry = SimpleNamespace(
+        HKEY_LOCAL_MACHINE="HKLM",
+        OpenKey=MagicMock(),
+        QueryValueEx=Mock(
+            side_effect=[(str(candidates[0]), 1), (str(candidates[1].parent), 1)]
+        ),
+    )
+    if first is None:
+        registry.OpenKey.side_effect = FileNotFoundError("VLC")
+    monkeypatch.setattr(workflow_routes.sys, "platform", "win32")
+    monkeypatch.setitem(workflow_routes.sys.modules, "winreg", registry)
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: first is not None and path in candidates[first:]
+    )
+    assert workflow_routes.find_vlc() == (None if first is None else candidates[first])
+    registry.OpenKey.assert_called_with("HKLM", r"SOFTWARE\VideoLAN\VLC")
+
+
+def test_vlc_launcher_is_detached_without_waiting(monkeypatch, tmp_path):
+    popen = Mock()
+    monkeypatch.setattr(workflow_routes.sys, "platform", "win32")
+    monkeypatch.setattr(workflow_routes.subprocess, "Popen", popen)
+    vlc, videos = tmp_path / "vlc.exe", [tmp_path / f"影片 cd{n}.mp4" for n in (1, 2)]
+    workflow_routes.play_videos(vlc, videos)
+    popen.assert_called_once_with(
+        [str(vlc), "--playlist-autostart", *map(str, videos)],
+        close_fds=True,
+        creationflags=0x00000008 | 0x00000200,
+    )
+    popen.return_value.wait.assert_not_called()
+    monkeypatch.setattr(workflow_routes.sys, "platform", "darwin")
+    with pytest.raises(NotImplementedError):
+        workflow_routes.play_videos(vlc, videos)
+    with pytest.raises(NotImplementedError):
+        workflow_routes.find_vlc()
+    assert popen.call_count == 1
 
 
 # ── INBOX packages that are not films yet (H2 R2/R2a, G1) ────────────────

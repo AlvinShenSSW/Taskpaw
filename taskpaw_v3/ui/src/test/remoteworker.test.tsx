@@ -205,4 +205,24 @@ describe("remote progress on the controller", () => {
     const remote = await screen.findByTestId("remote-step");
     expect(within(remote).getByRole("button", { name: "停止并重新排队" })).toBeInTheDocument();  // still stoppable
   });
+
+  it.each([null, "回传 1.2/4.0 GB · 100 MB/s"])("shows upload instead of Jasna startup with transfer note %s", async (note) => {
+    const uploading = restoreSteps("starting").map((st) => st.key === "restore"
+      ? { ...st, machine: MACHINE, attempt_id: "a1", phase: "uploading" as const, note, progress: null }
+      : st);
+    mockController();
+    vi.mocked(api.workflowFilms).mockResolvedValue({
+      ...FILMS_RESPONSE, films: [{ ...REMOTE, steps: uploading, note }],
+    });
+    vi.mocked(api.workflowFilm).mockImplementation(async (id) => detail(id, { steps: uploading, note }));
+    wrap(<MediaWorkspace />);
+    const open = await screen.findByRole("button", { name: "查看 浮光之间 详情" });
+    expect(screen.getByText(note ?? "回传中")).toBeInTheDocument();
+    expect(screen.queryByText(/正在启动 Jasna/)).not.toBeInTheDocument();
+    fireEvent.click(open);
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    await waitFor(() => expect(within(drawer).getByText(note ?? "回传中")).toBeInTheDocument());
+    expect(within(drawer).queryByTestId("restore-live")).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/Jasna 正在加载模型|正在启动 Jasna/)).not.toBeInTheDocument();
+  });
 });

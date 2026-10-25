@@ -17,6 +17,7 @@ from . import intake_models as im
 from . import models as m
 from .auth import AuthProof
 from .intake_discovery import DiscoveryUnresolved, observe_package
+from .intake_files import _key
 from .intake_protocol import ProbeArtifact
 from .intake_runner import SnapshotRunner
 from .intake_watch import DirectoryWatcher, DirtyBatch
@@ -93,6 +94,7 @@ class IntakeService:
         self._scan_done = threading.Event()
         self._scan_done.set()
         self._stable: dict[str, _Stable] = {}
+        self._linked_tokens: dict[tuple[str, str], str] = {}
         self._pending_owners: list[object] = []
         self._reason = "observed"
         self._scanning = False
@@ -197,11 +199,80 @@ class IntakeService:
                 or path.startswith(v.casefold() + "/")
                 for v in batch.paths
             ):
+                if self._owns_snapshot(item):
+                    continue
+                snapshot = self.store.get_intake_snapshot(self.auth, item.package_id)
+                if snapshot and any(member.linked for member in snapshot.members):
+                    previous = self.store.get_intake_observation(
+                        self.auth, item.package_id
+                    )
+                    observed = self._observe(
+                        item.relative_path, item, snapshot=snapshot
+                    )
+                    if (
+                        observed.coverage == "complete"
+                        and observed.writer_state == "clear"
+                        and observed.observation_digest == previous.observation_digest
+                        and observed.package_native_identity is not None
+                        and previous.package_native_identity is not None
+                        and _key(observed.package_native_identity)
+                        == _key(previous.package_native_identity)
+                    ):
+                        continue
                 self._notice(
                     item,
                     missing=False,
                     trigger="overflow" if batch.full_rescan else "notification",
                 )
+
+    def _owns_snapshot(self, item: im.IntakeView) -> bool:
+        return bool(
+            item.operation_id
+            and item.state != "unknown_owner"
+            and self._runner
+            and self._runner.active_operation_id == item.operation_id
+            and self._worker
+            and self._worker.is_alive()
+        )
+
+    def _observe(
+        self,
+        relative_path: str,
+        previous: im.IntakeView | None,
+        *,
+        snapshot: im.PackageSnapshot | None = None,
+    ) -> im.IntakeObservation:
+        return observe_package(
+            self.config,
+            relative_path,
+            previous=self.store.get_intake_observation(self.auth, previous.package_id)
+            if previous
+            else None,
+            package_version=previous.version if previous else 0,
+            observed_at=self.clock(),
+            trigger="rescan",
+            snapshot=snapshot
+            or (
+                self.store.get_intake_snapshot(self.auth, previous.package_id)
+                if previous
+                else None
+            ),
+            linked_tokens=self._linked_tokens,
+            **self._deleted(previous),
+        )
+
+    def _mark_seen(self, view: im.IntakeView, scan: dm.IntakeRootScanState) -> None:
+        self.store.mark_intake_scan_seen(
+            self.auth,
+            self.meta(),
+            dm.IntakeScanSeen(
+                expected_version=view.version,
+                package_id=view.package_id,
+                root_id=self.root_id,
+                root_config_revision=scan.root_config_revision,
+                scan_id=scan.scan_id,
+            ),
+        )
 
     def _remember(self, observation: im.IntakeObservation, view: im.IntakeView) -> None:
         with self._state_lock:
@@ -264,19 +335,10 @@ class IntakeService:
                         native_identity=candidate.native_identity,
                     ),
                 )
-                observation = observe_package(
-                    self.config,
-                    candidate.relative_path,
-                    previous=self.store.get_intake_observation(
-                        self.auth, previous.package_id
-                    )
-                    if previous
-                    else None,
-                    package_version=previous.version if previous else 0,
-                    observed_at=self.clock(),
-                    trigger="rescan",
-                    **self._deleted(previous),
-                )
+                if previous and self._owns_snapshot(previous):
+                    self._mark_seen(previous, scan)
+                    continue
+                observation = self._observe(candidate.relative_path, previous)
                 recorded = self.store.observe_intake(
                     self.auth, self.meta(), observation
                 )
@@ -284,32 +346,12 @@ class IntakeService:
                     # Another discovery already owns the physical directory.
                     # Retain its established film/member identities on reread.
                     previous = self.store.get_intake(self.auth, recorded.entity_id)
-                    observation = observe_package(
-                        self.config,
-                        candidate.relative_path,
-                        previous=self.store.get_intake_observation(
-                            self.auth, previous.package_id
-                        ),
-                        package_version=previous.version,
-                        observed_at=self.clock(),
-                        trigger="rescan",
-                        **self._deleted(previous),
-                    )
+                    observation = self._observe(candidate.relative_path, previous)
                     recorded = self.store.observe_intake(
                         self.auth, self.meta(), observation
                     )
                 view = self.store.get_intake(self.auth, recorded.entity_id)
-                self.store.mark_intake_scan_seen(
-                    self.auth,
-                    self.meta(),
-                    dm.IntakeScanSeen(
-                        expected_version=view.version,
-                        package_id=view.package_id,
-                        root_id=self.root_id,
-                        root_config_revision=scan.root_config_revision,
-                        scan_id=scan.scan_id,
-                    ),
-                )
+                self._mark_seen(view, scan)
                 self._remember(observation, view)
             complete = walk.coverage == "complete" and not self._stop.is_set()
             if self._watcher:

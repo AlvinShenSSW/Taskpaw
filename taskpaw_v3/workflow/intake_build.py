@@ -89,6 +89,10 @@ def build_snapshot(
             copy_identity=value.copy.identity,
             size_bytes=value.source.size_bytes,
             sha256=value.sha256,
+            linked=value.linked,
+            linked_change_token=source.linked_change_token(observed.relative_path)
+            if value.linked
+            else None,
         )
         for observed in observation.members
         for value in (copy.entries[observed.relative_path],)
@@ -126,7 +130,11 @@ def build_snapshot(
     )
     source_before = evidence("held_source_full_read")
     source_after = evidence("held_source_recheck")
-    verified = evidence("independent_copy_sha256")
+    verified = evidence(
+        "linked_snapshot_sha256"
+        if any(v.linked for v in members)
+        else "independent_copy_sha256"
+    )
     probes = tuple(
         m.MediaProbe(
             item_id=item_id,

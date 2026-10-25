@@ -1404,6 +1404,33 @@ class IntakeCommands(ApprovalCommands):
                 )
             return im.IntakeObservation.model_validate_json(package["observation_json"])
 
+    def get_intake_snapshot(
+        self, auth: AuthProof, package_id: str
+    ) -> im.PackageSnapshot | None:
+        """The current validated snapshot, for native linked-source observations."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            package = self._one(
+                "SELECT * FROM intake_packages WHERE package_id=?", (package_id,)
+            )
+            if principal["role"] != "operator":
+                self._intake_access(
+                    principal, self._root(package["root_id"]), write=True
+                )
+            row = self._conn.execute(
+                "SELECT body_json FROM intake_snapshots WHERE snapshot_id=? AND source_generation=?",
+                (package["active_snapshot_id"], package["source_generation"]),
+            ).fetchone()
+            if row is None:
+                return None
+            snapshot = im.PackageSnapshot.model_validate_json(row[0])
+            return (
+                snapshot
+                if snapshot.admission.root_config_revision
+                == package["root_config_revision"]
+                else None
+            )
+
     def removed_intake_films(self, auth: AuthProof, package_id: str) -> frozenset[str]:
         """Films of the package the operator deleted (#304): discovery treats
         their ids as absent, so a re-dropped package becomes a new film."""

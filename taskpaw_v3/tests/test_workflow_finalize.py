@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import sys
+import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -164,6 +167,55 @@ def test_one_click_archives_once_and_cleans_both_scopes(world):
     # C10: Taskpaw's private per-film dirs are reclaimed
     assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
     assert not list((world.rt.work_dir / "scrape").glob(f"{world.film}-r*"))
+
+
+def test_manual_confirm_archives_and_cleans_both_scopes(world):
+    world.scrape()
+    destination = world.tmp / "自选目录"
+    destination.mkdir()
+    package = _files(_scrape_out(world))
+    with world.fake:
+        fin = world.finalizer()
+        with (
+            patch.object(fin.filmpaw, "archive", wraps=fin.filmpaw.archive) as archive,
+            patch.object(world.rt, "evidence", wraps=world.rt.evidence) as evidence,
+        ):
+            fin.confirm(world.film, target_dir=str(destination))
+            evidence.assert_any_call(
+                "operator_choice",
+                f"manual {destination}",
+                producer=world.rt.archive_auth,
+            )
+            approval = world.rt.store.film_workflow(
+                world.rt.operator, world.film
+            ).approval
+            target = approval.binding.target
+            assert target.native_identity.scheme == "manual_directory"
+            assert target.native_identity.volume_or_export_id == str(destination)
+            assert target.root_id == str(
+                uuid.uuid5(
+                    uuid.UUID("0b7f3c2e-6f2d-4a8e-9c1d-3e5a7b9d2f41"),
+                    f"filmpaw-manual-target:{destination}",
+                )
+            )
+            world.ticks(fin)
+            assert archive.call_count == 1
+            assert archive.call_args.kwargs["target_dir"] == str(destination)
+            assert archive.call_args.kwargs["performer_id"] is None
+    assert world.status("archive") == "succeeded"
+    assert world.status("cleanup_input") == "succeeded"
+    assert world.status("cleanup_workcopy") == "succeeded"
+    assert _files(destination / FILM_DIR) == package
+    assert not list(world.nas.iterdir())
+
+
+@pytest.mark.parametrize(
+    "targets", [{}, {"performer_id": "actor", "target_dir": "C:/library"}]
+)
+def test_confirm_requires_exactly_one_target(world, targets):
+    with pytest.raises(ConfirmError, match="请选择一个"):
+        world.finalizer().confirm(world.film, **targets)
+    assert world.rt.store.film_workflow(world.rt.operator, world.film).approval is None
 
 
 def test_a_new_final_revision_shows_no_receipt_until_it_is_archived(world):
@@ -494,6 +546,34 @@ def test_store_refusal_during_confirm_is_a_confirm_error(world, monkeypatch):
     monkeypatch.setattr(world.rt.store, "put_approval_context", refuse)
     with world.fake, pytest.raises(ConfirmError):
         world.finalizer().confirm(world.film, "actor")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows read-only unlink")
+def test_completed_package_reclaims_its_readonly_intake_snapshot(world, monkeypatch):
+    world.scrape()
+    _in_package(world, monkeypatch, [])
+    real = world.rt.store.film_workflow
+
+    def film_workflow(auth, film_id):
+        return real(auth, film_id).model_copy(
+            update={"snapshot_work_path": ret.WORKCOPY}
+        )
+
+    monkeypatch.setattr(world.rt.store, "film_workflow", film_workflow)
+    snapshot = world.rt.work_dir / ret.WORKCOPY
+    copied = snapshot / "movie.mkv"
+    copied.chmod(stat.S_IREAD)
+    try:
+        with world.fake:
+            fin = world.finalizer()
+            fin.confirm(world.film, "actor")
+            world.ticks(fin)
+        assert world.status("cleanup_workcopy") == "succeeded"
+        assert not snapshot.exists()
+        assert not any(fin.reclaim_dir.iterdir())
+    finally:
+        if copied.exists():
+            copied.chmod(stat.S_IWRITE)
 
 
 @pytest.mark.skipif(

@@ -1,5 +1,6 @@
 import CloseIcon from "@mui/icons-material/Close";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import PanToolAltOutlinedIcon from "@mui/icons-material/PanToolAltOutlined";
 import { Drawer } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
@@ -10,7 +11,7 @@ import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDateTime, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreLive, restorePhaseText, restoreStep,
   machineLabel, runningArchiveStep, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
@@ -117,11 +118,8 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
 }
 
 function historyMeta(film: FilmDetail): string {
-  const at = film.history?.completed_at ? new Date(film.history.completed_at) : null;
-  const two = (n: number) => String(n).padStart(2, "0");
-  const date = at ? `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}` : "—";
   return [film.resolution, film.plan?.ltx_model ? `画质 ${TIER_SHORT[film.plan.ltx_model]}` : "无需修复",
-    fmtDurationMs(film.duration_ms), `已完成 ${date}`].filter(Boolean).join(" · ");
+    fmtDurationMs(film.duration_ms), `已完成 ${fmtDateTime(film.history?.completed_at)}`].filter(Boolean).join(" · ");
 }
 
 const HISTORY_LABELS: Record<string, string> = {
@@ -152,7 +150,9 @@ function HistoryBody({ film }: { film: FilmDetail }) {
           <h2>{title}</h2>
           <dl className="facts">
             <dt>演员</dt><dd>{film.actors.join("、") || "—"}</dd>
-            <dt>归档到</dt><dd className="mono">{film.archive.target_path || "—"}</dd>
+            <dt>归档到</dt><dd className="mono">{film.archive.target_path || "—"}{film.archive.manual && (
+              <PanToolAltOutlinedIcon fontSize="small" aria-label="手动入库" titleAccess="手动入库" />
+            )}</dd>
           </dl>
           <p>总用时 {fmtDuration(history?.total_seconds)}{energy && <> · 修复耗电 {(energy.wh / 1000).toFixed(3)} kWh{energy.partial ? "（部分估算）" : "（估算）"}</>}</p>
         </div>
@@ -189,7 +189,8 @@ function DrawerBody({ film, item, status, plan, onClose }: {
   const restore = restoreStep(film);
   const archive = runningArchiveStep(film);
   const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
-  const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
+  const running = restoreLive(restore) ? restore : null;
+  const phaseText = restorePhaseText(restore);
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
   // P2-4 §4: remote mode's 设备 line (route, 失联, 改派, 判定已停止)
@@ -262,7 +263,8 @@ function DrawerBody({ film, item, status, plan, onClose }: {
           <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
-      ) : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
+      ) : phaseText ? <Notice icon={InfoOutlinedIcon}>{phaseText}</Notice>
+        : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
       ) : film.source_missing ? null : (
@@ -284,7 +286,9 @@ function DrawerBody({ film, item, status, plan, onClose }: {
       </section>
       <dl className="facts spacer-top">
         {plannedFacts}
-        <dt>目标</dt><dd>{film.archive.target_path || "尚未确定目标"}</dd>
+        <dt>目标</dt><dd>{film.archive.target_path || "尚未确定目标"}{film.archive.manual && (
+          <PanToolAltOutlinedIcon fontSize="small" aria-label="手动入库" titleAccess="手动入库" />
+        )}</dd>
         <dt>原始来源</dt><dd>主控 INBOX / {film.name} · 本次收件 {film.inputs.length} 项</dd>
         <dt>入库结果</dt><dd>{receipt || "尚未入库"}</dd>
         <dt>来源清理</dt><dd>{film.cleanup.input ? CLEANUP_STATE[film.cleanup.input] ?? film.cleanup.input : "入库完成后自动检查并清理本次来源"}</dd>

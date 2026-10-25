@@ -8,7 +8,10 @@ control API from starting. Every path is resolved from the film id (U6).
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -16,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from taskpaw_v3.core.config import WorkflowSettings
@@ -32,7 +35,14 @@ from .workflow_reads import off_state as off_state  # retained for callers
 
 class ConfirmBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    performer_id: str = Field(min_length=1, max_length=256)
+    performer_id: str | None = Field(default=None, min_length=1, max_length=256)
+    target_dir: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def one_target(self) -> ConfirmBody:
+        if (self.performer_id is None) == (self.target_dir is None):
+            raise ValueError("exactly one of performer_id and target_dir is required")
+        return self
 
 
 class RetryBody(BaseModel):
@@ -132,6 +142,46 @@ def open_folder(path: Path) -> None:
         os.startfile(str(path))
         return
     raise NotImplementedError("只支持在 Windows 上打开文件夹")
+
+
+def find_vlc() -> Path | None:
+    """Prefer VLC's registered installation, then the standard Windows paths."""
+    if sys.platform != "win32":
+        raise NotImplementedError("只支持在 Windows 上预览播放")
+    import winreg
+
+    for name in ("", "InstallDir"):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\VideoLAN\VLC"
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, name)
+        except OSError as exc:
+            logging.getLogger(__name__).debug("VLC registry lookup: %s", exc)
+            continue
+        if isinstance(value, str) and value:
+            path = Path(value)
+            if path.name.lower() != "vlc.exe":
+                path /= "vlc.exe"
+            if path.is_file():
+                return path
+    for folder in (r"C:\Program Files", r"C:\Program Files (x86)"):
+        path = Path(folder) / "VideoLAN" / "VLC" / "vlc.exe"
+        if path.is_file():
+            return path
+    return None
+
+
+def play_videos(vlc: Path, videos: list[Path]) -> None:
+    """Start a detached VLC playlist; replaced in tests."""
+    if sys.platform != "win32":
+        raise NotImplementedError("只支持在 Windows 上预览播放")
+    subprocess.Popen(
+        [str(vlc), "--playlist-autostart", *(str(path) for path in videos)],
+        close_fds=True,
+        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+    )
 
 
 def register_workflow_routes(
@@ -250,13 +300,15 @@ def register_workflow_routes(
         return {"paused": body.paused}
 
     @app.get("/control/workflow/films/{film_id}/target")
-    def workflow_target(film_id: str, performer_id: str = "") -> dict[str, Any]:
+    def workflow_target(
+        film_id: str, performer_id: str = "", target_dir: str | None = None
+    ) -> dict[str, Any]:
         """V3 §7.3: the archive target preflight and the NFO actor's candidates."""
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
         with _mapped():
-            return host.finalizer.preflight(film_id, performer_id or None)
+            return host.finalizer.preflight(film_id, performer_id or None, target_dir)
 
     @app.get("/control/workflow/performers")
     def workflow_performers(q: str = "") -> dict[str, Any]:
@@ -279,7 +331,9 @@ def register_workflow_routes(
     def workflow_confirm(film_id: str, body: ConfirmBody) -> dict[str, str]:
         host = _host()
         with _mapped():
-            return {"approval_id": host.confirm(film_id, body.performer_id)}
+            return {
+                "approval_id": host.confirm(film_id, body.performer_id, body.target_dir)
+            }
 
     @app.post("/control/workflow/films/{film_id}/retry")
     def workflow_retry(film_id: str, body: RetryBody) -> dict[str, bool]:
@@ -427,6 +481,55 @@ def register_workflow_routes(
         inbox = host.finalizer.inbox if host.finalizer is not None else None
         with _mapped():
             return _open(board.folder(_runtime(host), inbox, film_id, body.what))
+
+    @app.post("/control/workflow/films/{film_id}/play", status_code=204)
+    def workflow_play(film_id: str) -> Response:
+        from taskpaw_v3.workflow import board
+
+        with _mapped():
+            rt = _runtime(_host())
+            path = board.folder(rt, None, film_id, "output")
+            if path is None:
+                raise HTTPException(status_code=409, detail="目录已不存在")
+            final = board.final_manifest(rt, film_id)
+            items = sorted(
+                (item for item in final.items if item.role == "main_video")
+                if final
+                else (),
+                key=lambda item: (
+                    item.volume_ordinal or 0,
+                    [
+                        int(s) if s.isdigit() else s
+                        for s in re.split(r"(\d+)", item.relative_path.casefold())
+                    ],
+                ),
+            )
+            try:
+                videos = [
+                    video
+                    for item in items
+                    if (video := path / item.relative_path).parent == path
+                    and video.is_file()
+                ]
+                if not path.is_dir():
+                    raise HTTPException(status_code=409, detail="目录已不存在")
+                if not videos:
+                    raise HTTPException(status_code=409, detail="没有可播放的视频")
+                vlc = find_vlc()
+                if vlc is None:
+                    raise HTTPException(status_code=404, detail="未找到 VLC 播放器")
+                play_videos(vlc, videos)
+            except NotImplementedError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from None
+            except OSError as exc:
+                if not path.is_dir():
+                    raise HTTPException(
+                        status_code=409, detail="目录已不存在"
+                    ) from None
+                raise HTTPException(
+                    status_code=500, detail=f"无法预览播放：{exc}"
+                ) from None
+        return Response(status_code=204)
 
     @app.post("/control/workflow/films/{film_id}/open-folder", status_code=204)
     def workflow_open_folder(film_id: str, body: OpenFolderBody) -> Response:

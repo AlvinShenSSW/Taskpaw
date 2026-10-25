@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from ctypes import wintypes as wt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -424,6 +424,7 @@ class HeldPackage:
         self.api = api if api is not None else WindowsFiles()
         self._holds = _Holds(self.api, root_id)
         self.entries: dict[str, HeldEntry] = {}
+        self._linked_metadata: dict[tuple[str, str, str], tuple[int, int]] = {}
         self.package_identity: NativeIdentity | None = None
         self._entered = False
 
@@ -511,8 +512,45 @@ class HeldPackage:
                 relative,
                 self.root_id,
             )
-            if current.signature != entry.signature:
+            if current.signature != self._expected_entry(entry).signature:
                 raise IntakeFileError("source_changed")
+
+    def _expected_entry(self, entry: HeldEntry) -> HeldEntry:
+        metadata = self._linked_metadata.get(_key(entry.identity))
+        return (
+            replace(entry, change_filetime=metadata[0], link_count=metadata[1])
+            if metadata
+            else entry
+        )
+
+    def record_link(self, relative: str) -> None:
+        """Account only for our new name; keep admitted source observations intact."""
+        self._require_open()
+        entry = self.entries[relative]
+        expected = self._expected_entry(entry)
+        current = self.api.entry(
+            entry.handle,
+            self.path.joinpath(*relative.split("/")),
+            relative,
+            self.root_id,
+        )
+        if (
+            current.signature
+            != replace(
+                expected,
+                change_filetime=current.change_filetime,
+                link_count=expected.link_count + 1,
+            ).signature
+        ):
+            raise IntakeFileError("source_changed")
+        # Other admitted names may refer to this same physical file.
+        self._linked_metadata[_key(entry.identity)] = (
+            current.change_filetime,
+            current.link_count,
+        )
+
+    def linked_change_token(self, relative: str) -> str:
+        return str(self._linked_metadata[_key(self.entries[relative].identity)][0])
 
     def _require_open(self) -> None:
         if not self._entered or self.closed:

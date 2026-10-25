@@ -6,11 +6,15 @@
 
 ## V3 3.10.2 — 派单队列：自动给最先空出的机器、指定机器在主控排队；功耗离线原因
 
+- Controller update: new intakes on the same NTFS volume use hard links without duplicating file data; unsupported links retain verified copies. Cleanup removes only the approved names, including read-only files. Existing snapshots and the version are unchanged (#314).
+- Controller update: worker upload, completion and stop phases display their current status instead of the Jasna model-loading placeholder (#316).
 - 派单：自动 = 哪台工作机先空就派给哪台（不提前绑定、不预取）；指定机器的影片留在主控排队、不限部数，那台机器修片时提前下载它的下一部，修完立即开始。
 - 队列状态改为「排队中（自动）」「排队中 · 等 <机器> · 第 N 位」「下载到 <机器>」「已到 <机器> · 等开始」「修复中 · <机器>」；不再出现「待领取」「设备队列已满」。
 - 功耗：读不到某台机器时显示原因（令牌不一致 / 连不上），不再只写「离线」；主控按工作机自己上报的局域网端口读取（不再默认 5680）。
 - 主控与工作机需同时升级到 3.10.2。
 - 主控更新（版本号不变，只需主控安装）：「确认入库」弹窗直接显示归档进度；归档时的瞬时冲突（cas_conflict）静默重试，不再显示「暂停」；影片清理后演员文件夹若已空则一并删除。
+- 主控更新 2（版本号不变，只需主控安装）：影片队列按「进行中 → 等待中 → 已完成」排列，已完成的按完成时间从新到旧排在最下面，并显示「完成于 MM-DD HH:mm」；所有视图每页最多 20 部，可翻页。
+- 主控更新 3（版本号不变，只需主控安装）：「确认入库」新增「手动入库」——用系统文件夹选择框选目录，影片入库到该目录，路径末尾显示手动图标（需同时安装新版 Filmpaw）；「确认影片与入库目标」新增「预览播放」，用本机 VLC 播放成品；修复「删除此任务」和收件复制失败后残留的源副本（work/intake），主控启动时自动清理无人引用的残留。
 
 ---
 

@@ -58,11 +58,15 @@ Interrupted = Literal["interrupted"]
 
 _DELETE = 0x00010000
 _GENERIC_READ = 0x80000000
+_FILE_WRITE_ATTRIBUTES = 0x0100
 _SHARE_READ = 0x1
 _OPEN_EXISTING = 3
 _OPEN_REPARSE_POINT = 0x00200000
 _BACKUP_SEMANTICS = 0x02000000
+_FILE_BASIC_INFO = 0
 _FILE_DISPOSITION_INFO = 4
+_READONLY = 0x1
+_NORMAL = 0x80
 _CHUNK = 1024 * 1024
 
 
@@ -118,6 +122,24 @@ class _Files(WindowsFiles):
         return key, standard.size
 
     def dispose(self, handle: int) -> None:
+        basic = _Basic()
+        self.check(
+            self.kernel.GetFileInformationByHandleEx(
+                handle, _FILE_BASIC_INFO, ctypes.byref(basic), ctypes.sizeof(basic)
+            )
+        )
+        if basic.attributes & _READONLY:
+            # Attributes are shared by hardlinks. Clear only read-only, on the
+            # already verified handle; zero flags means "leave unchanged".
+            writable = _Basic(attributes=(basic.attributes & ~_READONLY) or _NORMAL)
+            self.check(
+                self.kernel.SetFileInformationByHandle(
+                    handle,
+                    _FILE_BASIC_INFO,
+                    ctypes.byref(writable),
+                    ctypes.sizeof(writable),
+                )
+            )
         info = _Disposition(1)
         self.check(
             self.kernel.SetFileInformationByHandle(
@@ -255,7 +277,7 @@ def delete_exact(
         return _posix_delete(path, member, cancel)
     api = _api()
     try:
-        handle = api.open_exact(path, _DELETE | _GENERIC_READ)
+        handle = api.open_exact(path, _DELETE | _GENERIC_READ | _FILE_WRITE_ATTRIBUTES)
     except IntakeFileError as exc:
         return _open_status(exc)
     except OSError:

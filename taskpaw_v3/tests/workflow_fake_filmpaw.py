@@ -85,7 +85,10 @@ class FakeFilmpaw:
                     return
                 elif url.path == "/api/workflow/archive/target":
                     q = {k: v[0] for k, v in parse_qs(url.query).items()}
-                    status, body = fake.target(q["performer_id"], q["film_dir"])
+                    assert ("performer_id" in q) != ("target_dir" in q)
+                    status, body = fake.target(
+                        q.get("performer_id"), q["film_dir"], q.get("target_dir")
+                    )
                 else:
                     task = fake.tasks.get(url.path.rsplit("/", 1)[1])
                     status, body = (
@@ -165,13 +168,16 @@ class FakeFilmpaw:
             "missing_total": 0,
         }
 
-    def target(self, performer_id: str, film_dir: str) -> tuple[int, dict[str, Any]]:
-        target = self.performers.get(performer_id)
+    def target(
+        self, performer_id: str | None, film_dir: str, target_dir: str | None = None
+    ) -> tuple[int, dict[str, Any]]:
+        target = Path(target_dir) if target_dir else self.performers.get(performer_id)
         if target is None:
             return 404, {"detail": "所选演员记录已不存在"}
         present = {p.name.casefold() for p in target.iterdir()}
         return 200, {
             "performer_id": performer_id,
+            **({"target_dir": target_dir} if target_dir else {}),
             "absent": film_dir.casefold() not in present,
             "expected_target": {
                 "target_path": str(target),
@@ -183,7 +189,12 @@ class FakeFilmpaw:
         op = body["operation_id"]
         if op in self.tasks:
             return 202, self.tasks[op]
-        target = self.performers[body["performer_id"]]
+        assert ("performer_id" in body) != ("target_dir" in body)
+        target = (
+            Path(body["target_dir"])
+            if "target_dir" in body
+            else self.performers[body["performer_id"]]
+        )
         if body["expected_target"] != {
             "target_path": str(target),
             "directory_identity": _identity(target),

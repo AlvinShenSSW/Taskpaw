@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -547,6 +547,7 @@ def film_row(
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
         "created_at": _time(film.created_at),
+        "completed_at": _time(film.completed_at) if film.completed_at else None,
         "steps": _steps(film, place, waiting, kept or {}, current, download),
         # U1e: each finished stage's time, the restore breakdown and 修复→翻译
         "timing": film_timing(film),
@@ -1187,6 +1188,9 @@ def film_detail(
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,
+            "manual": bool(
+                target and target.native_identity.scheme == "manual_directory"
+            ),
             "target_path": wf.archive_path
             or (
                 str(Path(target.export_identity) / target.relative_path)
@@ -1200,6 +1204,19 @@ def film_detail(
             "kept": [item for items in kept.values() for item in items],
         },
     }
+
+
+def _completed_at(wf: m.FilmWorkflow) -> datetime | None:
+    return max(
+        (
+            o.ended_at
+            for o in wf.cleanup_operations
+            if o.approval_id == wf.archive_receipt_approval_id
+            and o.resolved
+            and o.ended_at
+        ),
+        default=None,
+    )
 
 
 def _history(
@@ -1267,8 +1284,7 @@ def _history(
                 "result": result,
             }
         )
-    ends = [o.ended_at for o in cleanups if o.ended_at]
-    completed = max(ends) if ends else None
+    completed = _completed_at(wf)
     return {
         "steps": rows,
         "completed_at": _time(completed) if completed else None,

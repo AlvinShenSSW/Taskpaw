@@ -1,7 +1,8 @@
-"""Independent, verified private copies; no input deletion or database access."""
+"""Verified private snapshot names; same-volume files may share NTFS data."""
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
@@ -27,6 +28,7 @@ class CopiedEntry:
     source: HeldEntry
     copy: HeldEntry
     sha256: str | None
+    linked: bool = False
 
 
 class PrivateCopy:
@@ -115,9 +117,14 @@ class PrivateCopy:
         total = sum(entry.size_bytes for entry in self.source.entries.values())
         if total > self.source.policy.max_package_bytes:
             raise IntakeFileError("limit_exceeded")
-        if (
-            shutil.disk_usage(self.work_root).free
-            < total + self.source.policy.min_free_bytes
+        same_volume = (
+            self.expected_root.volume_or_export_id
+            == self.source.expected_root.volume_or_export_id
+        )
+        copy_capacity_checked = not same_volume
+        reserve = self.source.policy.min_free_bytes
+        if shutil.disk_usage(self.work_root).free < reserve + (
+            0 if same_volume else total
         ):
             raise IntakeFileError("waiting_capacity")
         copied = 0
@@ -130,6 +137,40 @@ class PrivateCopy:
                 target = self._tree_holds.acquire(path, relative, directory=True)
                 self.entries[relative] = CopiedEntry(entry, target, None)
                 continue
+            if same_volume:
+                try:
+                    os.link(self.source.path.joinpath(*relative.split("/")), path)
+                except OSError as exc:
+                    if exc.errno not in {
+                        errno.EXDEV,
+                        errno.ENOTSUP,
+                        errno.EOPNOTSUPP,
+                    } and getattr(exc, "winerror", None) not in {1, 17, 50}:
+                        raise
+                else:
+                    self.source.record_link(relative)
+                    pinned = self._tree_holds.acquire(path, relative, directory=False)
+                    if (
+                        _key(pinned.identity) != _key(entry.identity)
+                        or pinned.size_bytes != entry.size_bytes
+                    ):
+                        raise IntakeFileError("copy_verification_failed")
+                    digest = hashlib.sha256()
+                    for chunk in self.source.chunks(relative):
+                        if check_cancelled:
+                            check_cancelled()
+                        digest.update(chunk)
+                        self._verified_bytes += len(chunk)
+                        if on_progress:
+                            on_progress("verify", relative, self._verified_bytes)
+                    self.entries[relative] = CopiedEntry(
+                        entry, pinned, digest.hexdigest(), True
+                    )
+                    continue
+            if not copy_capacity_checked:
+                if shutil.disk_usage(self.work_root).free < total + reserve:
+                    raise IntakeFileError("waiting_capacity")
+                copy_capacity_checked = True
             handle = self.api.create(path)
             # Register ownership before the first potentially failing write.
             self._tree_holds.handles.append(handle)
@@ -165,7 +206,9 @@ class PrivateCopy:
         on_progress: Callable[[str, str, int], None] | None = None,
         check_cancelled: Callable[[], None] | None = None,
     ) -> None:
-        if value.copy.directory:
+        if value.copy.directory or value.linked:
+            # The linked bytes were hashed once under the retained source's
+            # no-write/no-delete handle. Reading the other name adds no proof.
             return
         self.api.rewind(value.copy.handle)
         digest, count = hashlib.sha256(), 0
@@ -227,7 +270,7 @@ class PrivateCopy:
             )
             if _key(pinned.identity) != _key(old.copy.identity):
                 raise IntakeFileError("copy_verification_failed")
-            value = CopiedEntry(old.source, pinned, old.sha256)
+            value = CopiedEntry(old.source, pinned, old.sha256, old.linked)
             self._verify_file(
                 value, on_progress=on_progress, check_cancelled=check_cancelled
             )

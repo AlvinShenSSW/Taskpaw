@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, type WorkflowFilms } from "../../api";
 import { fmtKwhShort } from "../power/powerModel";
 import {
-  fmtBytes, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, ltxOf, machineOf, matchesStage, restoreLive, restoreStep, statusLabel,
+  ACTIVE_STATES, fmtBytes, fmtDateTime, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, ltxOf, machineOf, matchesStage, restoreLive, restoreStep, statusLabel,
   readFilmTiming, STAGE_OPTIONS, stepDurations, workItems, type StageFilter, type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
@@ -28,11 +28,29 @@ export function QueuePage() {
     : [...new Map(ws.data.filmItems.flatMap((i) => i.kind === "film" && i.row.route && i.row.route.live !== "local"
       ? [[i.row.route.machine.id, i.row.route.machine] as const] : [])).values()];
   const [page, setPage] = useState(1);
+  const q = search.trim().toLowerCase();
+  const includeDone = ws.queueStage === "all" && resolution === "all" && !q;
+  const unfinished = ws.data.filmItems.filter((i) => i.status !== "intake_attention" && i.status !== "completed"
+    && matchesStage(i, ws.queueStage)
+    && (resolution === "all" || itemResolution(i) === resolution)
+    && (!q || `${itemTitle(i)} ${itemNumber(i) ?? ""} ${i.kind === "film" ? i.row.name : ""} ${itemActors(i)}`.toLowerCase().includes(q)))
+    .sort((a, b) => Number(ACTIVE_STATES.includes(b.status)) - Number(ACTIVE_STATES.includes(a.status)));
+  const doneTotal = ws.data.films.data?.done_paging?.total ?? ws.data.films.data?.counts.done ?? 0;
+  const offset = (page - 1) * 20;
+  const doneStart = Math.max(0, offset - unfinished.length);
+  const donePage = completed ? page : Math.floor(doneStart / 20) + 1;
+  const doneLastPage = completed ? page : Math.ceil(Math.min(doneTotal, Math.max(0, offset + 20 - unfinished.length)) / 20);
+  const needsHistory = completed || (includeDone && doneLastPage >= donePage);
   const [lastGood, setLastGood] = useState<WorkflowFilms | undefined>(ws.data.films.data);
   const history = useQuery({
-    queryKey: ["mediaHistory", ws.server?.id, page],
-    queryFn: () => ws.server ? api.hubWorkflowFilms(ws.server.id, page) : api.workflowFilms(page),
-    enabled: completed, refetchInterval: 5000, placeholderData: keepPreviousData, gcTime: 0, retry: false,
+    queryKey: ["mediaHistory", ws.server?.id, donePage, doneLastPage],
+    queryFn: async () => {
+      // A queue window can straddle two server history pages after the unfinished films.
+      const pages = await Promise.all(Array.from({ length: doneLastPage - donePage + 1 }, (_, i) =>
+        ws.server ? api.hubWorkflowFilms(ws.server.id, donePage + i) : api.workflowFilms(donePage + i)));
+      return { ...pages[0], films: pages.flatMap((p) => p.films.filter((f) => f.group === "done")) };
+    },
+    enabled: needsHistory, refetchInterval: 5000, placeholderData: keepPreviousData, gcTime: 0, retry: false,
   });
   useEffect(() => {
     if (history.data && !history.isPlaceholderData && !history.isError) {
@@ -41,14 +59,25 @@ export function QueuePage() {
   }, [history.data, history.isPlaceholderData, history.isError]);
   const historyData = history.data ?? lastGood ?? ws.data.films.data;
   const paging = historyData?.done_paging;
-  const changingPage = history.isPlaceholderData || (history.isFetching && page !== paging?.page);
+  const total = completed ? paging?.total ?? doneTotal : unfinished.length + (includeDone ? doneTotal : 0);
+  const pages = Math.max(1, Math.ceil(total / 20));
+  useEffect(() => { setPage(1); }, [ws.queueStage, resolution, search]);
+  useEffect(() => { setPage((current) => Math.min(current, pages)); }, [pages]);
+  const shownPage = completed ? paging?.page ?? page : Math.min(page, pages);
+  const changingPage = needsHistory && (history.isPlaceholderData || (history.isFetching && donePage !== paging?.page));
   const pickPage = (next: number) => { if (next === page) void history.refetch(); else setPage(next); };
-  const items = completed ? workItems(historyData, {}, ws.readOnly) : ws.data.filmItems;
-  const q = search.trim().toLowerCase();
-  const films = items.filter((i) => i.status !== "intake_attention"
-    && matchesStage(i, ws.queueStage)
-    && (completed || resolution === "all" || itemResolution(i) === resolution)
-    && (completed || !q || `${itemTitle(i)} ${itemNumber(i) ?? ""} ${i.kind === "film" ? i.row.name : ""} ${itemActors(i)}`.toLowerCase().includes(q)));
+  const done = workItems(historyData, {}, ws.readOnly).filter((i) => i.status === "completed")
+    .sort((a, b) => {
+      if (a.kind !== "film" || b.kind !== "film") return 0;
+      // the server's order: completion, then creation time, newest first (a missing time last)
+      const time = (v: string | null | undefined) => (v ? Date.parse(v) : -Infinity);
+      return time(b.row.completed_at) - time(a.row.completed_at)
+        || time(b.row.created_at) - time(a.row.created_at) || b.id.localeCompare(a.id);
+    });
+  const films = completed ? done.slice(0, 20) : unfinished.slice(offset, offset + 20);
+  if (includeDone && needsHistory && (paging?.page ?? 1) === donePage) {
+    films.push(...done.slice(doneStart % 20, doneStart % 20 + 20 - films.length));
+  }
   return (
     <>
       <PageTitle title={remote && !completed ? "队列 · 派单状态" : "影片队列"} actions={
@@ -77,7 +106,7 @@ export function QueuePage() {
           {!completed && <select aria-label="按分辨率筛选" value={resolution} onChange={(e) => setResolution(e.target.value as Resolution)}>
             <option value="all">全部分辨率</option><option value="4K">4K</option><option value="1080p">1080p</option>
           </select>}
-          <Chip>{completed ? `已完成 · ${paging?.total ?? ws.data.films.data?.counts.done ?? 0}` : `${films.length} 部`}</Chip>
+          <Chip>{completed ? `已完成 · ${total}` : `${total} 部`}</Chip>
         </div>
         {!completed && <div className="search-wrap">
           <Icon of={SearchIcon} />
@@ -85,16 +114,16 @@ export function QueuePage() {
             value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>}
       </div>
-      {completed && paging && (
-        <div className="actions" style={{ flexWrap: "wrap", marginBottom: 16 }} aria-label="已完成分页">
-          <button type="button" className="btn ghost" disabled={changingPage || paging.page <= 1}
-            onClick={() => pickPage(paging.page - 1)}>上一页</button>
-          <span>第 {paging.page} 页 / 共 {paging.pages} 页</span>
-          <button type="button" className="btn ghost" disabled={changingPage || paging.page >= paging.pages}
-            onClick={() => pickPage(paging.page + 1)}>下一页</button>
+      {pages > 1 && (
+        <div className="actions" style={{ flexWrap: "wrap", marginBottom: 16 }} aria-label="影片队列分页">
+          <button type="button" className="btn ghost" disabled={changingPage || shownPage <= 1}
+            onClick={() => pickPage(shownPage - 1)}>上一页</button>
+          <span>第 {shownPage} 页 / 共 {pages} 页</span>
+          <button type="button" className="btn ghost" disabled={changingPage || shownPage >= pages}
+            onClick={() => pickPage(shownPage + 1)}>下一页</button>
         </div>
       )}
-      {completed && history.isError && <p role="status">暂时无法读取该页，保留上次结果。</p>}
+      {needsHistory && history.isError && <p role="status">{completed ? "暂时无法读取该页，保留上次结果。" : "暂时无法读取已完成影片，请稍后重试。"}</p>}
       {films.length ? (
         remote && !completed ? <div className="panel panel-body">
           <table className="files-table" aria-label="派单状态">
@@ -104,11 +133,12 @@ export function QueuePage() {
                 onClick={() => ws.openDetail(item.id)}>{itemTitle(item)}</button> : itemTitle(item)}</td>
               <td>{item.kind === "film" ? machineOf(item.row) : "本机"}</td>
               <td><StatusChip status={item.status} film={item.kind === "film" ? item.row : undefined} /></td>
-              <td>{item.kind === "film" ? item.row.note || item.row.route?.reason : item.pkg.reason}</td>
+              <td>{item.kind === "film" ? item.status === "completed" ? `完成于 ${fmtDateTime(item.row.completed_at)}`
+                : item.row.note || item.row.route?.reason : item.pkg.reason}</td>
             </tr>)}</tbody>
           </table>
         </div> : <div className="queue-grid">{films.map((item) => <FilmCard key={item.id} item={item} />)}</div>
-      ) : (
+      ) : !changingPage && (
         <EmptyState title="没有符合条件的影片" description="试试更改阶段、分辨率或搜索词。" />
       )}
     </>
@@ -160,6 +190,7 @@ function FilmCard({ item }: { item: WorkItem }) {
             ? machineOf(item.row) !== null && <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
             : isRestoring(item.status) ? "本机" : "INBOX"}
           {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
+          {item.kind === "film" && item.status === "completed" && <span> · 完成于 {fmtDateTime(item.row.completed_at)}</span>}
           {run !== null && energy && !energy.running && (
             <span className="pw-foot" title="能耗为估算"> · <strong>约 {fmtKwhShort(energy.total_wh)} 度</strong>{energy.partial ? "（部分）" : ""}</span>
           )}

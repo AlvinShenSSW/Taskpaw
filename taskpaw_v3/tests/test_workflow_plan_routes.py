@@ -419,6 +419,8 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
         assert data == {
             "film_dir": FILM_DIR,
             "performer_id": "actor",
+            "target_dir": None,
+            "manual": False,
             "target_path": str(Path(scraped.nas) / FILM_DIR),
             "absent": True,
             "error_code": None,
@@ -462,6 +464,25 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
         assert gone["error_code"] == "missing"
     offline = client.get(url, params={"performer_id": "actor"}).json()
     assert (offline["error_code"], offline["candidates"]) == ("offline", None)
+
+
+def test_manual_target_preflight_reports_candidates_and_duplicate(scraped):
+    client = _client(lambda: Host(scraped))
+    destination = scraped.tmp / "自选目录"
+    destination.mkdir()
+    url = f"{BASE}/films/{scraped.film}/target"
+    with scraped.fake:
+        data = client.get(url, params={"target_dir": str(destination)}).json()
+        assert data["manual"] is True
+        assert data["target_dir"] == str(destination)
+        assert data["performer_id"] is None
+        assert data["target_path"] == str(destination / FILM_DIR)
+        assert data["absent"] is True and data["error_code"] is None
+        assert [p["id"] for p in data["candidates"]["items"]] == ["actor"]
+        (destination / FILM_DIR).mkdir()
+        duplicate = client.get(url, params={"target_dir": str(destination)}).json()
+        assert duplicate["error_code"] == "duplicate" and duplicate["absent"] is False
+        assert duplicate["message"] == f"目标目录下已有同名目录：{FILM_DIR}"
 
 
 def test_target_preflight_needs_a_final(world, host, client):

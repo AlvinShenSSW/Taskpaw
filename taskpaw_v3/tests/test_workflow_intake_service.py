@@ -1,10 +1,13 @@
 """Explicit controller service; owned native roots, no existing Hub or Agent."""
 
+import os
 import sys
 import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -132,6 +135,70 @@ def test_wall_clock_jump_does_not_count_toward_live_stability(service):
         h.store.list_intakes(adapter, im.IntakeListQuery()).items[0].operation_id
         is None
     )
+
+
+def test_locally_owned_snapshot_defers_link_notices_and_observation_but_is_seen(
+    service, package, tmp_path, monkeypatch
+):
+    from taskpaw_v3.workflow.intake_watch import DirtyBatch
+
+    h, adapter, config, obj, mono = service
+    assert obj.scan_once()
+    h.clock.value += timedelta(seconds=60)
+    mono[0] += 60
+    assert obj.scan_once()
+    (previous,) = h.store.list_intakes(adapter, im.IntakeListQuery()).items
+    observed = h.store.get_intake_observation(adapter, previous.package_id)
+    operation_id = str(uuid4())
+    h.store.begin_intake_snapshot(
+        adapter,
+        h.meta(),
+        im.IntakeSnapshotAdmission(
+            expected_version=previous.version,
+            package_id=previous.package_id,
+            source_generation=previous.source_generation,
+            root_config_revision=previous.root_config_revision,
+            grouping_revision=observed.grouping.grouping_revision,
+            observation_digest=observed.observation_digest,
+            operation_id=operation_id,
+            snapshot_id=str(uuid4()),
+            owner_boot_id=obj.owner_boot_id,
+            policy_revision=config.policy.policy_revision,
+        ),
+    )
+    stopped = threading.Event()
+    worker = threading.Thread(target=lambda: stopped.wait(10))
+    worker.start()
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(
+                obj, "_runner", SimpleNamespace(active_operation_id=operation_id)
+            )
+            patcher.setattr(obj, "_worker", worker)
+            os.link(package[1] / "movie.mp4", tmp_path / "own-snapshot-link.mp4")
+
+            def unexpected_observation(*_, **__):
+                raise AssertionError(
+                    "active owned snapshot must finish its held check first"
+                )
+
+            patcher.setattr(obj, "_observe", unexpected_observation)
+            assert obj.scan_once(
+                trigger="notification",
+                batch=DirtyBatch(("Actor/Film/movie.mp4",), False),
+            )
+            current = h.store.get_intake(adapter, previous.package_id)
+            assert current.source_generation == previous.source_generation
+            assert h.store.get_intake_operation(
+                adapter, operation_id
+            ).publication_allowed
+            assert not h.store.get_intake_root_scan(adapter, config.root_id).required
+            assert not obj._owns_snapshot(
+                current.model_copy(update={"state": "unknown_owner"})
+            )
+    finally:
+        stopped.set()
+        worker.join(10)
 
 
 def test_partial_root_scan_never_marks_unobserved_package_missing(service, monkeypatch):

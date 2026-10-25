@@ -8,6 +8,7 @@ import { LTX_STAGES, plainText, readLtxProgress, record, type LtxSnapshot } from
 import {
   readBasicProgress, readScanProgress, readSplitNote, type BasicSnapshot, type ScanSnapshot, type SplitNote,
 } from "../restorePhase.helpers";
+import { FILM_STATE } from "./workerModel";
 
 export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
@@ -148,6 +149,7 @@ export interface RestoreLive {
 
 export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null {
   if (!step || step.key !== "restore" || step.state !== "running") return null;
+  if (step.phase != null && step.phase !== "running") return null;
   const metrics = record(step.ltx) ? step.ltx : {};
   const ltx = readLtxProgress(metrics);
   const scan = ltx ? null : readScanProgress(metrics);
@@ -161,6 +163,12 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
     phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params,
     timing: readRestoreTiming(step.timing),
   };
+}
+
+// A worker can keep the restore attempt running while returning its result or confirming a stop.
+export function restorePhaseText(step: WorkflowStep | undefined): string | null {
+  if (!step || step.key !== "restore" || step.state !== "running" || step.phase == null || step.phase === "running") return null;
+  return step.note || plainText(step.progress, 300)?.trim() || FILM_STATE[step.phase] || "处理中";
 }
 
 // #300: the existing ASR parser's snapshot, passed through by the board.
@@ -502,6 +510,8 @@ export function stageLine(item: WorkItem): string {
   }
   const row = item.row;
   const step = (row.steps ?? []).find((s) => s.key === row.stage);
+  const phaseText = restorePhaseText(step);
+  if (phaseText) return phaseText;
   switch (item.status) {
     case "translate": {
       const c = countsOf(step?.progress);
@@ -562,6 +572,13 @@ export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) =
 }
 
 // ── formatting ──────────────────────────────────────────────────────────
+export function fmtDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const at = new Date(value);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];

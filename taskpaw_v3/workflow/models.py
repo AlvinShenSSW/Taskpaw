@@ -277,7 +277,9 @@ class AuthorityBootstrap(Model):
 
 
 class NativeIdentity(Model):
-    scheme: Literal["windows_file_id", "posix_inode", "export_object_id"]
+    scheme: Literal[
+        "windows_file_id", "posix_inode", "export_object_id", "manual_directory"
+    ]
     root_id: Id
     volume_or_export_id: Text
     object_id: Text
@@ -1957,6 +1959,7 @@ class BoardFilm(Model):
     archive_open: bool
     archive_error: Text | None
     input_revision: Revision | None = None
+    completed_at: UtcTime | None = None
     package_path: Text | None = None  # under the INBOX root
     package_films: Count = 0
     # U1 V': the current revision's confirmed plan

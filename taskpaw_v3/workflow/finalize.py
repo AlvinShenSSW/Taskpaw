@@ -1,6 +1,6 @@
 """确认入库 → archive → receipt → exact cleanup (F02-P1).
 
-``confirm`` is the operator's one click: it binds the film's final package, the chosen Filmpaw performer
+``confirm`` is the operator's one click: it binds the film's final package, the chosen archive
 folder and both cleanup scopes into a T01 approval. ``Finalizer.run_once`` then moves every approved
 film forward a step per tick without further input: submit the package to Filmpaw, accept its receipt,
 delete the bound sources on the same handle that proved them, and reclaim Taskpaw's private work dirs.
@@ -26,6 +26,7 @@ from taskpaw_v3.core.state import atomic_json
 from . import file_identity
 from . import models as m
 from .filmpaw_client import FilmpawClient, FilmpawRefused, FilmpawUnavailable
+from .intake_reclaim import remove_work_tree
 from .local_runtime import PRODUCER, LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.finalize")
@@ -97,20 +98,27 @@ class Finalizer:
         return self.runtime.final_dir(final)
 
     # ── 图文确认 preflight (V3 §7.3) ─────────────────────────────────────
-    def preflight(self, film_id: str, performer_id: str | None) -> dict[str, Any]:
+    def preflight(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> dict[str, Any]:
         """Where 确认入库 would archive, read-only: the target folder under the
-        chosen performer and whether it is free, plus Filmpaw's candidates for
+        chosen performer or manual directory and whether it is free, plus Filmpaw's candidates for
         the film's NFO actors (0 / 1 / many; the dialog pre-selects only one).
 
         `error_code`: offline (Filmpaw or its share unreachable), permission,
         missing (the performer record is gone), duplicate (the folder exists).
 
-        Without `performer_id`, exactly one candidate is checked in the same
+        Without an explicit target, exactly one candidate is checked in the same
         call (U1 Codex r2 F4; `performer_id` then names it): the list reads one
         answer per film and still shows a blocked target.
         """
         from . import board
 
+        if performer_id and target_dir:
+            raise ConfirmError("请选择演员或手动入库目录，不能同时选择")
         rt = self.runtime
         film = rt.store.get_film(rt.operator, film_id).film
         if film.current_final_revision is None:
@@ -122,6 +130,8 @@ class Finalizer:
         value: dict[str, Any] = {
             "film_dir": film_dir,
             "performer_id": performer_id,
+            "target_dir": target_dir,
+            "manual": bool(target_dir),
             "target_path": None,
             "absent": None,
             "error_code": None,
@@ -139,10 +149,12 @@ class Finalizer:
                 "query": list(dict.fromkeys(actors)),
                 "items": list(items.values()),
             }
-            if not performer_id and len(items) == 1:
+            if not performer_id and not target_dir and len(items) == 1:
                 performer_id = value["performer_id"] = next(iter(items))
-            if performer_id:
-                proof = self.filmpaw.target(performer_id, film_dir)
+            if performer_id or target_dir:
+                proof = self.filmpaw.target(
+                    performer_id, film_dir, target_dir=target_dir
+                )
                 value["absent"] = bool(proof["absent"])
                 value["target_path"] = str(
                     Path(proof["expected_target"]["target_path"]) / film_dir
@@ -150,7 +162,7 @@ class Finalizer:
                 if not value["absent"]:
                     value.update(
                         error_code="duplicate",
-                        message=f"演员目录下已有同名目录：{film_dir}",
+                        message=f"{'目标' if target_dir else '演员'}目录下已有同名目录：{film_dir}",
                     )
         except FilmpawUnavailable as e:
             value.update(error_code="offline", message=f"Filmpaw 未运行：{e}")
@@ -162,8 +174,15 @@ class Finalizer:
         return value
 
     # ── 确认入库 ────────────────────────────────────────────────────────
-    def confirm(self, film_id: str, performer_id: str) -> str:
-        """Approve archiving this film's final package under the performer's folder; the approval id."""
+    def confirm(
+        self,
+        film_id: str,
+        performer_id: str | None = None,
+        target_dir: str | None = None,
+    ) -> str:
+        """Approve archiving this film's final package under the chosen folder; the approval id."""
+        if bool(performer_id) == bool(target_dir):
+            raise ConfirmError("请选择一个演员或手动入库目录")
         rt = self.runtime
         op, store = rt.operator, rt.store
         wf = store.film_workflow(op, film_id)
@@ -180,14 +199,18 @@ class Finalizer:
         final = store.get_final_manifest(op, film_id, film.current_final_revision)
         film_dir = PurePosixPath(final.output_relative_path).name
         try:
-            proof = self.filmpaw.target(performer_id, film_dir)
+            proof = self.filmpaw.target(performer_id, film_dir, target_dir=target_dir)
         except FilmpawUnavailable as e:
             raise ConfirmError(f"Filmpaw 未运行：{e}") from e
         except FilmpawRefused as e:
             raise ConfirmError(e.message) from e
         if not proof["absent"]:
-            raise ConfirmError(f"演员目录下已有同名目录：{film_dir}")
-        target = self._target(performer_id, film_dir, proof["expected_target"])
+            raise ConfirmError(
+                f"{'目标' if target_dir else '演员'}目录下已有同名目录：{film_dir}"
+            )
+        target = self._target(
+            performer_id, film_dir, proof["expected_target"], target_dir
+        )
         input_cleanup = self._cleanup_manifest(
             "input", source.manifest_hash, source.items
         )
@@ -228,7 +251,9 @@ class Finalizer:
         observations = m.ApprovalObservations(
             metadata=rt.evidence("final_metadata", film_dir, producer=signer),
             candidate=rt.evidence(
-                "operator_choice", f"performer {performer_id}", producer=signer
+                "operator_choice",
+                f"manual {target_dir}" if target_dir else f"performer {performer_id}",
+                producer=signer,
             ),
             target=rt.evidence(
                 "filmpaw_target", payload_digest=m.digest(proof), producer=signer
@@ -275,17 +300,25 @@ class Finalizer:
         return approval_id
 
     def _target(
-        self, performer_id: str, film_dir: str, expected: dict[str, Any]
+        self,
+        performer_id: str | None,
+        film_dir: str,
+        expected: dict[str, Any],
+        target_dir: str | None = None,
     ) -> m.TargetIdentity:
-        root = performer_uuid(performer_id)
+        root = (
+            str(uuid.uuid5(_PERFORMER_NS, f"filmpaw-manual-target:{target_dir}"))
+            if target_dir
+            else performer_uuid(str(performer_id))
+        )
         return m.TargetIdentity(
             root_id=root,
             host_identity=_host(expected["target_path"]),
             export_identity=expected["target_path"],
             native_identity=m.NativeIdentity(
-                scheme="export_object_id",
+                scheme="manual_directory" if target_dir else "export_object_id",
                 root_id=root,
-                volume_or_export_id=performer_id,  # the Filmpaw performer whose folder this is
+                volume_or_export_id=target_dir or str(performer_id),
                 object_id=json.dumps(expected["directory_identity"]),
                 observed_at=self.runtime.clock.now(),
                 evidence_id=_new_id(),
@@ -410,16 +443,22 @@ class Finalizer:
             self.runtime.operator, film_id, binding.final_revision
         )
         target = binding.target
+        manual = target.native_identity.scheme == "manual_directory"
         try:
             self.filmpaw.archive(
                 operation_id,
                 self._package_dir(final),
-                target.native_identity.volume_or_export_id,
-                {
+                performer_id=None
+                if manual
+                else target.native_identity.volume_or_export_id,
+                target_dir=target.native_identity.volume_or_export_id
+                if manual
+                else None,
+                expected_target={
                     "target_path": target.export_identity,
                     "directory_identity": json.loads(target.native_identity.object_id),
                 },
-                [
+                files=[
                     {
                         "path": item.relative_path,
                         "size": item.size_bytes,
@@ -831,7 +870,11 @@ class Finalizer:
             if wf.package_id and wf.snapshot_work_path:
                 if self._package_done(wf.package_id, "workcopy"):
                     snapshot = rt.work_dir / wf.snapshot_work_path
-                    shutil.rmtree(snapshot, ignore_errors=True)
+                    remove_work_tree(
+                        snapshot,
+                        rt.work_dir,
+                        operation_id=wf.intake_operation_id or film_id,
+                    )
                     done &= not snapshot.exists()
                 else:
                     done = False  # siblings still use the shared snapshot

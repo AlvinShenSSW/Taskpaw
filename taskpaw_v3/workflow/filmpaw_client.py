@@ -142,27 +142,40 @@ class FilmpawClient:
         quoted = urllib.parse.quote(performer_id, safe="")
         return self._request("GET", f"/api/performers/{quoted}/thumb")
 
-    def target(self, performer_id: str, film_dir: str) -> dict[str, Any]:
-        query = urllib.parse.urlencode(
-            {"performer_id": performer_id, "film_dir": film_dir}
+    def target(
+        self, performer_id: str | None, film_dir: str, *, target_dir: str | None = None
+    ) -> dict[str, Any]:
+        if bool(performer_id) == bool(target_dir):
+            raise ValueError("exactly one of performer_id and target_dir is required")
+        destination = (
+            {"target_dir": target_dir} if target_dir else {"performer_id": performer_id}
         )
+        query = urllib.parse.urlencode({**destination, "film_dir": film_dir})
         return self._call("GET", f"/api/workflow/archive/target?{query}")
 
     def archive(
         self,
         operation_id: str,
         package_dir: Path,
-        performer_id: str,
+        performer_id: str | None,
         expected_target: dict[str, Any],
         files: list[dict[str, Any]],
+        *,
+        target_dir: str | None = None,
     ) -> dict[str, Any]:
+        if bool(performer_id) == bool(target_dir):
+            raise ValueError("exactly one of performer_id and target_dir is required")
         return self._call(
             "POST",
             "/api/workflow/archive",
             {
                 "operation_id": operation_id,
                 "package_dir": str(package_dir),
-                "performer_id": performer_id,
+                **(
+                    {"target_dir": target_dir}
+                    if target_dir
+                    else {"performer_id": performer_id}
+                ),
                 "expected_target": expected_target,
                 "files": files,
             },

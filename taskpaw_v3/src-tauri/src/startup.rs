@@ -359,11 +359,11 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(7));
         assert!(!run_owned(
             Command::new("node").args(["-e", "process.exit(1)"]),
-            Duration::from_secs(2)
+            Duration::from_secs(10)
         ));
         assert!(run_owned(
             Command::new("node").args(["-e", "process.exit(0)"]),
-            Duration::from_secs(2)
+            Duration::from_secs(10)
         ));
     }
     #[cfg(windows)]

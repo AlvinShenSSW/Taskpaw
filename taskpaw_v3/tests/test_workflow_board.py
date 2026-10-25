@@ -234,6 +234,7 @@ def test_rows_carry_the_frozen_shape():
         "can_retry",
         "retry_stage",
         "created_at",
+        "completed_at",
         "steps",
         # U1 V' / V3 §7
         "number",

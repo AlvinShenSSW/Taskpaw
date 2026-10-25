@@ -143,7 +143,7 @@ def copied(source, request):
 
 
 @pytest.mark.parametrize("multiple", [False, True])
-def test_complete_package_builds_exact_per_film_manifest_and_independent_copy_references(
+def test_complete_package_builds_exact_per_film_manifest_and_linked_snapshot_references(
     package, tmp_path, multiple
 ):
     _, directory, _, _ = package
@@ -162,6 +162,12 @@ def test_complete_package_builds_exact_per_film_manifest_and_independent_copy_re
             )
             assert len(snapshot.manifests) == (2 if multiple else 1)
             assert snapshot.eligibility.decision == "profile_required"
+            assert all(
+                v.linked and v.linked_change_token
+                for v in snapshot.members
+                if v.entry_kind == "file"
+            )
+            assert snapshot.workcopy_verification.kind == "linked_snapshot_sha256"
             validate_snapshot(
                 snapshot,
                 request.admission,
