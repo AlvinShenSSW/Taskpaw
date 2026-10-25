@@ -7,6 +7,7 @@ import select
 import socket
 import threading
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -239,16 +240,22 @@ def test_cancelled_queue_survives_database_reopen_and_service_restart(tmp_path, 
         assert service.stop()
         wait_until(lambda: sink.active == 0)
         assert store.notification_health()["pending_count"] == 10
+        assert [body["text"] for _, body in sink.requests] == ["0"]
         store.close()
         store, service = service_for(tmp_path, sink)
         assert store.notification_health()["pending_count"] == 10
         sink.release.set()
         service.start()
-        wait_until(lambda: store.notification_health()["pending_count"] == 0)
+        # Observe ten serial helpers plus a normal 24–36s first retry window.
+        # This fixture allowance is not a production delivery deadline.
+        wait_until(
+            lambda: store.notification_health()["pending_count"] == 0, timeout=90
+        )
         assert store.notification_health()["last_success_at"] is not None
         assert sink.max_active == 1
         texts = [body["text"] for _, body in sink.requests]
-        assert texts == ["0", *map(str, range(10))]
+        # Retry due times can change order; only the cancelled first send repeats.
+        assert Counter(texts) == Counter(["0", *map(str, range(10))])
         assert service.stop()
 
         previous = service.poller

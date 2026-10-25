@@ -152,6 +152,9 @@ def test_owned_openclaw_refuses_redirect_and_failure_without_leaking_token(
 def test_owned_openclaw_slow_drip_has_parent_deadline_and_no_live_resources(
     endpoint, monkeypatch
 ):
+    dripped = []
+    parent_budget = 4.0
+
     def action(handler, release):
         handler.send_response(200)
         handler.end_headers()
@@ -159,6 +162,7 @@ def test_owned_openclaw_slow_drip_has_parent_deadline_and_no_live_resources(
             try:
                 handler.wfile.write(b"x")
                 handler.wfile.flush()
+                dripped.append(time.monotonic())
             except OSError:
                 break
 
@@ -174,9 +178,14 @@ def test_owned_openclaw_slow_drip_has_parent_deadline_and_no_live_resources(
     monkeypatch.setattr(transport, "_cleanup", record_cleanup)
     started = time.monotonic()
     try:
-        result = transport.request(request(url, timeout=0.3), 0.5)
-        assert seen and result == {"ok": False, "reason": "upstream_deadline"}
-        assert time.monotonic() - started < 1.8
+        result = transport.request(request(url, timeout=parent_budget), parent_budget)
+        elapsed = time.monotonic() - started
+        assert seen and len(dripped) >= 2
+        assert dripped[1] < started + parent_budget
+        assert result == {"ok": False, "reason": "upstream_deadline"}
+        # Use the production 4s request budget plus the existing 1s cleanup;
+        # the small margin accounts for scheduler wake-up in CI.
+        assert parent_budget <= elapsed < parent_budget + 1.3
         assert transport.clean()
         assert len(records) == 1
         owned = records[0]
