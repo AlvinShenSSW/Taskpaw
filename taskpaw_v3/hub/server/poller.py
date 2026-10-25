@@ -150,13 +150,17 @@ class Poller:
         error = snap.get("error_code")
         if snap.get("good_monotonic") is not None:
             age = max(0.0, time.monotonic() - snap["good_monotonic"])
-        elif snap.get("last_good_at"):
-            age = (
+        if snap.get("last_good_at"):
+            wall_age = (
                 _now() - datetime.fromisoformat(snap["last_good_at"])
             ).total_seconds()
-            if age < 0:
+            if wall_age < 0:
                 age = None
                 error = error or "clock_changed"
+            else:
+                # macOS monotonic time excludes sleep. UTC catches suspended
+                # time; monotonic prevents a wall-clock rollback reducing age.
+                age = max(age or 0.0, wall_age)
         state = (
             "error"
             if error

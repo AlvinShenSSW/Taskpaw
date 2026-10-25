@@ -114,6 +114,37 @@ def test_old_cache_is_not_current_health(monitored, monkeypatch):
     assert not poller.status_snapshot()[0]["reachable"]
 
 
+@pytest.mark.parametrize(
+    ("wall_seconds", "awake_seconds", "state", "reason", "age"),
+    [
+        (3601, 1, "stale", "status_stale", 3601),
+        (10, 61, "stale", "status_stale", 61),
+        (-1, 1, "error", "clock_changed", None),
+        (60, 60, "ok", None, 60),
+    ],
+)
+def test_live_cache_freshness_with_independent_clocks(
+    monitored, monkeypatch, wall_seconds, awake_seconds, state, reason, age
+):
+    store, poller, sid, clock = monitored
+    sample(monitored, monkeypatch, 0)
+    clock.seconds = wall_seconds
+    # On macOS monotonic time excludes system sleep. A backwards wall-clock
+    # adjustment must also not make a previously expired sample young again.
+    monkeypatch.setattr(module.time, "monotonic", lambda: awake_seconds)
+    snap = poller.snapshot_statuses()[sid]
+    assert snap["status_health"]["state"] == state
+    assert snap["status_health"]["error_code"] == reason
+    assert snap["status_health"]["age_seconds"] == age
+    assert snap["online"] is (state == "ok")
+    assert poller.status_snapshot()[0]["reachable"] is (state == "ok")
+    assert snap["snapshot"]["machine"] == "windows"
+    assert events(store) == []  # Age alone does not invent a failed sample.
+    sample(monitored, monkeypatch, wall_seconds + 1)
+    assert poller.snapshot_statuses()[sid]["online"]
+    assert poller.snapshot_statuses()[sid]["status_health"]["age_seconds"] == 0
+
+
 def test_restart_old_cache_reports_stale(monitored, monkeypatch):
     store, _, sid, clock = monitored
     sample(monitored, monkeypatch, 0)

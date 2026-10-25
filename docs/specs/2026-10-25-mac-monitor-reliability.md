@@ -7,8 +7,9 @@ Mac monitors. Complete #223 and the explicitly narrowed parts of #232/#233.
 PR #290 already implements the read-only media view and is not reimplemented.
 The subsequent request adds compatibility and an upgrade package for the Mac
 Agent currently running 3.9.12. Preserve its existing monitoring configuration.
-Publication is a reviewed PR; no automatic merge or Hub deployment. Whether to
-replace and restart the installed Agent is pending the operator's clarification.
+Publication is a reviewed PR; no automatic merge or Hub deployment. The operator
+subsequently authorized replacing and restarting this Mac's installed Agent,
+preserving its configuration and event identity.
 
 Acceptance criteria:
 
@@ -51,7 +52,9 @@ consume a live queue. No Agent payload persistence/exactly-once promise (#234).
 Add a small durable availability table and a separate local `hub_events` table.
 The latter keeps Hub-generated identities distinct from Agent event IDs. Existing
 Agent event storage, cursor admission and acknowledgement ordering stay intact.
-Use Hub UTC for persisted times and monotonic time for observed durations/ages.
+Use Hub UTC for persisted times and monotonic time for observed failure durations.
+Cache age uses the greater of UTC and monotonic elapsed time so Mac sleep cannot
+keep an old sample healthy; a future UTC timestamp fails closed as clock_changed.
 Across restart retain accrued failure time, but resume measuring at a fresh sample.
 
 Retain serial Agent polling and its existing request bounds. Extract only
@@ -79,8 +82,9 @@ exit: consumers must reject an old `Last updated` or stale per-device timestamp.
 
 Generate candidate packages with the repository's `scripts/build.py` using the
 existing uv build/v3 dependencies, UI dependencies and Tauri toolchain. Outputs
-belong to ignored build directories and a named delivery directory; no install,
-service start, migration of operator data, or version-source edit is implied.
+belong to ignored build directories and a named delivery directory. The separately
+authorized Agent replacement uses a verified package, retains rollback evidence
+and checks real startup/configuration; Hub deployment remains excluded.
 Inspect build flags before execution. Do not touch Windows #322/#323 branches,
 Agent status UI, temperature collection, or their 3.10.3/3.10.4 releases.
 
