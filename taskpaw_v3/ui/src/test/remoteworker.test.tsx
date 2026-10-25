@@ -46,6 +46,124 @@ beforeEach(() => setLang("zh-CN"));
 afterEach(() => vi.restoreAllMocks());
 
 describe("worker 媒体处理 monitor", () => {
+  it("focuses the active film ahead of queue position and keeps its prefetch secondary", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w, films: [
+      { ...w.films![1], position: 0 }, { ...w.films![0], position: 1 },
+    ] });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByRole("listitem", { name: "ABF-401" })).toBeInTheDocument();
+    expect(within(primary).getByTestId("restore-live")).toBeInTheDocument();
+    expect(within(primary).queryByText(/610 MB\/s/)).not.toBeInTheDocument();
+    const secondary = screen.getByRole("region", { name: "预取与排队" });
+    expect(within(secondary).getByRole("listitem", { name: "ABF-402" })).toBeInTheDocument();
+    expect(within(secondary).getByText(/12.4\/38.0 GB · 610 MB\/s/)).toBeInTheDocument();
+    expect(primary.compareDocumentPosition(secondary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each(["uploading", "finishing", "settling"] as const)("gives current %s precedence over a stale envelope and stale compute", async (phase) => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w,
+      films: [{ ...w.films![0], state: "fetching" }],
+      current: { ...w.current!, phase, progress: "STALE COMPUTE 98%" },
+      transfers: [{ film: "f1", dir: "down", done: 9e9, total: 10e9, rate: 900e6 },
+        { film: "f1", dir: "up", done: 1e9, total: 4e9, rate: 120e6 }],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(primary.querySelector(`[data-status="${phase}"]`)).not.toBeNull();
+    expect(primary).not.toHaveTextContent(/STALE COMPUTE|900 MB\/s/);
+    expect(within(primary).queryByTestId("restore-live")).not.toBeInTheDocument();
+    if (phase === "uploading") {
+      expect(within(primary).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "25");
+      expect(primary).toHaveTextContent("1.0/4.0 GB · 120 MB/s");
+    } else {
+      expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
+      expect(primary).not.toHaveTextContent(/120 MB\/s/);
+      expect(primary).toHaveTextContent(phase === "finishing" ? "等待主控确认接收结果" : "任务进程停止尚未确认");
+    }
+  });
+
+  it("keeps an orphan current attempt's identity with safe older fields", async () => {
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(running({
+      current: { film_id: "orphan-film", stage: "restore", phase: "running" } as WorkerConsole["current"],
+    }));
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(primary).toHaveTextContent("orphan-film");
+    expect(primary).toHaveTextContent("详细进度暂不可用");
+    expect(primary).not.toHaveTextContent(/ABF-401|ABF-402|NaN|00:00/);
+    expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it.each(["queued", "staged"] as const)("shows dispatch reasons for a %s film without inventing active work", async (state) => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w, current: null,
+      films: [{ ...w.films![0], state }], dispatch_reason: "等待 GPU：手动任务使用中", transfers: [],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(screen.getByText(/等待 GPU：手动任务使用中/)).toBeInTheDocument();
+    expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(within(primary).queryByTestId("restore-live")).not.toBeInTheDocument();
+  });
+
+  it("focuses a download before an attempt exists, using only that film's inbound transfer", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w, current: null,
+      films: [{ ...w.films![0], state: "fetching" }], transfers: [
+        { film: "f1", dir: "up", done: 9e9, total: 10e9, rate: 900e6 },
+        { film: "f1", dir: "down", done: 2e9, total: 4e9, rate: 100e6 },
+      ],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(within(primary).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    expect(primary).toHaveTextContent("2.0/4.0 GB · 100 MB/s");
+    expect(primary).not.toHaveTextContent(/900 MB\/s|00:00/);
+    expect(within(primary).queryByTestId("restore-live")).not.toBeInTheDocument();
+  });
+
+  it("preserves local work while reconnecting and shows the legacy ASR phase and elapsed time", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w, state: "connecting", reconciled: false,
+      reason: "无法连接主控，正在重试", current: { ...w.current!, stage: "asr", progress: "正在识别语音",
+        step: { key: "asr", state: "running", progress: { percent: 37 }, note: null } },
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(primary).toHaveTextContent("语音识别");
+    expect(primary).toHaveTextContent("正在识别语音");
+    expect(primary).toHaveTextContent("10:00");
+    expect(within(primary).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "37");
+    expect(screen.getByText(/无法连接主控，正在重试/)).toBeInTheDocument();
+    expect(screen.getByText("等待对账", { selector: "dd" })).toBeInTheDocument();
+  });
+
+  it("shows unavailable for invalid transfer and elapsed values", async () => {
+    const w = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...w,
+      current: { ...w.current!, phase: "uploading", elapsed_s: NaN },
+      transfers: [{ film: "f1", dir: "up", done: 1e9, total: Infinity, rate: NaN }],
+    });
+    wrap(<WorkerMonitor />);
+    const primary = await screen.findByRole("region", { name: "当前任务" });
+    expect(primary).toHaveTextContent("暂不可用");
+    expect(primary).not.toHaveTextContent(/NaN|Infinity|00:00/);
+    expect(within(primary).queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a pause failure without claiming the worker paused", async () => {
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(running());
+    vi.spyOn(api, "workflowWorkerPause").mockRejectedValue(new Error("request failed"));
+    wrap(<WorkerMonitor />);
+    fireEvent.click(await screen.findByRole("button", { name: "暂停领取" }));
+    expect(await screen.findByText("无法更改领取状态，请重试。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂停领取" })).toBeInTheDocument();
+    expect(screen.queryByText(/^已暂停领取：/)).not.toBeInTheDocument();
+  });
+
   it.each([["finishing", "回传", "SendOutlinedIcon"], ["settling", "修复", "StopCircleOutlinedIcon"]] as const)("uses the actual %s phase icon on the current step while keeping its stable label", async (phase, label, icon) => {
     const worker = running();
     vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...worker, current: { ...worker.current!, phase } });
@@ -90,7 +208,7 @@ describe("worker 媒体处理 monitor", () => {
     vi.spyOn(api, "workflowWorker").mockResolvedValue(running());
     wrap(<WorkerMonitor />);
     await screen.findByTestId("worker-monitor");
-    for (const name of ["连接", "影片", "传输"]) expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    for (const name of ["连接", "预取与排队", "资源"]) expect(screen.getByRole("heading", { name })).toBeInTheDocument();
     expect(screen.getByText("192.168.1.20:5682")).toBeInTheDocument();
     expect(screen.getByText("已对账")).toBeInTheDocument();
     const first = screen.getByRole("listitem", { name: "ABF-401" });

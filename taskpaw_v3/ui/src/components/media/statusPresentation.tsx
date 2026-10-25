@@ -52,6 +52,7 @@ import WifiOffOutlined from "@mui/icons-material/WifiOffOutlined";
 import { Box, useTheme } from "@mui/material";
 import type { FilmRemote, WorkerCurrent, WorkerFilm, WorkerTransfer, WorkflowStep } from "../../api";
 import { archiveLive, asrLive, isRestoring, restoreLive, restoreStep, type StatusKey } from "./mediaModel";
+import { activeWorkerTransfer } from "./workerModel";
 
 const PALETTE = {
   waiting: ["#b6c3d4", "#202d40", "#42526a", "#edf1f6"],
@@ -168,13 +169,14 @@ export function presentFilmStatus(status: StatusKey, film?: StatusFilm): Present
 
 export function presentWorkerStatus(film: WorkerFilm, current?: WorkerCurrent | null, transfers: WorkerTransfer[] = []): Presentation {
   let presentation: Presentation;
-  if (film.state === "running" && current?.film_id === film.film) {
+  if (current?.film_id === film.film) {
     presentation = current.phase !== "running" ? { key: current.phase, percent: null }
-      : presentFilmStatus(current.stage, { steps: [current.step] });
+      : presentFilmStatus(current.stage, { steps: current.step ? [{ ...current.step, phase: "running" }] : [] });
   } else presentation = { key: film.state === "queued" ? "inbox" : film.state === "running" ? "restore" : film.state, percent: null };
-  const direction = presentation.key === "fetching" ? "down" : presentation.key === "uploading" ? "up" : null;
-  const transfer = direction && transfers.find((t) => t.film === film.film && t.dir === direction);
-  return transfer && transfer.total > 0 ? { ...presentation, percent: percent(transfer.done / transfer.total * 100) } : presentation;
+  const transfer = activeWorkerTransfer(film.film, presentation.key, transfers);
+  return transfer && typeof transfer.done === "number" && Number.isFinite(transfer.done)
+    && Number.isFinite(transfer.total) && transfer.total > 0
+    ? { ...presentation, percent: percent(transfer.done / transfer.total * 100) } : presentation;
 }
 
 export function StatusBadge({ status, label }: { status: PresentationKey; label?: string }) {

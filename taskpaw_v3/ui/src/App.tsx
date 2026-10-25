@@ -73,9 +73,9 @@ export function App() {
           },
         }}
       >
-        <Toolbar variant="dense" sx={{ gap: 2.25 }}>
+        <Toolbar variant="dense" sx={{ gap: 2.25, flexWrap: "wrap", py: { xs: 1, sm: 0 } }}>
           {/* SVG paw mark + wordmark + V3 tag — no emoji (MASTER.md). */}
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1.1, fontWeight: 600, letterSpacing: ".3px" }}>
+          <Box sx={{ display: "flex", alignItems: "center", flexShrink: 0, gap: 1.1, fontWeight: 600, letterSpacing: ".3px" }}>
             <Logo />
             TaskPaw
             <Box
@@ -141,6 +141,8 @@ export function App() {
           <Box
             sx={{
               display: "inline-flex",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
               alignItems: "center",
               gap: 0.5,
               px: 1.4,
@@ -153,7 +155,7 @@ export function App() {
           >
             <LocalApiBadge role={role} ready={ready} />
           </Box>
-          <Typography variant="body2" sx={{ ml: 1.5, color: "text.secondary" }}>{`v${__APP_VERSION__}`}</Typography>
+          <Typography variant="body2" sx={{ ml: 1.5, flexShrink: 0, whiteSpace: "nowrap", color: "text.secondary" }}>{`v${__APP_VERSION__}`}</Typography>
         </Toolbar>
       </AppBar>
       <Box sx={{ p: 2 }}>
