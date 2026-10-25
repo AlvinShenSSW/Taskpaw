@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from . import intake_owner as native
 from . import intake_protocol as wire
 from . import models as m
 from .auth import AuthProof
+from .intake_reclaim import reclaim_intake
 from .store import WorkflowStore
 
 
@@ -42,6 +44,7 @@ class SnapshotRunner:
         self._native: native.OwnedIntakeSnapshot | None = None
         self._operation: str | None = None
         self._pending_result: im.IntakeSnapshotResult | None = None
+        self._work_dir: Path | None = None
         self._cancelled = threading.Event()
         self._progress: dict[str, Any] | None = None
 
@@ -80,6 +83,12 @@ class SnapshotRunner:
                 # exit proof closes this runner's retained terminal evidence.
                 if view.exit_proof is None or view.exit_proof != result.exit_proof:
                     raise m.WorkflowError("owner_evidence_changed")
+                if view.state in {"failed", "cancelled"} and self._work_dir is not None:
+                    # Closed owner, committed result. Settlement retries only
+                    # persist evidence; a new intake uses a new operation id.
+                    reclaim_intake(
+                        self.store, self._work_dir, operation_id=view.operation_id
+                    )
                 with self._lock:
                     self._pending_result = None
                     if view.exit_proof.state != "unknown":
@@ -183,6 +192,7 @@ class SnapshotRunner:
                     policy_revision=config.policy.policy_revision,
                 )
                 self.store.begin_intake_snapshot(self.auth, self.meta(), admission)
+                self._work_dir = Path(config.private_work_path)
                 self._operation = admission.operation_id
                 owner_id = str(uuid4())
                 try:

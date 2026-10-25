@@ -294,3 +294,81 @@ def test_dirty_after_admission_records_no_process_and_releases_slot(
         h.store.get_intake_operation(adapter, admitted[0]).exit_proof.state
         == "no_process_created"
     )
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "unknown", "completed"])
+def test_terminal_runner_reclaims_only_closed_unpublished_operation(
+    intake, tmp_path, monkeypatch, state
+):
+    from taskpaw_v3.workflow import intake_protocol as wire
+    from taskpaw_v3.workflow.intake_reclaim import reclaim_intake
+    from taskpaw_v3.workflow.intake_runner import SnapshotRunner
+
+    h, adapter, _, candidate = policy_resnapshot(intake)
+    film_id = candidate.snapshot.manifests[0].film_id
+    published = h.store.film_workflow(h.operator, film_id)
+    work = tmp_path / "work"
+    operation = work / "intake" / candidate.operation_id
+    for name in ("partial", "snapshot"):
+        (operation / name).mkdir(parents=True)
+        (operation / name / "movie.bin").write_bytes(b"private data")
+    (operation / "completion.json").write_text("{}")
+    other = work / published.snapshot_work_path
+    other.mkdir(parents=True)
+    (other / "film.bin").write_bytes(b"other operation")
+    controller = SnapshotRunner(
+        h.store,
+        adapter,
+        meta=h.meta,
+        owner_boot_id=candidate.exit_proof.owner_boot_id,
+        clock=h.clock.now,
+        ffprobe=wire.ProbeArtifact(
+            executable="C:/synthetic/never.exe",
+            sha256="0" * 64,
+            size_bytes=1,
+            version="fixture",
+        ),
+    )
+    controller._operation = candidate.operation_id
+    controller._work_dir = work
+    result = (
+        candidate
+        if state == "completed"
+        else candidate.model_copy(
+            update={
+                "snapshot": None,
+                "outcome": "cancelled" if state == "cancelled" else "failed",
+                "reason": "copy_failed",
+                "exit_proof": candidate.exit_proof.model_copy(
+                    update={"state": "unknown"}
+                )
+                if state == "unknown"
+                else candidate.exit_proof,
+            }
+        )
+    )
+    assert (
+        h.store.get_intake_operation(adapter, candidate.operation_id).state == "running"
+    )
+    reclaim_intake(h.store, work, operation_id=candidate.operation_id)
+    assert (operation / "snapshot" / "movie.bin").exists()
+    controller._pending_result = result
+    finish = h.store.finish_intake_snapshot
+
+    def unavailable(*args, **kwargs):
+        raise m.WorkflowError("authority_unavailable")
+
+    monkeypatch.setattr(h.store, "finish_intake_snapshot", unavailable)
+    with pytest.raises(m.WorkflowError, match="authority_unavailable"):
+        controller.retry_settlement()
+    assert (operation / "partial" / "movie.bin").exists()
+    assert (operation / "snapshot" / "movie.bin").exists()
+    monkeypatch.setattr(h.store, "finish_intake_snapshot", finish)
+    assert controller.retry_settlement().state == state
+    for name in ("partial", "snapshot"):
+        assert (operation / name).exists() == (state in {"unknown", "completed"})
+    assert (operation / "completion.json").read_text() == "{}"
+    assert (other / "film.bin").read_bytes() == b"other operation"
+    assert (
+        h.store.film_workflow(h.operator, film_id).snapshot_id == published.snapshot_id
+    )

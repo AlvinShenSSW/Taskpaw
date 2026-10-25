@@ -26,7 +26,6 @@ the route in it (§9 CX4), so a claim racing the request answers
 from __future__ import annotations
 
 import ipaddress
-import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -36,6 +35,7 @@ from taskpaw_v3.core.power_fleet import StatusQuiet
 from . import models as m
 from . import scheduler as sc
 from .executors import failed_kind
+from .intake_reclaim import remove_work_tree
 from .local_dispatch import retry_if_due
 from .route_store import QUIET_SECONDS
 from .route_store import WITHDRAWN_LOST as WITHDRAWN_LOST  # re-exported
@@ -545,10 +545,10 @@ def remove_film(
     if wf.package_id and wf.snapshot_work_path:  # shared: the last film takes it
         if not rt.store.package_films(op, wf.package_id):
             dirs.append(rt.work_dir / wf.snapshot_work_path)
-    root = rt.work_dir.resolve()
     for path in dirs:
-        if path.resolve().is_relative_to(root) and path.resolve() != root:
-            shutil.rmtree(path, ignore_errors=True)
+        remove_work_tree(
+            path, rt.work_dir, operation_id=wf.intake_operation_id or film_id
+        )
     leftover = sum(1 for path in dirs if path.exists())
     if sources is not None:
         sources.forget(film_id)
