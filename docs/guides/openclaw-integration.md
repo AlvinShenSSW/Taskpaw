@@ -9,33 +9,57 @@ an API**:
 
 | File | What it is | Best for |
 | ---- | ---------- | -------- |
-| `hub.db` | SQLite. `status_log(server_id, timestamp, reachable, status_json)` — the raw per-server `/status` JSON, one row per poll. | **Programmatic reads — structured, every field, exact values.** Use this. |
+| `hub.db` | SQLite. `upstream_status` holds latest attempt/error and last good data; `status_log` holds successful samples only. | **Programmatic reads with explicit freshness checks.** |
 | `status.md` | Human-readable Markdown snapshot, overwritten each poll. | Quick eyeballing; simple regex scrapers. |
 
-> **Prefer `hub.db`.** `status.md` is a flattened view; the DB has every metric as a
-> typed field. Both come from the same poll — they never disagree, but the DB is
-> richer and doesn't need parsing heuristics.
+> **Prefer `hub.db`.** It retains structured metrics and current failure evidence.
+> The database commit precedes the separate atomic `status.md` replacement, so a
+> write failure or stopped Hub can leave the file older than the DB. Neither a
+> successful historical row nor an old `ONLINE` line proves current health.
 
 ## Reading `hub.db` (recommended)
 
 ```python
-import sqlite3, json, os
+import sqlite3, json, math
+from datetime import datetime, timezone
+from pathlib import Path
 
-con = sqlite3.connect(os.path.expanduser("~/.taskpaw-hub/hub.db"))
+db = Path("~/.taskpaw-hub/hub.db").expanduser()
+con = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
+now = datetime.now(timezone.utc)
+# Match max(2 * the running Hub's poll_interval, 60); default poll_interval=60.
+fresh_seconds = 120
 
 def num(d, k):                       # accept only finite numbers (drop NaN / "n/a")
     v = d.get(k)
-    return v if isinstance(v, (int, float)) and v == v else None
+    return v if type(v) in (int, float) and math.isfinite(v) else None
 
 rows = con.execute("""
-    SELECT s.name AS server, s.online, l.status_json
+    SELECT s.name AS server, s.enabled, u.status_json,
+           u.last_good_at, u.attempted_at, u.error_code
     FROM servers s
-    LEFT JOIN status_log l ON l.id = (
-        SELECT id FROM status_log WHERE server_id = s.id ORDER BY timestamp DESC LIMIT 1)
+    LEFT JOIN upstream_status u ON u.server_id = s.id
 """).fetchall()
+con.close()
 
 for r in rows:
+    age = None
+    try:
+        stamp = datetime.fromisoformat(r["last_good_at"])
+        if stamp.tzinfo is not None:
+            age = (now - stamp).total_seconds()
+    except (TypeError, ValueError):
+        pass  # no valid last-success evidence; the guard below rejects it
+    current = bool(r["enabled"] and r["status_json"] and not r["error_code"]
+                   and age is not None and 0 <= age <= fresh_seconds)
+    reason = ("disabled" if not r["enabled"] else r["error_code"] or
+              ("status_stale" if not current else "ok"))
+    print(r["server"], "current:", current, "age_seconds:", age,
+          "last_success:", r["last_good_at"], "last_attempt:", r["attempted_at"],
+          "reason:", reason)
+    if not current:
+        continue  # retained JSON is last-known data, not current metrics
     data = json.loads(r["status_json"] or "{}")   # {machine, os, server_id, monitors}
     for name, mon in data.get("monitors", {}).items():
         met, tid, state = mon.get("metrics") or {}, mon.get("type_id"), mon.get("state")
@@ -85,6 +109,67 @@ for r in rows:
         if tid == "comfyui" or (num(met, "running") is not None and num(met, "pending") is not None):
             comfy_running, comfy_pending = num(met, "running"), num(met, "pending")
 ```
+
+Older databases without `upstream_status` need an upgraded Hub before this read
+contract is available; do not silently treat their latest `status_log` row as
+current. Opening with `mode=ro` also avoids accidentally creating an empty DB
+when the Hub has never run. A negative age signals clock uncertainty, not health.
+
+The authenticated Hub `GET /status` preserves existing server fields and adds
+`status_health` (`state`, `age_seconds`, `last_good_at`, `attempted_at`,
+`error_code`) plus top-level `notifications`. Normal snapshots expire after
+`max(2 * poll_interval, 60)` seconds; cached metrics remain available as last-known
+data with `online=false`. Errors distinguish `http_auth`, invalid JSON/status,
+`network_unreachable`, `socket_timeout` and the helper's `upstream_deadline`.
+They identify a failed read, not proof that the machine is physically powered off.
+
+`status.md` keeps its original title, `Last updated`, device headings and monitor
+lines. Additive indented `Data`/`Upstream` lines show age, last success and reason;
+`Notifications` shows pending/failed/dead-letter/quarantine counts, oldest backlog,
+last success and last failure. A file cannot update after the Hub exits: readers
+must reject an old `Last updated` and recompute age from `last success`. Do not use
+the age printed in a stale file as a live clock.
+
+## Local health and notification delivery
+
+The Hub records one local whole-Agent offline event after **three consecutive
+failed samples and 120 seconds of observed failure**; with the default 60-second
+cadence, the third failed sample normally qualifies. Shorter polling does not
+shorten the 120-second grace. Initial discovery has the same grace, a successful
+sample resets it, and recovery is recorded only after an announced outage.
+Restart retains accrued phase/count/time but adds no unobserved Hub downtime.
+Disabling/re-enabling or replacing an endpoint resets its incident silently.
+Scheduling gaps and request durations can extend real alert latency; these are
+thresholds, not a field latency guarantee.
+
+`GET /hub-events` (same Bearer boundary) reads up to 1,000 recent Hub-generated
+events, including host health and Agent availability. SQLite `hub_events` keeps
+these identities separate from Agent event IDs, with 30-day/10,000-row retention
+enforced on insertion. Local history persists while OpenClaw is disabled or has
+no token. New inactive events are not queued; enabling later does not replay that
+local history. Existing outbox rows pause while inactive and resume when enabled.
+
+`notifications` distinguishes `disabled`, `missing_token`, `worker_stopped`,
+`never_sent`, `pending`, `failed`, `dead_letter`, `ok` and `read_error`. A working
+empty queue that has never sent an event reports `never_sent`, not proof of
+delivery. Success and failure timestamps survive restarts. `oldest_pending_at`
+and age exclude dead letters/quarantined rows; unknown age remains unavailable.
+
+One delivery thread uses a separate cancellable HTTP helper, so OpenClaw latency
+does not hold Agent sampling. At most one send is in flight, with a nominal
+five-second budget (up to four seconds for HTTP/helper work and one for cleanup),
+64 KiB response and bounded metadata. Each batch considers at most ten due rows
+and stops starting sends as its budget expires; the worker waits one second
+between batches. Retry backoff and the ten-attempt/24-hour dead-letter rules
+remain; no general scheduler or message broker is involved. Shutdown cancels
+both HTTP owners, joins threads within the service budget, and retains the DB
+if cleanup is incomplete. A successful network response followed by a failed DB
+commit may be delivered again: there is no exactly-once guarantee.
+
+Only the Mac Hub consumes/acks Agent `/events`. Dashboards, controller peer
+readers and OpenClaw scripts must use read APIs or the Hub's durable history.
+Agent payloads are still an in-memory queue (#234); durable sequence numbers
+alone do not guarantee crash-safe message bodies.
 
 ### Field reference (all under `monitors[name]["metrics"]`)
 

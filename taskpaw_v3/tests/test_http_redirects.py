@@ -20,6 +20,7 @@ import pytest
 
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.hub.server import film_proxy, openclaw, poller
+from taskpaw_v3.hub.server.delivery_worker import DeliveryWorker
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
@@ -218,6 +219,39 @@ def store(tmp_path):
     value.close()
 
 
+@pytest.fixture
+def owned_drain(monkeypatch):
+    """The service's independent sender, retaining helper status-code evidence."""
+    worker = DeliveryWorker(lambda send: None)
+    request = worker._transport.request
+    results = []
+
+    def observed(value, timeout):
+        result = request(value, timeout)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(worker._transport, "request", observed)
+
+    def drain(value):
+        start = len(results)
+        original_timeout = value.http_timeout
+        # Agent-only fixtures use a short socket timeout. Give the separate
+        # sender its service budget, including helper startup and cleanup.
+        value.http_timeout = 5
+        try:
+            value.drain_outbox(send=worker.send_payload)
+        finally:
+            value.http_timeout = original_timeout
+        return results[start:]
+
+    try:
+        yield drain
+    finally:
+        assert worker.stop(timeout=2)
+        assert worker.stopped and worker.clean()
+
+
 def make_poller(store, source):
     sid = store.add_server("fixture-agent", "127.0.0.1", source.server.server_port)
     store.set_config("last_event_ids", json.dumps({str(sid): 2}))
@@ -264,7 +298,9 @@ def test_real_cross_port_redirect_never_requests_target(endpoints, store, consum
         failure.close()
 
 
-def test_redirect_reason_location_never_enter_logs_or_outbox(endpoints, store, caplog):
+def test_redirect_reason_location_never_enter_logs_or_outbox(
+    endpoints, store, caplog, owned_drain
+):
     source, target = endpoints(), endpoints()
     source.default = Reply(
         302,
@@ -275,12 +311,14 @@ def test_redirect_reason_location_never_enter_logs_or_outbox(endpoints, store, c
     value, server = make_poller(store, source)
     assert value.fetch_events(server, CURRENT_STATUS) == []
     delivery = store.enqueue_delivery("fixture-agent", "event", '{"text": "fixture"}')
-    value.drain_outbox()
+    assert owned_drain(value) == [
+        {"ok": False, "reason": "http_refused", "status_code": 302}
+    ]
     row = store._conn.execute(
         "SELECT id, delivery_state, attempts, last_error FROM delivery_outbox"
     ).fetchone()
     assert row[:3] == (delivery, "failed", 1)
-    assert row[3] == "HTTP Error 302: HTTP redirect refused"
+    assert row[3] == "http_refused"
     for marker in (POLL_TOKEN, NOTIFY_TOKEN, "javascript:", "fake-r02-upstream-body"):
         assert marker not in caplog.text + row[3]
     assert target.requests == []
@@ -464,7 +502,7 @@ def test_redirect_response_closed_without_reading_or_header_parsing(
     "headers_kind", ["missing", "malformed", "unsupported", "duplicate", "uri"]
 )
 def test_real_hostile_redirect_fields_are_fixed_failures(
-    endpoints, store, trusted_transport, caplog, status, headers_kind
+    endpoints, store, trusted_transport, caplog, status, headers_kind, owned_drain
 ):
     source, target = endpoints(), endpoints()
     locations = {
@@ -487,11 +525,13 @@ def test_real_hostile_redirect_fields_are_fixed_failures(
     for consumer in ("status", "events", "notify", "films", "run-films"):
         invoke_refused(consumer, value, server, status)
     delivery = store.enqueue_delivery("fixture-agent", "event", '{"text": "fixture"}')
-    value.drain_outbox()
+    assert owned_drain(value) == [
+        {"ok": False, "reason": "http_refused", "status_code": status}
+    ]
     row = store._conn.execute(
         "SELECT id, delivery_state, attempts, last_error FROM delivery_outbox"
     ).fetchone()
-    assert row == (delivery, "failed", 1, f"HTTP Error {status}: HTTP redirect refused")
+    assert row == (delivery, "failed", 1, "http_refused")
     assert len(source.requests) == 6 and target.requests == []
     assert value.snapshot_acks() == {server["id"]: 2}
     for marker in (
@@ -573,7 +613,9 @@ def make_due(store):
 
 
 @pytest.mark.parametrize("status", REDIRECT_CODES)
-def test_redirect_outbox_retains_row_retries_then_recovers(endpoints, store, status):
+def test_redirect_outbox_retains_row_retries_then_recovers(
+    endpoints, store, status, owned_drain
+):
     source, target = endpoints(), endpoints()
     source.default = Reply(status, headers=(("Location", target.base + "/target"),))
     value, server = make_poller(store, source)
@@ -583,7 +625,9 @@ def test_redirect_outbox_retains_row_retries_then_recovers(endpoints, store, sta
     )
     for attempt in (1, 2):
         make_due(store)
-        value.drain_outbox()
+        assert owned_drain(value) == [
+            {"ok": False, "reason": "http_refused", "status_code": status}
+        ]
         row = outbox_row(store)
         assert (row["id"], row["payload_json"], row["dedupe_key"]) == (
             delivery,
@@ -591,7 +635,7 @@ def test_redirect_outbox_retains_row_retries_then_recovers(endpoints, store, sta
             "fixture:3",
         )
         assert (row["delivery_state"], row["attempts"]) == ("failed", attempt)
-        assert row["last_error"] == f"HTTP Error {status}: HTTP redirect refused"
+        assert row["last_error"] == "http_refused"
         assert datetime.fromisoformat(row["next_attempt_at"]) > datetime.now(
             timezone.utc
         )
@@ -600,7 +644,7 @@ def test_redirect_outbox_retains_row_retries_then_recovers(endpoints, store, sta
         assert target.requests == []
     source.default = Reply(204, body=b"")
     make_due(store)
-    value.drain_outbox()
+    assert owned_drain(value) == [{"ok": True}]
     assert outbox_row(store) is None
     assert len(source.requests) == 3 and target.requests == []
     assert all(r["method"] == "POST" for r in source.requests)
@@ -611,7 +655,7 @@ def test_redirect_outbox_retains_row_retries_then_recovers(endpoints, store, sta
 
 @pytest.mark.parametrize("status", REDIRECT_CODES)
 def test_redirect_at_attempt_cap_has_one_safe_dead_letter_alert(
-    endpoints, store, status
+    endpoints, store, status, owned_drain
 ):
     source, target = endpoints(), endpoints()
     source.default = Reply(
@@ -623,11 +667,13 @@ def test_redirect_at_attempt_cap_has_one_safe_dead_letter_alert(
     store.enqueue_delivery("fixture-agent", "event", '{"text": "fixture"}', attempts=9)
     alerts = []
     value.emit_local_alert = alerts.append
-    value.drain_outbox()
-    value.drain_outbox()
+    assert owned_drain(value) == [
+        {"ok": False, "reason": "http_refused", "status_code": status}
+    ]
+    assert owned_drain(value) == []
     row = outbox_row(store)
     assert (row["delivery_state"], row["attempts"]) == ("dead_letter", 10)
-    assert row["last_error"] == f"HTTP Error {status}: HTTP redirect refused"
+    assert row["last_error"] == "http_refused"
     assert alerts == [
         f"OpenClaw delivery dead-lettered id={row['id']}: delivery failed"
     ]
@@ -635,7 +681,9 @@ def test_redirect_at_attempt_cap_has_one_safe_dead_letter_alert(
     assert len(source.requests) == 1 and target.requests == []
 
 
-def test_redirect_device_and_notification_do_not_stall_healthy_device(endpoints, store):
+def test_redirect_device_and_notification_do_not_stall_healthy_device(
+    endpoints, store, owned_drain
+):
     bad, healthy, target = endpoints(), endpoints(), endpoints()
     bad.default = Reply(302, headers=(("Location", target.base + "/target"),))
     value, bad_server = make_poller(store, bad)
@@ -648,6 +696,11 @@ def test_redirect_device_and_notification_do_not_stall_healthy_device(endpoints,
     )
     value.poll_once()
     value.poll_once()
+    assert all(request["method"] == "GET" for request in bad.requests)
+    assert owned_drain(value) == [
+        {"ok": False, "reason": "http_refused", "status_code": 302},
+        {"ok": False, "reason": "http_refused", "status_code": 302},
+    ]
     assert value.snapshot_acks() == {bad_server["id"]: 2, good_id: 3}
     assert json.loads(store.get_config("last_event_ids")) == {
         str(bad_server["id"]): 2,

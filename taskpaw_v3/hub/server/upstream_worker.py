@@ -1,4 +1,4 @@
-"""Bounded one-shot upstream GET; no application/config/DB startup.
+"""Bounded one-shot upstream GET or OpenClaw POST; no app/config/DB startup.
 
 The calling thread owns the deadline independently of blocking pipe I/O. Settings
 travel through stdin, never argv. Both parent I/O owners are tracked/non-daemon.
@@ -14,6 +14,7 @@ import json
 import math
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -30,7 +31,9 @@ from taskpaw_v3.core.state import MAX_EVENT_ID, StateError, integer, parse_curso
 
 STATUS_BYTES = 256 * 1024
 EVENT_BYTES = 2 * 1024 * 1024
+OPENCLAW_BYTES = 64 * 1024
 REQUEST_BYTES = 32 * 1024
+OPENCLAW_REQUEST_BYTES = 256 * 1024
 REPLY_BYTES = 4 * 1024 * 1024
 ITEM_BYTES = 64 * 1024
 CHUNK_BYTES = 16 * 1024
@@ -306,6 +309,19 @@ class _Handler(urllib.request.HTTPHandler):
         return self.do_open(_Connection, req)
 
 
+class _HTTPSConnection(http.client.HTTPSConnection):
+    response_class = _Response
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req: Any) -> Any:
+        kwargs = {"context": getattr(self, "_context")}
+        # Python 3.12 moved check_hostname ownership into SSLContext.
+        if hasattr(self, "_check_hostname"):
+            kwargs["check_hostname"] = getattr(self, "_check_hostname")
+        return self.do_open(_HTTPSConnection, req, **kwargs)
+
+
 def handle_request(request: dict, opener: Any = None) -> dict:
     try:
         kind = request.get("kind")
@@ -313,9 +329,11 @@ def handle_request(request: dict, opener: Any = None) -> dict:
         timeout = request.get("timeout")
         headers = request.get("headers")
         if (
-            kind not in ("status", "events")
+            kind not in ("status", "events", "openclaw")
             or not isinstance(url, str)
-            or not url.startswith("http://")
+            or not url.startswith(
+                ("http://", "https://") if kind == "openclaw" else ("http://",)
+            )
             or not isinstance(timeout, (int, float))
             or isinstance(timeout, bool)
             or not math.isfinite(timeout)
@@ -330,12 +348,26 @@ def handle_request(request: dict, opener: Any = None) -> dict:
                 or any(c in key + val for c in "\r\n\x00")
             ):
                 raise UpstreamError("request_invalid")
-        req = urllib.request.Request(url, headers=headers)
+        data = None
+        if kind == "openclaw":
+            payload = request.get("payload")
+            if not isinstance(payload, dict):
+                raise UpstreamError("request_invalid")
+            _safe(payload, 20000)
+            data = json.dumps(payload, allow_nan=False).encode("utf-8")
+            headers = {**headers, "Content-Type": "application/json"}
+        req = urllib.request.Request(url, data=data, headers=headers)
         transport = opener or urllib.request.build_opener(
-            NoRedirectHandler(), _Handler()
+            NoRedirectHandler(), _Handler(), _HTTPSHandler()
         )
-        cap = STATUS_BYTES if kind == "status" else EVENT_BYTES
+        cap = {
+            "status": STATUS_BYTES,
+            "events": EVENT_BYTES,
+            "openclaw": OPENCLAW_BYTES,
+        }[kind]
         with transport.open(req, timeout=timeout) as resp:
+            if kind == "openclaw" and not 200 <= resp.status < 300:
+                raise UpstreamError("http_refused")
             encoding = resp.headers.get("Content-Encoding", "identity")
             if encoding.lower() not in ("identity", ""):
                 raise UpstreamError("http_encoding")
@@ -350,9 +382,13 @@ def handle_request(request: dict, opener: Any = None) -> dict:
                 chunks.extend(part)
                 if len(chunks) > cap:
                     raise UpstreamError("body_oversize")
+            if kind == "openclaw" and length is not None and len(chunks) != int(length):
+                raise UpstreamError("http_incomplete")
         if kind == "status":
             status, raw = decode_status(bytes(chunks))
             return {"ok": True, "status": status, "raw": raw}
+        if kind == "openclaw":
+            return {"ok": True}
         return {"ok": True, **decode_events(bytes(chunks))}
     except urllib.error.HTTPError as exc:
         code = exc.code
@@ -364,13 +400,24 @@ def handle_request(request: dict, opener: Any = None) -> dict:
         }
     except UpstreamError as exc:
         return {"ok": False, "reason": exc.reason}
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "reason": "socket_timeout"
+            if isinstance(exc.reason, (TimeoutError, socket.timeout))
+            else "network_unreachable",
+        }
+    except (TimeoutError, socket.timeout):
+        return {"ok": False, "reason": "socket_timeout"}
+    except OSError:
+        return {"ok": False, "reason": "network_unreachable"}
     except Exception:
         return {"ok": False, "reason": "upstream_failed"}
 
 
 def main() -> int:
-    raw = sys.stdin.buffer.readline(REQUEST_BYTES + 1)
-    if len(raw) > REQUEST_BYTES or not raw.endswith(b"\n"):
+    raw = sys.stdin.buffer.readline(OPENCLAW_REQUEST_BYTES + 1)
+    if len(raw) > OPENCLAW_REQUEST_BYTES or not raw.endswith(b"\n"):
         return 2
 
     def eof_guard() -> None:
@@ -382,6 +429,8 @@ def main() -> int:
     threading.Thread(target=eof_guard, daemon=True, name="upstream-eof").start()
     try:
         request = json.loads(raw)
+        if request.get("kind") != "openclaw" and len(raw) > REQUEST_BYTES:
+            return 2
         result = handle_request(request)
         reply = canonical(result).encode("utf-8")
         if len(reply) > REPLY_BYTES:
@@ -1072,7 +1121,12 @@ class Transport:
     def request(self, request: dict, timeout: float) -> dict:
         try:
             raw = (canonical(request) + "\n").encode("utf-8")
-            if len(raw) > REQUEST_BYTES:
+            limit = (
+                OPENCLAW_REQUEST_BYTES
+                if request.get("kind") == "openclaw"
+                else REQUEST_BYTES
+            )
+            if len(raw) > limit:
                 raise UpstreamError("request_oversize")
         except (ValueError, UnicodeError, UpstreamError):
             return {"ok": False, "reason": "request_invalid"}

@@ -33,6 +33,7 @@ from typing import Callable, Optional
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.core.state import StateError, parse_cursor
 
+from .availability import AvailabilityTracker
 from .upstream_worker import Transport, UpstreamError, decode_status
 
 _opener = urllib.request.build_opener(NoRedirectHandler())
@@ -101,6 +102,7 @@ class Poller:
         )
         self.http_timeout = http_timeout
         self._acks_lock = threading.Lock()
+        self._drain_lock = threading.Lock()
         self._ack_store_invalid = False
         self._channel_lock = threading.Lock()
         self._event_channels: dict[int, dict] = {}
@@ -113,6 +115,9 @@ class Poller:
         self._fetch_errors: dict[int, str] = {}
         self._snap_lock = threading.Lock()
         self._status_snapshot: dict[int, dict] = self._seed_snapshot()
+        self._availability = AvailabilityTracker(
+            store, now=lambda: _now(), monotonic=lambda: time.monotonic()
+        )
 
     def _seed_snapshot(self) -> dict[int, dict]:
         seed = {}
@@ -140,7 +145,7 @@ class Poller:
         return self._transport.retry_cleanup() and self._transport.clean()
 
     @staticmethod
-    def _health(snap: dict) -> dict:
+    def _health(snap: dict, fresh_seconds: float = 0) -> dict:
         age = None
         error = snap.get("error_code")
         if snap.get("good_monotonic") is not None:
@@ -161,6 +166,9 @@ class Poller:
         )
         if not snap.get("scan_done", True) and not snap.get("status_json"):
             state = "recovering"
+        if state == "ok" and fresh_seconds > 0 and (age is None or age > fresh_seconds):
+            state = "stale"
+            error = "status_stale"
         return {
             "state": state,
             "error_code": error,
@@ -195,13 +203,15 @@ class Poller:
             if not s["enabled"]:
                 continue
             snap = snaps.get(s["id"], {})
+            health = self._health(snap, self.seed_fresh_seconds)
             out.append(
                 {
                     "name": s["name"],
-                    "reachable": bool(snap.get("reachable", False)),
+                    "reachable": bool(snap.get("reachable", False))
+                    and health["state"] == "ok",
                     "status_json": snap.get("status_json"),
                     "last_seen": snap.get("last_seen"),
-                    "status_health": self._health(snap),
+                    "status_health": health,
                 }
             )
         return out
@@ -236,12 +246,14 @@ class Poller:
             snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
         out: dict[int, dict] = {}
         for sid, snap in snaps.items():
+            health = self._health(snap, self.seed_fresh_seconds)
             out[sid] = {
-                "online": bool(snap.get("reachable", False)),
+                "online": bool(snap.get("reachable", False))
+                and health["state"] == "ok",
                 "last_seen": snap.get("last_seen"),
                 # Pre-parsed at write time (#107) — no json.loads on the request path.
                 "snapshot": copy.deepcopy(snap.get("parsed_status")),
-                "status_health": self._health(snap),
+                "status_health": health,
             }
         return out
 
@@ -417,17 +429,42 @@ class Poller:
 
     def emit_local_alert(self, message: str) -> None:
         log.critical(message)
+        self.store.record_hub_event("hub", "openclaw-delivery", message, "error", False)
 
-    def drain_outbox(self) -> None:
-        if not self.get_token():
+    def drain_outbox(
+        self,
+        *,
+        send: Callable[[str, str, dict, float], None] | None = None,
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> None:
+        """One bounded batch, called by the delivery owner, never the sampler."""
+        if not self._drain_lock.acquire(blocking=False):
             return
-        now = _now()
         try:
-            rows = self.store.due_deliveries(now=now, limit=10)
+            self._drain_outbox(send or send_payload, cancelled)
+        finally:
+            self._drain_lock.release()
+
+    def _drain_outbox(
+        self,
+        send: Callable[[str, str, dict, float], None],
+        cancelled: Callable[[], bool],
+    ) -> None:
+        if cancelled() or not self.get_active() or not self.get_token():
+            return
+        deadline = time.monotonic() + max(1.1, self.http_timeout)
+        try:
+            rows = self.store.due_deliveries(now=_now(), limit=10)
         except Exception:
             log.error("Outbox due query failed")
             return
         for row in rows:
+            # Reserve the helper's one-second cleanup allowance. Never fetch
+            # another batch or start a send after disable/stop/budget exhaustion.
+            remaining = deadline - time.monotonic() - 1
+            if cancelled() or not self.get_active() or remaining <= 0:
+                break
+            now = _now()
             try:
                 try:
                     created, _next_at, payload = validate_row(row)
@@ -446,14 +483,22 @@ class Poller:
                         )
                     continue
                 try:
-                    send_payload(
-                        self.get_url(), self.get_token(), payload, self.http_timeout
-                    )
+                    send(self.get_url(), self.get_token(), payload, remaining)
                 except Exception as exc:
+                    if cancelled() or (
+                        isinstance(exc, UpstreamError)
+                        and exc.reason in ("delivery_busy", "helper_cancelled")
+                    ):
+                        break  # An uncertain/cancelled send keeps its retry record.
+                    reason = (
+                        exc.reason
+                        if isinstance(exc, UpstreamError)
+                        else "delivery_failed"
+                    )
                     attempts += 1
                     if attempts >= 10:
                         if self.store.mark_delivery_dead_letter(
-                            row["id"], attempts, str(exc)
+                            row["id"], attempts, reason
                         ):
                             self.emit_local_alert(
                                 f"OpenClaw delivery dead-lettered id={row['id']}: delivery failed"
@@ -462,11 +507,11 @@ class Poller:
                         self.store.mark_delivery_failed(
                             row["id"],
                             attempts,
-                            str(exc),
-                            now + timedelta(seconds=self._retry_delay(attempts)),
+                            reason,
+                            _now() + timedelta(seconds=self._retry_delay(attempts)),
                         )
                 else:
-                    self.store.delete_delivery(row["id"])
+                    self.store.complete_delivery(row["id"])
             except Exception:
                 # Includes quarantine, age arithmetic, and state persistence.
                 # No stored payload or raw exception enters this diagnostic.
@@ -485,18 +530,18 @@ class Poller:
                 ) and row.get("status_json"):
                     self._status_snapshot[sid] = {**row, "reachable": False}
         active = self.get_active()
-        for server in self.store.list_servers():
+        servers = self.store.list_servers()
+        self._availability.retain({server["id"] for server in servers})
+        for server in servers:
             if self._transport._stopped.is_set():
                 break
             if not server["enabled"]:
+                self._availability.reset(server["id"])
                 continue
             try:
                 self._poll_server(server, active)
             except Exception:
                 log.error("Polling server failed id=%s", server["id"])
-
-        if active:
-            self.drain_outbox()
 
         try:
             self.store.prune_dead_letters()
@@ -512,6 +557,7 @@ class Poller:
             self._fetch_errors[sid] = "status_type"
         if not self._transport.admit_result():
             return
+        status_recorded = True
         try:
             self.store.record_status(
                 sid,
@@ -519,6 +565,7 @@ class Poller:
                 self._fetch_errors.get(sid, "upstream_failed"),
             )
         except Exception:
+            status_recorded = False
             reachable = False
             self._fetch_errors[sid] = "status_store_failed"
         with self._snap_lock:
@@ -542,6 +589,16 @@ class Poller:
                     "error_code": self._fetch_errors.get(sid, "upstream_failed"),
                 }
             self._status_snapshot[sid] = {**snap, "reachable": reachable}
+        if status_recorded:
+            try:
+                self._availability.observe(
+                    server,
+                    reachable,
+                    self._fetch_errors.get(sid),
+                    active,
+                )
+            except Exception:
+                log.error("Availability transition failed server=%s", sid)
         if not reachable:
             self._channel(sid, "current_status_unavailable")
             return

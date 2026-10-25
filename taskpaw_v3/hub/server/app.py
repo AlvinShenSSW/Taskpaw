@@ -27,6 +27,7 @@ from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
 from taskpaw_v3.core.state import FileLease, db_lease_path
+from taskpaw_v3.hub.server.delivery_worker import DeliveryWorker
 from taskpaw_v3.hub.server.film_proxy import (
     FilmProxyError,
     FilmResource,
@@ -93,7 +94,7 @@ class HubService:
         # #299 review CX4: an invalid live override falls back to hub.yaml
         yaml_url = (yaml_config or config).openclaw_url
         self._event_cursor_lease: FileLease | None = None
-        self.poller = Poller(
+        self._poller_factory = lambda: Poller(
             store=store,
             openclaw_url=config.openclaw_url,
             get_active=lambda: (
@@ -112,7 +113,16 @@ class HubService:
             # success is within ~2 polls; older successes render OFFLINE (#38).
             seed_fresh_seconds=max(2 * config.poll_interval, 60),
         )
+        self.poller = self._poller_factory()
+        self.delivery = DeliveryWorker(
+            lambda send: self.poller.drain_outbox(
+                send=send, cancelled=self.delivery.cancelled
+            )
+        )
         self._running = threading.Event()
+        self._wake = threading.Event()
+        self._lifecycle = threading.Lock()
+        self._started = False
         self._thread: threading.Thread | None = None
         # Hub self-monitor (§5b.2): watch the Hub's OWN host. Its events go to the
         # outbox (forwarded to OpenClaw when active) tagged with the hub machine;
@@ -131,20 +141,12 @@ class HubService:
             ) == "1" and bool(
                 self.store.get_config("openclaw_token", self.config.openclaw_token)
             )
-            if not active:
-                return
-            import json
-
             # No dedupe_key: these are edge-triggered incidents (alert on breach,
             # done on recovery). A stable title-based key would let the permanent
             # outbox unique index suppress every future recurrence of the same
             # metric. Each transition is a distinct delivery.
-            self.store.enqueue_delivery(
-                server_name=self.config.machine,
-                kind="event",
-                payload_json=json.dumps(
-                    {"text": f"TaskPaw Event | {self.config.machine}: {message}"}
-                ),
+            self.store.record_hub_event(
+                self.config.machine, instance_id, message, level, active
             )
 
         sup = Supervisor(sink=sink)
@@ -169,7 +171,45 @@ class HubService:
                 except Exception as e:
                     log.error("status.md/prune failed: %s", e)
                 next_due = now + max(1, self.config.poll_interval)
-            time.sleep(0.5)
+            self._wake.wait(0.5)
+
+    def notification_health(self) -> dict:
+        try:
+            health = self.store.notification_health()
+            enabled = (
+                self.store.get_config(
+                    "openclaw_enabled", "1" if self.config.openclaw_enabled else "0"
+                )
+                == "1"
+            )
+            configured = bool(self.poller.get_token())
+            state = (
+                "disabled"
+                if not enabled
+                else "missing_token"
+                if not configured
+                else "worker_stopped"
+                if self.delivery.stopped
+                else "dead_letter"
+                if health["dead_letter_count"] or health["quarantined_count"]
+                else "failed"
+                if health["failed_count"]
+                else "pending"
+                if health["pending_count"]
+                else "ok"
+                if health["last_success_at"]
+                else "never_sent"
+            )
+            return {
+                **health,
+                "state": state,
+                "enabled": enabled,
+                "configured": configured,
+                "worker_running": not self.delivery.stopped,
+            }
+        except Exception:
+            log.error("Notification health read failed")
+            return {"state": "read_error"}
 
     def _refresh_compat_outputs(self) -> None:
         """Write status.md and prune old status_log rows (OpenClaw compat, #38)."""
@@ -189,30 +229,72 @@ class HubService:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # From the poller's in-memory snapshot (current reachability + last
             # good status), like V2 — status_log holds only successful polls.
-            write_status_md(path, self.poller.status_snapshot(), now)
+            write_status_md(
+                path,
+                self.poller.status_snapshot(),
+                now,
+                notifications=self.notification_health(),
+            )
 
     def start(self) -> None:
-        self._running.set()
-        self._thread = threading.Thread(
-            target=self._loop, name="hub-poller", daemon=True
-        )
-        self._thread.start()
-        if self.self_supervisor:
-            self.self_supervisor.start()
+        with self._lifecycle:
+            if self._thread and self._thread.is_alive():
+                if self._running.is_set():
+                    return
+                raise RuntimeError("Hub is still stopping")
+            if self._started:
+                if (
+                    not self.poller.stopped()
+                    or not self.delivery.clean()
+                    or not self.delivery.stopped
+                ):
+                    raise RuntimeError("Hub cleanup incomplete")
+                if (
+                    self.self_supervisor
+                    and not self.self_supervisor.stop_result("hub-host")["complete"]
+                ):
+                    raise RuntimeError("Hub self-monitor cleanup incomplete")
+                self.poller = self._poller_factory()
+                self.self_supervisor = (
+                    self._build_self_supervisor() if self.config.self_monitor else None
+                )
+            if not self.delivery.start():
+                raise RuntimeError("Hub delivery cleanup incomplete")
+            self._started = True
+            self._wake.clear()
+            self._running.set()
+            self._thread = threading.Thread(
+                target=self._loop, name="hub-poller", daemon=False
+            )
+            self._thread.start()
+            if self.self_supervisor:
+                self.self_supervisor.start()
 
     def stop(self) -> bool:
         """Stop the poll loop. Returns True iff the thread actually exited
         (so the caller knows it's safe to close the shared store)."""
-        self._running.clear()
-        self.poller.stop()
-        if self.self_supervisor:
-            self.self_supervisor.stop()
-        if self._thread:
-            # Generous: a cycle may be mid-urlopen (<= http timeout) or in a
-            # slow transaction. Cover that before the store is closed.
-            self._thread.join(timeout=20)
-            return not self._thread.is_alive() and self.poller.stopped()
-        return self.poller.stopped()
+        with self._lifecycle:
+            deadline = time.monotonic() + 20
+            self._running.clear()
+            self._wake.set()
+            self.poller.stop()
+            self.delivery.request_stop()
+            if self.self_supervisor:
+                self.self_supervisor.stop(
+                    timeout=min(5, max(0, deadline - time.monotonic()))
+                )
+            if self._thread:
+                self._thread.join(timeout=max(0, deadline - time.monotonic() - 2))
+            delivered = self.delivery.stop(timeout=max(0, deadline - time.monotonic()))
+            return (
+                not (self._thread and self._thread.is_alive())
+                and delivered
+                and self.poller.stopped()
+                and (
+                    self.self_supervisor is None
+                    or self.self_supervisor.stop_result("hub-host")["complete"]
+                )
+            )
 
 
 def _register_read_routes(
@@ -407,6 +489,7 @@ def _register_read_routes(
             "servers": servers,
             # Locked snapshot — the poller thread mutates this concurrently.
             "acks": service.poller.snapshot_acks(),
+            "notifications": service.notification_health(),
             # Hub's own host-health self-monitor (§5b.2).
             "self": service.self_supervisor.snapshot()
             if service.self_supervisor
@@ -428,6 +511,12 @@ def _register_read_routes(
         return {
             "events": store.recent_events(server_id=server, level=level, limit=limit)
         }
+
+    @app.get("/hub-events")
+    def hub_events(request: Request, limit: int = 200):
+        if not authorize(request):
+            return _unauthorized()
+        return {"events": store.recent_hub_events(limit)}
 
 
 def create_hub_app(
@@ -610,7 +699,13 @@ def create_hub_control_app(
                 status_code=409, content={"detail": BUSY_SAVE, "code": "operation_busy"}
             )
 
-    register_hub_settings(app, settings, boot_id=boot_id, on_restart=on_restart)
+    register_hub_settings(
+        app,
+        settings,
+        boot_id=boot_id,
+        on_restart=on_restart,
+        send=service.delivery.send_payload,
+    )
 
     @app.patch("/config")
     def update_config(request: Request, body: dict):
