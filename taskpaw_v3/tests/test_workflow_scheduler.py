@@ -493,16 +493,22 @@ def test_free_disk_counts_the_staging_of_open_routes():
 def test_the_controller_disk_gate_stops_all_new_routes():
     ws = fleet()
     f = film(source=40 * GB)
-    result = run([f], ws, controller_free_bytes=120 * GB)
+    # #317: 48 GB output plus the operator's 50 GB reserve; the exact
+    # boundary admits on the next pass after space becomes available.
+    result = run([f], ws, controller_free_bytes=98 * GB - 1)
     assert result.routes == ()
     assert result.waiting[f.film_id] == "主控磁盘空间不足"
-    assert routed(run([f], ws, controller_free_bytes=200 * GB))
+    assert routed(run([f], ws, controller_free_bytes=98 * GB))
 
 
 def test_the_controller_disk_gate_stops_every_later_route_in_the_pass():
     """IR10: once the gate trips, a smaller film behind it waits too."""
     big, small = film(0, source=400 * GB), film(1, source=1 * GB)
-    result = run([big, small], fleet(), controller_free_bytes=500 * GB)
+    result = run(
+        [big, small],
+        fleet(),
+        controller_free_bytes=s.CONTROLLER_RESERVE_BYTES + 480 * GB - 1,
+    )
     assert result.routes == ()
     assert result.waiting == {
         big.film_id: "主控磁盘空间不足",
@@ -647,8 +653,14 @@ def test_an_old_revision_route_is_accounted_with_its_own_facts():
     revised = run([current, f], [w], routes=[stale], older=[old])
     assert revised.waiting[f.film_id] == "等待 5060 Ti-1：空间不足"
     assert revised.withdrawals == ()
-    gate = run([f], [w], routes=[stale], older=[old], controller_free_bytes=380 * GB)
-    # 1.2 × 150 = 180 GB coming back + 120 GB + 100 GB reserve > 380 GB
+    gate = run(
+        [f],
+        [w],
+        routes=[stale],
+        older=[old],
+        controller_free_bytes=s.CONTROLLER_RESERVE_BYTES + 300 * GB - 1,
+    )
+    # 1.2 × 150 = 180 GB coming back + 120 GB + reserve exceeds free by 1 B.
     assert gate.waiting[f.film_id] == "主控磁盘空间不足"
 
 

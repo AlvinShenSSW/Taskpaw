@@ -115,6 +115,30 @@ def test_a_confirmed_film_is_archiving_not_confirmable(value):
     assert row["group"] == "archiving" and row["can_confirm"] is False
 
 
+@pytest.mark.parametrize(
+    "approved,reason,expected",
+    [
+        (True, "等待确认入库", None),
+        (False, "等待确认入库", "等待确认入库"),
+        (True, "等待 Filmpaw 运行", "等待 Filmpaw 运行"),
+        (True, "归档/清理暂停：存储不可用", "归档/清理暂停：存储不可用"),
+    ],
+)
+def test_pending_archive_ignores_only_stale_confirmation_wait(
+    approved, reason, expected
+):
+    value = film(done_through("scrape"), approval_active=approved)
+    waiting = {value.film_id: reason, "another-film": "等待确认入库"}
+    row = board.film_row(value, waiting)
+    assert row["note"] == expected
+    if approved:
+        assert row["group"] == "archiving" and row["can_confirm"] is False
+        steps = _steps(row)
+        assert steps["confirm"][0] == "done"
+        assert steps["archive"] == ("waiting", expected, None)
+    assert waiting == {value.film_id: reason, "another-film": "等待确认入库"}
+
+
 def test_confirming_again_after_a_failed_archive_drops_the_old_reason():
     value = film(
         {**done_through("scrape"), "archive": "failed"},

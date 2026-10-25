@@ -570,6 +570,19 @@ def test_unsafe_put_urls_are_refused(api, world, attempt, path):
     assert response.status_code != 200
 
 
+def test_output_plan_reserves_fifty_gb_and_retries_when_space_recovers(
+    api, free, world, attempt
+):
+    joined = world[0]
+    files = [{"path": f"{attempt}/a.mp4", "size": 10 * GB, "sha256": "a" * 64}]
+    free.value = 60 * GB - 1
+    refused = plan(api, joined, attempt, files)
+    assert refused.status_code == 507
+    assert refused.json() == {"code": "controller_disk_full"}
+    free.value = 60 * GB
+    assert plan(api, joined, attempt, files).status_code == 200
+
+
 def test_the_disk_gate_counts_other_plans(api, rt, free, world, attempt):
     joined, remote, film_id, _ = world
     size = 10 * GB
