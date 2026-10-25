@@ -91,6 +91,100 @@ def _llm_cfg() -> AgentConfig:
     )
 
 
+@pytest.mark.parametrize("fail_start", [False, True])
+def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
+    tmp_path, monkeypatch, fail_start
+):
+    from unittest.mock import Mock
+
+    import uvicorn
+    from fastapi.testclient import TestClient
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import temperatures
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors import runtime
+
+    config = _llm_cfg()
+    config.power.enabled = False
+    config.workflow.enabled = False
+    config.api_token = "temperature-network-test"
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(launcher, "claim_port", lambda *a, **k: Mock())
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: Mock())
+    monkeypatch.setattr(
+        "taskpaw_v3.agent.server.admin.MonitorAdmin.status_view", lambda self: {}
+    )
+    native = Mock(return_value=temperatures.parse_gpu("0, 45"))
+    thermal = temperatures.TemperatureSampler(reader=native)
+
+    def start():
+        thermal.tick()
+        if fail_start:
+            raise RuntimeError("temperature startup fixture failure")
+
+    thermal.start = Mock(side_effect=start)
+    thermal.stop = Mock(wraps=thermal.stop)
+    monkeypatch.setattr(temperatures, "TemperatureSampler", lambda: thermal)
+    sessions = []
+    original_bootstrap = launcher.bootstrap_control
+
+    def bootstrap(*args, **kwargs):
+        session = original_bootstrap(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    apps = []
+    monkeypatch.setattr(uvicorn, "Config", lambda app, **kw: apps.append(app))
+    monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
+    try:
+        if fail_start:
+            with pytest.raises(RuntimeError, match="temperature startup fixture"):
+                launcher.run_agent(
+                    config,
+                    queue=EventQueue("m"),
+                    shutdown=shutdown,
+                    config_path=tmp_path / "agent.yaml",
+                    block=False,
+                )
+        else:
+            launcher.run_agent(
+                config,
+                queue=EventQueue("m"),
+                shutdown=shutdown,
+                config_path=tmp_path / "agent.yaml",
+                block=False,
+            )
+            thermal.start.assert_called_once()
+            network = TestClient(apps[0])
+            control = TestClient(apps[1])
+            assert network.get("/status").status_code == 401
+            status = network.get(
+                "/status", headers={"Authorization": f"Bearer {config.api_token}"}
+            ).json()
+            assert status["power"] is None
+            assert status["temperatures"]["gpu"]["celsius"] == 45
+            for range_ in ("24h", "7d", "30d"):
+                view = control.get(
+                    f"/control/power?range={range_}",
+                    headers={"Authorization": f"Bearer {sessions[0].token}"},
+                ).json()
+                assert view["temperatures"]["gpu"]["celsius"] == 45
+                assert view["temperatures"]["cpu"]["reason"] == "no_reader"
+            native.assert_called_once()
+    finally:
+        shutdown.shutdown()
+    thermal.stop.assert_called_once()
+    assert shutdown.stopped.is_set()
+
+
 class _Sentinel(Exception):
     pass
 

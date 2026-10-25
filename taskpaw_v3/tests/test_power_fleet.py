@@ -463,9 +463,12 @@ def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
         power={"peers": [GPU02]},
     )
     seen: list = []
+    entered, release = threading.Event(), threading.Event()
 
     def fake_fetch(url, token, timeout=2.0, opener=None):
         seen.append((url, token))
+        entered.set()
+        assert release.wait(5)
         raise PeerError("unreachable")
 
     monkeypatch.setattr(power_fleet, "fetch_json", fake_fetch)
@@ -474,13 +477,19 @@ def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
         fleet_ = power_fleet.get_fleet()
         assert fleet_ is not None
         assert fleet_._own() == ("s", "HOME-PC")  # IR06: knows this agent
+        assert entered.wait(3)  # the real background loop started its first read
         fleet_.refresh_once()
+        # refresh_once does not join a read already owned by the background loop.
+        assert fleet_.snapshot()[0]["state"] == "pending"
+        release.set()
+        assert wait_until(lambda: fleet_.snapshot()[0]["state"] == "unreachable")
         view = kwargs["control"]["power_view"]("7d")
         assert view["machine"]["name"] == "HOME-PC"
         (row,) = view["peers"]
         assert row["name"] == "GPU-02" and row["state"] == "unreachable"
         assert seen and all(token == TOKEN for _, token in seen)
     finally:
+        release.set()
         shutdown.shutdown()
     assert power_fleet.get_fleet() is None
 

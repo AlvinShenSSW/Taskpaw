@@ -1,5 +1,5 @@
 // PWR-3: the 功耗 tab's pure view model — machines from the control view, chart series, ranges.
-import type { LivePower, PeerEnergy, PowerHistory, PowerPeerRow, PowerRange, PowerView } from "../../api";
+import type { LivePower, MachineTemperatures, PeerEnergy, PowerHistory, PowerPeerRow, PowerRange, PowerView } from "../../api";
 import { ACTIVITY_ORDER, machineColor } from "./powerModel";
 
 export interface ChartSeries { id: string; name: string; color: string; values: Array<number | null> }
@@ -33,6 +33,7 @@ export interface Machine {
   energy?: PeerEnergy | null; energyStale?: boolean; duplicateOf?: string | null;
   // P2-4 R11: an enrolled GPU worker that joined the list by itself (工作机 · 自动加入)
   auto?: boolean;
+  temperatures?: MachineTemperatures | null;
 }
 
 const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]> = {
@@ -74,6 +75,7 @@ function peerMachine(p: PowerPeerRow, ranged: PowerPeerRow | undefined, i: numbe
     id: `peer:${p.name}`, name: p.name, local: false, state: p.state, stale: p.stale, color: machineColor(i),
     hw: [p.address, p.version ? `TaskPaw ${p.version}` : null].filter(Boolean).join(" · "),
     live: fresh ? p.power : null, day: sane(p.history), hist: sane(ranged?.history),
+    temperatures: p.temperatures,
   };
 }
 
@@ -85,6 +87,7 @@ export function machinesOf(day: PowerView | undefined, ranged: PowerView | undef
     live: day.power, day: day.history, hist: ranged?.history ?? null,
     // the retained totals count with sampling off (power null); the live figures are the same numbers when on
     energy: day.power ? energyOf(day.power) : day.energy ?? null, energyStale: false,
+    temperatures: day.temperatures,
   };
   const peers = (day.peers ?? []).map((p, i) => peerMachine(p, ranged?.peers?.find((r) => r.name === p.name), i + 1));
   return [local, ...peers];
