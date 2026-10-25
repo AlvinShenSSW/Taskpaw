@@ -107,7 +107,8 @@ export function QueuePage() {
           const presentation = active ? presentFilmStatus(active.status, active.kind === "film" ? active.row : undefined) : null;
           return <section className="panel panel-body queue-worker" key={w.id} aria-label={w.name}>
             <div className="queue-worker-title"><h2>{w.name}</h2><StatusBadge status={w.live === "online" ? "online"
-              : w.live === "lost" ? "device_lost" : "heartbeat_wait"} /></div>
+              : w.live === "lost" ? "device_lost" : w.live === "off" ? "idle" : "heartbeat_wait"}
+              label={w.live === "off" ? "远程未启用" : undefined} /></div>
             <p>{presentation && active ? <><StatusBadge status={presentation.key} /> <span>{itemTitle(active)}</span></> : <StatusBadge status="idle" />}</p>
             {presentation && active && <StatusProgress presentation={presentation} label={itemTitle(active)} />}
             <p className="small muted">{next?.kind === "film" ? `下一部：${itemTitle(next)}${next.row.note ? ` · ${next.row.note}` : ""}` : "无预取"}</p>

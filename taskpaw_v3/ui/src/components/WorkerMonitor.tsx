@@ -36,7 +36,7 @@ function StepRow({ film, w }: { film: WorkerFilm; w: WorkerConsole }) {
         <Box component="li" key={`${s.key}-${i}`} aria-current={s.state === "current" ? "step" : undefined}
           data-state={s.state}>
           <StatusBadge status={s.state === "done" ? "completed" : s.state === "pending" || film.state === "queued" || film.state === "staged" ? "waiting"
-            : s.key === "fetch" ? "fetching" : s.key === "restore" ? "restore" : "uploading"} label={`${s.label}${s.state === "done" ? " ✓" : ""}`} />
+            : presentWorkerStatus(film, w.current).key} label={`${s.label}${s.state === "done" ? " ✓" : ""}`} />
         </Box>
       ))}
     </Box>

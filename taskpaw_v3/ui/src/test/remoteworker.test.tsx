@@ -46,6 +46,18 @@ beforeEach(() => setLang("zh-CN"));
 afterEach(() => vi.restoreAllMocks());
 
 describe("worker 媒体处理 monitor", () => {
+  it.each([["finishing", "回传", "SendOutlinedIcon"], ["settling", "修复", "StopCircleOutlinedIcon"]] as const)("uses the actual %s phase icon on the current step while keeping its stable label", async (phase, label, icon) => {
+    const worker = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...worker, current: { ...worker.current!, phase } });
+    wrap(<WorkerMonitor />);
+    const line = await screen.findByRole("list", { name: "ABF-401 步骤" });
+    const badge = within(line).getByText(label, { selector: ".status-badge" });
+    expect(badge.parentElement).toHaveAttribute("aria-current", "step");
+    expect(badge).toHaveAttribute("data-status", phase);
+    expect(badge.querySelector("svg")).toHaveAttribute("data-testid", icon);
+    expect(within(line).getByText("下载 ✓")).toHaveAttribute("data-status", "completed");
+    expect(within(line).getByText(phase === "finishing" ? "修复" : "回传")).toHaveAttribute("data-status", "waiting");
+  });
   it.each([["uploading", "回传中"], ["finishing", "提交结果"], ["settling", "停止未确认"]] as const)("keeps current-card heading on %s instead of compute", async (phase, label) => {
     const worker = running();
     vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...worker, current: { ...worker.current!, phase } });

@@ -1663,6 +1663,18 @@ describe("#305 dispatch board", () => {
     vi.spyOn(api, "workflowFilm").mockResolvedValue(detail("pin", { ...films[1] }));
     wrap(<MediaWorkspace />);
   }
+  it("shows remote-disabled workers as neutral metadata instead of waiting for heartbeat", async () => {
+    setup();
+    vi.mocked(api.workflowDevices).mockResolvedValue({ ...REMOTE_DEVICES, workers: REMOTE_DEVICES.workers.map((worker) =>
+      ({ ...worker, heartbeat: { ...worker.heartbeat, state: "off" } })) });
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    const worker = within(await screen.findByRole("region", { name: W.ti70.name }));
+    const badge = worker.getByText("远程未启用", { selector: ".status-badge" });
+    expect(badge).toHaveAttribute("data-tone", "waiting");
+    expect(badge.querySelector("svg")).toHaveAttribute("data-testid", "PowerSettingsNewOutlinedIcon");
+    expect(worker.queryByText("等待心跳")).not.toBeInTheDocument();
+  });
   it("renders the approved worker cards and dispatch table with exact states", async () => {
     setup();
     await screen.findByRole("heading", { level: 1, name: "概览" });
