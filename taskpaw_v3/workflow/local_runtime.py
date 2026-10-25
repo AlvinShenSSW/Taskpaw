@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-import shutil
 import threading
 import uuid
 from collections.abc import Sequence
@@ -28,6 +27,7 @@ from . import intake_models as im
 from . import models as m
 from .auth import AuthProof, authenticate, authenticate_pairing, digest_secret
 from .executors import INTERRUPTED_KIND, StageExecutor
+from .intake_reclaim import reclaim_intake
 from .local_clock import MonotonicWallClock, read_high_water
 from .local_gpu import FULL_HD, UHD, LocalGpu, machine_identity, query_gpu
 from .owned_process import own_identity, process_alive
@@ -768,10 +768,10 @@ class LocalRuntime:
                     current_owner_boot_id=self.boot_id,
                 ),
             )
-            shutil.rmtree(
-                self.work_dir / "intake" / op.operation_id, ignore_errors=True
-            )
             settled += 1
+        # Called once by LocalHost._boot, before intake/dispatch threads start.
+        # Keep operation directories and completion/evidence metadata.
+        reclaim_intake(self.store, self.work_dir)
         return settled
 
 
