@@ -172,6 +172,7 @@ export type DeviceRow = {
   gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
   disk: { free: number; staging_used: number; cap: number } | null;
   tiers_ready: string[]; agent_version: string | null; version_ok: boolean | null;  // OD7: no asr_ready
+  workflow_protocol?: number | null; required_protocol?: number;  // Absent on older backends.
   boot_reconciled: boolean; eligibility: string; eligible: boolean;
   probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
   restore_allowed: boolean; unresolved: number; can_retire: boolean;

@@ -15,7 +15,7 @@ import { isAiMetrics } from "../components/aiActivity.helpers";
 import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 import { ServiceIcon } from "../components/ServiceIcon";
-import { compareSemver, hubFilmKind } from "./hubDashboard.helpers";
+import { hubFilmKind } from "./hubDashboard.helpers";
 import { requestFailed } from "../components/requestEvidence";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { MEDIA_FILMS_KEY, mediaSourceKey } from "../components/media/workspace";
@@ -260,7 +260,6 @@ function MachineRow({ server: s }: { server: HubServer }) {
   const monitors = online ? (s.snapshot?.monitors ?? {}) : {};
   const monitorNames = Object.keys(monitors);
   const version = typeof s.snapshot?.version === "string" && s.snapshot.version ? s.snapshot.version : undefined;
-  const newer = compareSemver(version, __APP_VERSION__) === 1;
   // The dev_activity monitor's `ai` block, surfaced as a header badge (#154) so the
   // fleet view shows at a glance which machines are actively running AI.
   const aiMon = online
@@ -296,10 +295,6 @@ function MachineRow({ server: s }: { server: HubServer }) {
             {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
           </Typography>
         </Stack>
-
-        {newer && <Alert severity="warning" sx={{ mt: 1, minWidth: 0, overflowWrap: "anywhere" }}>
-          {t("hub.versionSkew", { hub: __APP_VERSION__, agent: version })}
-        </Alert>}
 
         {/* Monitors flush beneath — no indent, thin dividers between (online only). */}
         {online && monitorNames.length > 0 && (

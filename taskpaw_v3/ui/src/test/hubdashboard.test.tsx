@@ -409,11 +409,11 @@ describe("#210 actual Hub task cards", () => {
     expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
     expect(screen.queryByText("never display raw upstream")).toBeNull();
   });
-  it.each(["999.0.0", __APP_VERSION__, "0.0.1", "malformed", "", null, 123])("warns only for a valid newer version (%s)", async version => {
+  it.each(["999.0.0", __APP_VERSION__, "0.0.1", "malformed", "", null, 123])("displays versions without a blanket upgrade warning (%s)", async version => {
     transport(fleet(undefined, {}, version)); renderHub(); await screen.findByText("machine-fixture");
     if (typeof version === "string" && version) expect(screen.getByLabelText(`Agent v${version}`)).toHaveTextContent(`v${version}`);
-    expect(screen.queryAllByRole("alert")).toHaveLength(version === "999.0.0" ? 1 : 0);
-    if (version === "999.0.0") expect(screen.getByRole("alert")).toHaveTextContent(/Update the Hub|请更新 Hub/);
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+    expect(screen.queryByText(/Update the Hub|请更新 Hub/)).toBeNull();
   });
   it.each(["offline", "disabled", "tab", "removed"])("stops film polling and drops late feedback on %s; reconnect starts fresh", async transition => {
     vi.useFakeTimers();

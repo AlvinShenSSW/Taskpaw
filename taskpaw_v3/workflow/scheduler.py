@@ -319,7 +319,7 @@ def eligibility(
     if live.paused:
         return "暂停领取"
     if not live.version_ok:
-        return "版本不一致"
+        return "工作流协议不兼容"
     if not worker.boot_reconciled:
         return "等待对账"
     if worker.vram_mib < RESTORE_MIN_VRAM_MIB:  # OD5/OD7: eligible for nothing

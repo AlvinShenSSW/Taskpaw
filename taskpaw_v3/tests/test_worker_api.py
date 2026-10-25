@@ -443,7 +443,9 @@ def test_release_names_staged_films_without_a_route(api, rt):
     assert data["release"] == [{"film": idle, "rev": 2}]
 
 
-def test_a_new_boot_or_version_shows_in_the_reply_and_live_state(api, rt, host):
+def test_a_new_boot_needs_reconciliation_but_build_difference_is_compatible(
+    api, rt, host
+):
     joined, boot = enrol(api, rt)
     other = api.post(
         f"{PREFIX}/heartbeat",
@@ -451,7 +453,7 @@ def test_a_new_boot_or_version_shows_in_the_reply_and_live_state(api, rt, host):
         headers=joined.headers,
     ).json()
     assert other["reconcile_needed"] is True
-    assert host.fleet.snapshot()[joined.worker_id].version_ok is False
+    assert host.fleet.snapshot()[joined.worker_id].version_ok is True
 
 
 def test_heartbeat_over_64_kib_is_413_and_malformed_is_422(api, rt):

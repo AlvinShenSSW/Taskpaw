@@ -127,6 +127,14 @@ a successful source build is separate from signing and clean-machine launch.
 
 ## Working agreement for agents
 
+- This is a single-operator personal homelab: prefer small scoped changes using
+  existing mechanisms, and avoid speculative general frameworks.
+- Hub, Windows Agent, Mac Agent, media controllers and GPU workers may run
+  different application versions and be released independently. Do not require
+  upgrades or block work merely to align version numbers. Gate only actual
+  incompatible protocols or documented feature/capability requirements; never
+  interrupt active jobs automatically. Version copies within one build must
+  still agree; that is not a cross-machine equality requirement.
 - Confirm/keep to the operator's scope; never pick work yourself in AFK mode.
 - Every behavioural change needs a test; never open a PR on red CI.
 - Reviewer ≠ implementer (Codex 外门 → Kimi 终审 under default `/afk`); flag any

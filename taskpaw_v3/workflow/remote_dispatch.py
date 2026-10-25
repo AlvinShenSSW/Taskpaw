@@ -1260,7 +1260,10 @@ class RemoteDispatcher:
                     continue
                 self._drop(state.attempt_id)
                 self._release()
-                self.reason = f"领取失败：{exc.code}"
+                self.reason = {
+                    "workflow_protocol_unverified": "等待主控确认工作流协议",
+                    "workflow_protocol_incompatible": "工作流协议不兼容，请检查主控与工作机的升级要求",
+                }.get(exc.code, f"领取失败：{exc.code}")
                 return None
         return None  # stopped: the file stays; the next start asks the controller
 

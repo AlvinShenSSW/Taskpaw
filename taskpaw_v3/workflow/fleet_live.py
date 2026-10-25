@@ -20,7 +20,8 @@ from pydantic import Field
 from . import models as m
 from .scheduler import OFFLINE_SECONDS, WorkerLive
 
-PROTOCOL = 1  # S2: a mismatch is the eligibility reason 版本不一致, never a 426
+# Change for incompatible workflow semantics/wire shapes, not application releases.
+PROTOCOL = 1
 LiveState = Literal["online", "lost", "waiting"]
 
 _Short = Annotated[str, Field(strict=True, min_length=1, max_length=128)]
@@ -154,7 +155,21 @@ class FleetLive:
             return self._entries.get(worker_id)
 
     def version_ok(self, beat: Heartbeat) -> bool:
-        return beat.version == self.version and beat.protocol == PROTOCOL
+        """Keep the public field's name; application builds are diagnostics only."""
+        return beat.protocol == PROTOCOL
+
+    def claim_admission_error(self, worker_id: str, boot_id: str | None) -> str | None:
+        """Snapshot the current boot's protocol for a genuinely new claim.
+
+        The store applies this only after its idempotent replay lookup. Losing
+        live state on a controller restart must not hide an existing assignment.
+        """
+        entry = self.entry(worker_id)
+        if entry is None or entry.beat.boot_id != boot_id:
+            return "workflow_protocol_unverified"
+        if not self.version_ok(entry.beat):
+            return "workflow_protocol_incompatible"
+        return None
 
     def state(self, worker_id: str, now: datetime) -> LiveState:
         entry = self.entry(worker_id)

@@ -546,7 +546,15 @@ def create_worker_app(
     def claim(body: ClaimBody, c: Caller = authed) -> dict[str, Any]:
         """Same bytes → the stored result (`request_results`)."""
         try:
-            return ra.claim(c.rt, c.auth, c.me.worker, body.model_dump(mode="json"))
+            return ra.claim(
+                c.rt,
+                c.auth,
+                c.me.worker,
+                body.model_dump(mode="json"),
+                admission_error=c.fleet.claim_admission_error(
+                    c.worker_id, c.me.worker.boot_id
+                ),
+            )
         except m.WorkflowError as exc:
             raise coded(exc) from None
 

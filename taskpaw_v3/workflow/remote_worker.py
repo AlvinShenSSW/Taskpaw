@@ -1002,7 +1002,7 @@ class WorkerHost:
             "tiers_ready": list(self._tiers),
             # OD7 (#298 §2): still sent for one release — an older controller's
             # Heartbeat requires it (extra="forbid"), and a refused beat reads
-            # 失联 instead of 版本不一致. The new controller ignores it.
+            # 失联 before it can assess compatibility. The new controller ignores it.
             "asr_ready": False,
             "staged": dispatcher.staged() if dispatcher else [],
             "current": dispatcher.current() if dispatcher else None,

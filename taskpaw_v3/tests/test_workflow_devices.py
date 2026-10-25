@@ -137,6 +137,7 @@ def test_add_pair_approve_and_show_online(ctl, api, rt, clock):
     assert row["gpu"]["name"] == "NVIDIA GeForce RTX 5060 Ti"
     assert row["disk"]["cap"] == 500 * 10**9
     assert row["tiers_ready"] == ["standard", "good", "high"]
+    assert row["workflow_protocol"] == row["required_protocol"] == 1
     assert row["eligibility"] == "可接单" and row["eligible"] is True
     assert row["approved"]["probe"]["vram_mib"] == 16311
     assert {p["stage"] for p in row["approved"]["profiles"]} == {"restore"}
