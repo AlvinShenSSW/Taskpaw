@@ -116,6 +116,17 @@ data. The first install must reject a label already registered without this
 installation's ownership record. Idempotent reinstall does not restart matching
 running bytes. No new general service supervisor is introduced.
 
+The operator reiterated that this must not become over-engineered. Internal
+review repairs remain local to the existing manager: persist a committed upgrade
+phase before deleting the old executable, so interrupted cleanup completes
+forward; and positively match a live job's fixed label/private runtime argv
+before unloading it. A bounded legacy `launchctl list` inspection may establish
+that narrow binding; missing, ambiguous or conflicting output must refuse the
+operation. It does not establish a universal launchd schema or parse PIDs for
+killing. No native API bridge, generic plist/parser framework or extra service
+layer is added. Lower-severity findings remain documented rather than expanding
+this repair.
+
 ## Verified platform facts and remaining assumptions
 
 Local macOS 27.0.1 manuals establish that `gui/UID` is the login domain;

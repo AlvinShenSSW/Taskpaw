@@ -7,6 +7,8 @@ import logging
 import os
 import plistlib
 import subprocess
+import sys
+import time
 
 import pytest
 
@@ -31,6 +33,25 @@ def manager(tmp_path, monkeypatch):
     obj = service.Manager(home, source)
     state = {"loaded": False, "ready": False, "calls": [], "fail_bootstrap": False}
 
+    def registration():
+        return (
+            '{\n\t"Label" = "com.taskpaw.hub.v3";\n'
+            '\t"LimitLoadToSessionType" = "Aqua";\n'
+            f'\t"Program" = "{obj.runtime}";\n'
+            '\t"ProgramArguments" = (\n'
+            f'\t\t"{obj.runtime}";\n\t\t"hub-service";\n\t\t"run";\n'
+            "\t);\n};\n"
+        )
+
+    def query(argv):
+        state["calls"].append(argv)
+        if argv[1] == "manageruid":
+            return str(os.getuid()) + "\n"
+        if argv[1] == "managername":
+            return "Aqua\n"
+        assert argv == ["/bin/launchctl", "list", service.LABEL]
+        return state.get("registration", registration())
+
     def command(argv, **kwargs):
         state["calls"].append(argv)
         assert kwargs.get("timeout", 0) > 0
@@ -52,6 +73,7 @@ def manager(tmp_path, monkeypatch):
         raise AssertionError(argv)
 
     monkeypatch.setattr(service, "_command", command)
+    monkeypatch.setattr(service, "_query", query, raising=False)
     monkeypatch.setattr(obj, "_processes", lambda: [])
     monkeypatch.setattr(obj, "_ready", lambda: state["ready"])
     monkeypatch.setattr(obj, "_resources_released", lambda record: True)
@@ -249,6 +271,146 @@ def test_stop_after_interrupted_upgrade_does_not_restart_old_job(manager, monkey
     state["calls"].clear()
     assert obj.execute("stop")["state"] == "stopped"
     assert not any(c[1] == "bootstrap" for c in state["calls"])
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_committed_upgrade_recovers_forward_after_backup_cleanup_crash(
+    manager, monkeypatch, upgrade
+):
+    from pathlib import Path
+
+    obj, state, source = manager
+    if upgrade:
+        obj.execute("install")
+    source.write_bytes(b"verified successful upgrade")
+    unlink = Path.unlink
+
+    def interrupted(path, *args, **kwargs):
+        result = unlink(path, *args, **kwargs)
+        if path == obj.previous:
+            raise KeyboardInterrupt()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            obj.execute("install")
+    assert obj.journal.exists() and not obj.previous.exists()
+    state["calls"].clear()
+    assert obj.execute("start")["state"] == "running"
+    assert obj.runtime.read_bytes() == source.read_bytes()
+    assert not obj.journal.exists()
+    assert not any(c[1] in {"bootstrap", "bootout"} for c in state["calls"])
+
+
+@pytest.mark.parametrize(
+    "action", ["stop", "restart", "uninstall", "install", "start", "status"]
+)
+def test_replaced_live_registration_is_never_adopted_or_booted_out(manager, action):
+    obj, state, _ = manager
+    obj.execute("install")
+    obj.execute("stop")
+    state.update(
+        loaded=True,
+        ready=True,
+        registration=(
+            '{\n\t"Label" = "com.taskpaw.hub.v3";\n'
+            '\t"LimitLoadToSessionType" = "Aqua";\n'
+            '\t"Program" = "/usr/bin/false";\n'
+            '\t"ProgramArguments" = (\n\t\t"/usr/bin/false";\n\t);\n};\n'
+        ),
+    )
+    state["calls"].clear()
+    with pytest.raises(service.ServiceError, match="registration"):
+        obj.execute(action)
+    assert state["loaded"]
+    assert obj.runtime.exists() and obj.plist.exists()
+    assert not any(c[1] in {"bootstrap", "bootout"} for c in state["calls"])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_args",
+        "duplicate_label",
+        "wrong_args",
+        "wrong_session",
+        "unknown_format",
+        "malformed_program",
+        "duplicate_args",
+    ],
+)
+def test_unknown_or_conflicting_live_provenance_fails_closed(manager, change):
+    obj, state, _ = manager
+    obj.execute("install")
+    text = service._query(["/bin/launchctl", "list", service.LABEL])
+    if change == "missing_args":
+        text = text.replace('"ProgramArguments"', '"UnknownArguments"')
+    elif change == "duplicate_label":
+        text = text.replace("{\n", '{\n\t"Label" = "com.taskpaw.hub.v3";\n', 1)
+    elif change == "wrong_args":
+        text = text.replace('"run";', '"stop";')
+    elif change == "wrong_session":
+        text = text.replace('"Aqua"', '"Background"')
+    elif change == "malformed_program":
+        text = text.replace('"Program" = ', '"Program": ')
+    elif change == "duplicate_args":
+        text = text.replace("{\n", '{\n\t"ProgramArguments" = false;\n', 1)
+    else:
+        text = text.replace(" = ", ": ")
+    state["registration"] = text
+    state["calls"].clear()
+    with pytest.raises(service.ServiceError, match="registration"):
+        obj.execute("stop")
+    assert not any(c[1] == "bootout" for c in state["calls"])
+
+
+def test_implicit_program_is_bound_by_complete_runtime_argv(manager):
+    obj, state, _ = manager
+    obj.execute("install")
+    state["registration"] = service._query(
+        ["/bin/launchctl", "list", service.LABEL]
+    ).replace(f'\t"Program" = "{obj.runtime}";\n', "")
+    assert obj.execute("stop")["state"] == "stopped"
+
+
+@pytest.mark.parametrize(
+    "query_name,result", [("manageruid", "0\n"), ("managername", "Background\n")]
+)
+def test_foreign_legacy_query_context_cannot_authorize_stop(
+    manager, monkeypatch, query_name, result
+):
+    obj, state, _ = manager
+    obj.execute("install")
+    if query_name == "manageruid":
+        result = str(os.getuid() + 1) + "\n"
+    query = service._query
+    monkeypatch.setattr(
+        service, "_query", lambda argv: result if argv[1] == query_name else query(argv)
+    )
+    state["calls"].clear()
+    with pytest.raises(service.ServiceError, match="registration_unknown"):
+        obj.execute("stop")
+    assert not any(c[1] == "bootout" for c in state["calls"])
+
+
+@pytest.mark.parametrize("code", ["import time; time.sleep(60)", "print('x'*20000)"])
+def test_registration_read_bounds_output_time_and_reaps_its_child(monkeypatch, code):
+    children = []
+    popen = service.subprocess.Popen
+
+    def child(*args, **kwargs):
+        proc = popen(*args, **kwargs)
+        children.append(proc)
+        return proc
+
+    monkeypatch.setattr(service.subprocess, "Popen", child)
+    monkeypatch.setattr(service, "COMMAND_TIMEOUT", 0.2)
+    before = time.monotonic()
+    with pytest.raises(service.ServiceError, match="registration_unknown"):
+        service._query([sys.executable, "-c", code])
+    assert time.monotonic() - before < 2
+    assert children[0].poll() is not None and children[0].stdout.closed
 
 
 def test_unknown_registration_error_is_not_treated_as_absent(manager, monkeypatch):

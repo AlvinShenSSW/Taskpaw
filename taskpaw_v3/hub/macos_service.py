@@ -16,6 +16,8 @@ import logging.handlers
 import math
 import os
 import plistlib
+import re
+import selectors
 import shutil
 import stat
 import subprocess
@@ -67,6 +69,45 @@ def _command(argv: list[str], *, timeout: float = COMMAND_TIMEOUT) -> int:
         raise ServiceError("command_timeout") from None
     except OSError:
         raise ServiceError("command_unavailable") from None
+
+
+def _query(argv: list[str]) -> str:
+    """Bound the legacy launchctl evidence read, including its owned child."""
+    child = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert child.stdout is not None
+    data = bytearray()
+    deadline = time.monotonic() + COMMAND_TIMEOUT
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ServiceError("service_registration_unknown")
+                chunk = os.read(child.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > 16384:
+                    raise ServiceError("service_registration_unknown")
+        if child.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+            raise ServiceError("service_registration_unknown")
+        return data.decode("utf-8", errors="strict")
+    except (UnicodeError, subprocess.TimeoutExpired):
+        raise ServiceError("service_registration_unknown") from None
+    finally:
+        child.stdout.close()
+        if child.poll() is None:
+            child.kill()  # Only this just-created query process, never a service PID.
+            try:
+                child.wait(timeout=COMMAND_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                raise ServiceError("service_registration_unknown") from None
 
 
 def _directory(path: Path, *, create: bool = False) -> None:
@@ -194,6 +235,41 @@ class Manager:
         if result == 113:
             return False
         raise ServiceError("service_registration_unknown")
+
+    def _verify_registration(self) -> None:
+        # `print` is explicitly not an API. The documented legacy `list` format
+        # is only positive evidence when these complete fields are recognized.
+        # Format/domain changes fail closed; no PID is parsed or acted upon.
+        if (
+            _query(["/bin/launchctl", "manageruid"]).strip() != str(os.getuid())
+            or _query(["/bin/launchctl", "managername"]).strip() != "Aqua"
+        ):
+            raise ServiceError("service_registration_unknown")
+        text = _query(["/bin/launchctl", "list", LABEL])
+        if not text.startswith("{\n") or not text.endswith("};\n"):
+            raise ServiceError("service_registration_unknown")
+        for key, expected, optional in (
+            ("Label", LABEL, False),
+            ("LimitLoadToSessionType", "Aqua", False),
+            ("Program", str(self.runtime), True),
+        ):
+            lines = re.findall(r'^[ \t]*"' + key + r'".*$', text, re.MULTILINE)
+            if optional and not lines:
+                continue
+            if lines != [f'\t"{key}" = "{expected}";']:
+                raise ServiceError("service_registration_conflict")
+        blocks = re.findall(
+            r'^\t"ProgramArguments" = \(\n((?:\t\t"[^"\r\n]*";\n)+)\t\);$',
+            text,
+            re.MULTILINE,
+        )
+        expected_args = "".join(
+            f'\t\t"{arg}";\n' for arg in (str(self.runtime), "hub-service", "run")
+        )
+        if len(
+            re.findall(r'^[ \t]*"ProgramArguments"', text, re.MULTILINE)
+        ) != 1 or blocks != [expected_args]:
+            raise ServiceError("service_registration_conflict")
 
     def _plist_bytes(self) -> bytes:
         return plistlib.dumps(
@@ -419,8 +495,10 @@ class Manager:
     def _stop(self) -> None:
         record = self._runtime_record()
         identities = self._processes()
-        if self._loaded() and self._launch("bootout", self.target) != 0:
-            raise ServiceError("stop_failed")
+        if self._loaded():
+            self._verify_registration()
+            if self._launch("bootout", self.target) != 0:
+                raise ServiceError("stop_failed")
         deadline = time.monotonic() + STOP_TIMEOUT
         while True:
             if (
@@ -439,6 +517,7 @@ class Manager:
         if not self._loaded():
             if self._launch("bootstrap", self.domain, str(self.plist)) != 0:
                 raise ServiceError("start_failed")
+        self._verify_registration()
         deadline = time.monotonic() + START_TIMEOUT
         while not self._ready():
             if time.monotonic() >= deadline:
@@ -449,8 +528,9 @@ class Manager:
         """An interrupted upgrade has only two admitted runtimes and manifests."""
         journal = _json(self.journal)
         if (
-            set(journal) != {"old", "new", "was_loaded"}
+            set(journal) != {"old", "new", "was_loaded", "phase"}
             or type(journal["was_loaded"]) is not bool
+            or journal["phase"] not in ("prepared", "committed")
         ):
             raise ServiceError("invalid_upgrade_record")
         old, new = journal["old"], journal["new"]
@@ -468,6 +548,18 @@ class Manager:
             _file(self.plist)
             if self.plist.read_bytes() != self._plist_bytes():
                 raise ServiceError("installation_modified")
+        if journal["phase"] == "committed":
+            # Success is durable before deleting the only old executable.
+            # Cleanup after this point moves forward and never stops the new job.
+            if current != new or _digest(self.runtime) != new["sha256"]:
+                raise ServiceError("installation_modified")
+            self._ownership()
+            if self._loaded():
+                self._verify_registration()
+            self.staged.unlink(missing_ok=True)
+            self.previous.unlink(missing_ok=True)
+            self.journal.unlink()
+            return
         self._stop()
         if old["sha256"]:
             if self.previous.exists():
@@ -520,9 +612,13 @@ class Manager:
             raise ServiceError("signature_invalid")
         new = self._manifest(digest)
         was_loaded = self._loaded()
-        atomic_json(
-            self.journal, {"old": current, "new": new, "was_loaded": was_loaded}
-        )
+        journal = {
+            "old": current,
+            "new": new,
+            "was_loaded": was_loaded,
+            "phase": "prepared",
+        }
+        atomic_json(self.journal, journal)
         try:
             self._stop()
         except ServiceError:
@@ -542,6 +638,8 @@ class Manager:
             except (ServiceError, OSError):
                 raise ServiceError("upgrade_incomplete") from None
             raise ServiceError("upgrade_failed_rolled_back") from None
+        journal["phase"] = "committed"
+        atomic_json(self.journal, journal)
         self.previous.unlink(missing_ok=True)
         self.journal.unlink()
 
@@ -592,6 +690,8 @@ class Manager:
             elif action == "start":
                 self._start()
             loaded = self._loaded()
+            if loaded:
+                self._verify_registration()
             return {
                 "ok": True,
                 "state": "running"
