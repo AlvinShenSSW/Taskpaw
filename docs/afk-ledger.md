@@ -114,3 +114,12 @@ rebase this branch onto main before merging. Leave open, never deploy.
   wire fields and hardware-isolated tests preserve the existing trust boundary.
   Full remote CI, CTO, Claude and Kimi are pending at this source checkpoint;
   their exact-head results will be recorded on the PR and in private run evidence.
+- Initial CI exposed a pre-existing Windows Rust test budget: the success path
+  launching a Node parent and child returned false with a three-second limit.
+  The original CI log does not prove why. An isolated native diagnostic using
+  identical baseline/current helper sources reproduced the same assertion with
+  a controlled 3.5-second child startup delay, after successful Job assignment.
+  Only the test's success budget now matches the neighboring ten-second tests;
+  its intentional timeout stays three seconds, all descendant PID/handle checks
+  remain, and production helper limits are unchanged. The controlled delayed
+  case passes after that change. A fresh complete CI matrix is required.
