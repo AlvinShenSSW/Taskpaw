@@ -148,7 +148,8 @@ def remove_work_tree(path: Path, root: Path, *, operation_id: str) -> None:
                 # never chmod a link (including a directory reparse point).
                 if (
                     os.name == "nt"
-                    and info.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+                    and getattr(info, "st_file_attributes", 0)
+                    & stat.FILE_ATTRIBUTE_READONLY
                 ):
                     target.chmod(stat.S_IWRITE)
                 target.unlink()
