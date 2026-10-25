@@ -3164,7 +3164,11 @@ def test_i216_r1_folder_update_timeout_never_resumes_retired_owner(tmp_path):
         assert not old.thread.is_alive() and old.stop.is_set()
         assert old.instance.checks == 1 and events == []
         assert sup.stop_result("owned", 1)["complete"]
-        assert adm.set_enabled("owned", True)["ok"]
+        # The 200 ms budget above forces the retired-owner stop timeout. Normal
+        # replacement startup also persists and scans; give it the default budget.
+        adm._timeout = 10.0
+        started = adm.set_enabled("owned", True)
+        assert started["ok"], started
         current = sup._monitors["owned"]
         assert current is not old and len(created) == 3
         stale_emit("done", "old", "old")

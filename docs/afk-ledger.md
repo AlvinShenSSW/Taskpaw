@@ -135,3 +135,14 @@ rebase this branch onto main before merging. Leave open, never deploy.
   The original CI cause remains unknown. That test retains both strict single-run
   assertions and now reports before-restart evidence and the independent Jasna
   count on failure; no production retry, lease or restart behavior changed.
+- Both Linux matrices subsequently passed in full (7,161/7,171 passing), as did
+  macOS (7,267 passing). Windows completed with 7,400 passed, 200 skipped and one
+  existing admin test failure: its normal replacement enable returned `ok=false`
+  after the old owner had stopped. The CI log did not include the return payload.
+  Baseline/current controls both passed normally; injecting 350 ms into only that
+  enable's persistence reproduced the failure on both, with the legitimate
+  `saved/starting/persisted_runtime_pending` result under the test's 200 ms budget.
+  Restoring the default ten-second budget only after the intentional retirement
+  timeout/old-owner completion passed the delayed control. All owner-identity and
+  stale-emitter isolation assertions remain. This is a test-budget repair, not a
+  proven explanation of the original CI trigger or a production behavior change.
