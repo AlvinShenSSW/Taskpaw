@@ -579,7 +579,7 @@ describe("影片队列 / 待确认 / 异常", () => {
     const names = within(line).getAllByRole("listitem").map((li) => li.textContent);
     expect(names.slice(0, 3)).toEqual(["入库扫描（已完成）", "待处理（已完成）", "修复"]);
     expect(within(line).getByText("修复")).toHaveAttribute("aria-current", "step");
-    expect(screen.getAllByText("LTX · Encode").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("LTX · 编码").length).toBeGreaterThan(0);
     expect(screen.getByText("等待收件检查")).toBeInTheDocument();
     expect(screen.queryByText("星河之外")).toBeNull(); // unplanned films are not in the queue
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索影片、演员或编号" }), { target: { value: "演员月色" } });
@@ -1656,9 +1656,8 @@ describe("#305 dispatch board", () => {
       REMOTE_ROWS[1], REMOTE_ROWS[0],
     ];
   }
-  function setup() {
+  function setup(films = dispatchRows()) {
     mockApi();
-    const films = dispatchRows();
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, packages: [] });
     vi.spyOn(api, "workflowDevices").mockResolvedValue(REMOTE_DEVICES);
     vi.spyOn(api, "workflowFilm").mockResolvedValue(detail("pin", { ...films[1] }));
@@ -1671,23 +1670,41 @@ describe("#305 dispatch board", () => {
     await screen.findByRole("heading", { level: 1, name: "队列 · 派单状态" });
     const table = within(screen.getByRole("table", { name: "派单状态" }));
     for (const label of ["影片", "机器", "状态", "说明"]) expect(table.getByRole("columnheader", { name: label })).toBeInTheDocument();
-    for (const label of ["排队中（自动）", "排队中 · 等 5070 Ti", "下载到 5070 Ti · 25%", "已到 5070 Ti · 等开始", "修复中 · 5070 Ti"]) {
-      expect(table.getByText(label, { selector: ".chip" })).toBeInTheDocument();
+    expect(table.getAllByText("排队中", { selector: ".status-badge" })).toHaveLength(4);
+    expect(table.getByText("LTX · 编码", { selector: ".status-badge" })).toBeInTheDocument();
+    for (const label of ["下载到 5070 Ti · 25%", "已到 5070 Ti · 等开始"]) {
+      // Notes remain factual; a note alone cannot create an executing state or a progress bar.
+      const note = table.getByText(label, { selector: "td" });
+      expect(within(note.closest("tr")!).queryByRole("progressbar")).not.toBeInTheDocument();
     }
-    expect(table.getByText("自动", { selector: "td" })).toBeInTheDocument();
-    expect(screen.getByText("修复中 白昼回声（41%）")).toBeInTheDocument();
-    expect(screen.getByText("下一部已到：READY")).toBeInTheDocument();
+    expect(table.getAllByText("自动派单")).toHaveLength(3);
+    const worker = within(screen.getByRole("region", { name: W.ti70.name }));
+    expect(worker.getByText("LTX · 编码")).toBeInTheDocument();
+    expect(worker.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "41");
+    expect(screen.getByText("下一部：READY · 已到 5070 Ti · 等开始")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: W.ti3.name })).toHaveTextContent("设备失联");
     expect(screen.getByRole("region", { name: W.ti3.name })).not.toHaveTextContent("空闲");
     expect(screen.getAllByText("无预取").length).toBeGreaterThan(0);
   });
   it("uses the same queue states in overview and drawer", async () => {
     setup();
-    expect(await screen.findByText("排队中（自动）", { selector: ".chip" })).toBeInTheDocument();
-    expect(screen.getByText("修复中 · 5070 Ti", { selector: ".chip" })).toBeInTheDocument();
+    expect((await screen.findAllByText("排队中", { selector: ".status-badge" })).length).toBeGreaterThan(0);
+    expect(screen.getByText("LTX · 编码", { selector: ".status-badge" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看 PIN 详情" }));
     const drawer = within(await screen.findByRole("dialog"));
-    expect(await drawer.findByText("排队中 · 等 5070 Ti", { selector: ".chip" })).toBeInTheDocument();
+    expect(await drawer.findByText("排队中", { selector: ".status-badge" })).toBeInTheDocument();
+  });
+  it.each([["uploading", "回传中"], ["finishing", "提交结果"]] as const)("keeps worker strip and row on %s without old compute percent", async (phase, label) => {
+    const film = REMOTE_ROWS[1];
+    setup([{ ...film, steps: film.steps.map((step) => step.key === "restore" ? { ...step, phase } : step) }]);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    await screen.findByRole("heading", { level: 1, name: "队列 · 派单状态" });
+    for (const region of [screen.getByRole("table", { name: "派单状态" }), screen.getByRole("region", { name: W.ti70.name })]) {
+      expect(within(region).getByText(label, { selector: ".status-badge" })).toBeInTheDocument();
+      expect(within(region).queryByRole("progressbar")).not.toBeInTheDocument();
+      expect(region).not.toHaveTextContent(/41%|修复中|加载模型/);
+    }
   });
 });
 

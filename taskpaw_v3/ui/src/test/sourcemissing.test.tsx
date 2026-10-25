@@ -75,7 +75,7 @@ describe("概览", () => {
     wrap(<MediaWorkspace />);
     const panel = (await screen.findByRole("heading", { name: "片源丢失 · 1" })).closest("section") as HTMLElement;
     expect(within(panel).getByText("ABF-394")).toBeInTheDocument();
-    expect(within(panel).getByText("片源丢失", { selector: ".chip" })).toBeInTheDocument();
+    expect(within(panel).getByText("片源丢失", { selector: ".status-badge" })).toBeInTheDocument();
     expect(within(panel).getAllByText(NOTE)).toHaveLength(2); // the panel's subtitle and the row's note
     expect(panel.querySelector(".panel-head p")).toHaveTextContent(/^INBOX 里的文件已不存在 · 不再派发$/);
     fireEvent.click(within(panel).getByRole("button", { name: "处理 ABF-394" }));

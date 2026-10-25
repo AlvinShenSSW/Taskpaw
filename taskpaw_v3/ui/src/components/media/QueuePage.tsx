@@ -5,13 +5,27 @@ import { useEffect, useState } from "react";
 import { api, type WorkflowFilms } from "../../api";
 import { fmtKwhShort } from "../power/powerModel";
 import {
-  ACTIVE_STATES, fmtBytes, fmtDateTime, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, ltxOf, machineOf, matchesStage, restoreLive, restoreStep, statusLabel,
+  ACTIVE_STATES, archiveBytes, archiveLive, fmtBytes, fmtDateTime, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, machineOf, matchesStage,
   readFilmTiming, STAGE_OPTIONS, stepDurations, workItems, type StageFilter, type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
 import { DEVICES_KEY, errorText, useWorkspace } from "./workspace";
+import { presentFilmStatus, StatusBadge, StatusProgress } from "./statusPresentation";
 
 type Resolution = "all" | "4K" | "1080p";
+
+function queueDetail(item: WorkItem): string | null | undefined {
+  if (item.kind !== "film") return item.pkg.reason;
+  if (item.status === "completed") return `完成于 ${fmtDateTime(item.row.completed_at)}`;
+  if (item.row.note || item.row.route?.reason) return item.row.note || item.row.route?.reason;
+  if (item.status !== "archiving") return null;
+  const step = item.row.steps.find((s) => s.key === "archive" && s.state === "running");
+  if (!step) return "已确认目标，等待归档任务开始";
+  const live = archiveLive(step);
+  const bytes = live?.phase === "verifying" ? live.verified_bytes : live?.copied_bytes;
+  return live && Number.isFinite(bytes) && live.total_bytes > 0
+    ? `${live.phase === "verifying" ? "校验" : "复制"} ${archiveBytes(bytes as number, live.total_bytes)}` : "等待进度回报";
+}
 
 // 影片队列 (§4.2): every film past 待处理, plus the INBOX packages still arriving; packages that
 // need the operator are on 异常.
@@ -24,9 +38,9 @@ export function QueuePage() {
   const remote = (!ws.readOnly && devices.data?.remote_workers) || ws.data.filmItems.some((i) => i.kind === "film" && isRemoteRow(i.row));
   const workers = !ws.readOnly && devices.data?.remote_workers ? devices.data.workers
     .filter((w) => w.admission_state !== "revoked" && w.enrollment_state !== "retired" && w.enrollment_state !== "pending_pairing")
-    .map((w) => ({ id: w.worker_id, name: w.name }))
+    .map((w) => ({ id: w.worker_id, name: w.name, live: w.heartbeat.state }))
     : [...new Map(ws.data.filmItems.flatMap((i) => i.kind === "film" && i.row.route && i.row.route.live !== "local"
-      ? [[i.row.route.machine.id, i.row.route.machine] as const] : [])).values()];
+      ? [[i.row.route.machine.id, { ...i.row.route.machine, live: i.row.route.live }] as const] : [])).values()];
   const [page, setPage] = useState(1);
   const q = search.trim().toLowerCase();
   const includeDone = ws.queueStage === "all" && resolution === "all" && !q;
@@ -89,12 +103,14 @@ export function QueuePage() {
           const current = assigned.find((i) => isRestoring(i.status));
           const first = assigned.find((i) => i.kind === "film" && i.row.route?.position === 0);
           const next = assigned.find((i) => i.kind === "film" && i.status === "inbox" && i.row.route?.position === 1);
-          const live = current?.kind === "film" ? restoreLive(restoreStep(current.row)) : null;
-          const percent = current?.kind === "film" ? ltxOf(current.row)?.percent ?? live?.basic?.percent ?? live?.scan?.percent : null;
-          return <section className="panel panel-body" key={w.id} aria-label={w.name}>
-            <h2>{w.name}</h2>
-            <p>{current ? `修复中 ${itemTitle(current)}${percent != null ? `（${Math.round(percent)}%）` : ""}` : first?.kind === "film" ? statusLabel(first.status, first.row) : "空闲"}</p>
-            <p>{next?.kind === "film" ? next.row.note?.startsWith("已到 ") ? `下一部已到：${itemTitle(next)}` : next.row.note ?? "无预取" : "无预取"}</p>
+          const active = current ?? first;
+          const presentation = active ? presentFilmStatus(active.status, active.kind === "film" ? active.row : undefined) : null;
+          return <section className="panel panel-body queue-worker" key={w.id} aria-label={w.name}>
+            <div className="queue-worker-title"><h2>{w.name}</h2><StatusBadge status={w.live === "online" ? "online"
+              : w.live === "lost" ? "device_lost" : "heartbeat_wait"} /></div>
+            <p>{presentation && active ? <><StatusBadge status={presentation.key} /> <span>{itemTitle(active)}</span></> : <StatusBadge status="idle" />}</p>
+            {presentation && active && <StatusProgress presentation={presentation} label={itemTitle(active)} />}
+            <p className="small muted">{next?.kind === "film" ? `下一部：${itemTitle(next)}${next.row.note ? ` · ${next.row.note}` : ""}` : "无预取"}</p>
           </section>;
         })}
       </div>}
@@ -126,15 +142,16 @@ export function QueuePage() {
       {needsHistory && history.isError && <p role="status">{completed ? "暂时无法读取该页，保留上次结果。" : "暂时无法读取已完成影片，请稍后重试。"}</p>}
       {films.length ? (
         remote && !completed ? <div className="panel panel-body">
-          <table className="files-table" aria-label="派单状态">
+          <table className="files-table dispatch-table" aria-label="派单状态">
             <thead><tr>{["影片", "机器", "状态", "说明"].map((label) => <th key={label} scope="col">{label}</th>)}</tr></thead>
             <tbody>{films.map((item) => <tr key={item.id} data-film={item.id}>
               <td>{item.kind === "film" ? <button type="button" className="link-btn" aria-label={`查看 ${itemTitle(item)} 详情`}
                 onClick={() => ws.openDetail(item.id)}>{itemTitle(item)}</button> : itemTitle(item)}</td>
-              <td>{item.kind === "film" ? machineOf(item.row) : "本机"}</td>
-              <td><StatusChip status={item.status} film={item.kind === "film" ? item.row : undefined} /></td>
-              <td>{item.kind === "film" ? item.status === "completed" ? `完成于 ${fmtDateTime(item.row.completed_at)}`
-                : item.row.note || item.row.route?.reason : item.pkg.reason}</td>
+              <td>{item.kind === "film" ? <div className="queue-machine">{machineOf(item.row) === "本机" ? <StatusBadge status="local" /> : machineOf(item.row)}
+                {item.row.pin && <StatusBadge status={item.row.pin.worker_id ? "pinned" : "auto"} />}</div> : <StatusBadge status="local" />}</td>
+              <td><StatusChip status={item.status} film={item.kind === "film" ? item.row : undefined} />
+                <StatusProgress presentation={presentFilmStatus(item.status, item.kind === "film" ? item.row : undefined)} label={itemTitle(item)} /></td>
+              <td>{queueDetail(item)}</td>
             </tr>)}</tbody>
           </table>
         </div> : <div className="queue-grid">{films.map((item) => <FilmCard key={item.id} item={item} />)}</div>
@@ -177,7 +194,7 @@ function FilmCard({ item }: { item: WorkItem }) {
         <StageBlock item={item} />
         {intake && (
           <>
-            <div className="progress" role="progressbar" aria-label={`${title} 收件复制进度`} aria-valuemin={0}
+            <div className="progress" role="progressbar" aria-label={`${title} 收件进度`} aria-valuemin={0}
               aria-valuemax={100} aria-valuenow={intakePercent}><span style={{ width: `${intakePercent}%` }} /></div>
             <div className="stage-detail"><span className="mono">{fmtBytes(intake.bytes_completed)} / {fmtBytes(intake.total)}</span></div>
           </>

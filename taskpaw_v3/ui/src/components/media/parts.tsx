@@ -6,14 +6,15 @@ import CloseIcon from "@mui/icons-material/Close";
 import { CircularProgress, Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useContext, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import { api, type FilmRemote, type StepKey, type WorkflowStep } from "../../api";
+import { api, type StepKey, type WorkflowStep } from "../../api";
 import {
   archiveBytes, archiveLive, asrLive, asrSummary, currentStep, elapsedClock, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
-  statusLabel, STATUS_META, STEP_LABEL,
+  STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
 import { useNow } from "./useNow";
 import { mediaSourceKey, WorkspaceContext } from "./workspace";
+import { presentFilmStatus, StatusBadge, type StatusFilm } from "./statusPresentation";
 
 export function Icon({ of: C }: { of: SvgIconComponent }) {
   return <C className="icon" aria-hidden />;
@@ -23,8 +24,8 @@ export function Chip({ tone = "neutral", children }: { tone?: ChipTone; children
   return <span className={`chip${tone === "neutral" ? "" : ` ${tone}`}`}>{children}</span>;
 }
 
-export function StatusChip({ status, film }: { status: StatusKey; film?: FilmRemote & { note?: string | null } }) {
-  return <Chip tone={STATUS_META[status][1]}>{statusLabel(status, film)}</Chip>;
+export function StatusChip({ status, film }: { status: StatusKey; film?: StatusFilm }) {
+  return <StatusBadge status={presentFilmStatus(status, film).key} />;
 }
 
 export function Notice({ tone, icon, children, id }: {
@@ -170,7 +171,7 @@ function RestorePhaseBlock({ title, live, beat }: { title: string; live: Restore
     return (
       <>
         <div className="film-stage">
-          <strong className="t-green">扫描马赛克</strong>
+          <strong className="t-restore">扫描马赛克</strong>
           <span className="mono">{scan.percent_text === undefined ? "—" : `${scan.percent_text}%`} <span className="muted small">本阶段</span></span>
         </div>
         <div className="progress" role="progressbar" aria-label={`${title} 扫描马赛克 本阶段进度`}
@@ -191,7 +192,7 @@ function RestorePhaseBlock({ title, live, beat }: { title: string; live: Restore
     return (
       <>
         <div className="film-stage">
-          <strong className="t-green">BasicVSR++ 修复</strong>
+          <strong className="t-restore">BasicVSR++ 修复</strong>
           <span className="mono">{Math.round(basic.percent)}% <span className="muted small">本片段</span></span>
         </div>
         <div className="progress" role="progressbar" aria-label={`${title} BasicVSR++ 修复 本片段进度`}
@@ -209,7 +210,7 @@ function RestorePhaseBlock({ title, live, beat }: { title: string; live: Restore
   const detail = live.split ? SPLIT_LABEL[live.split.kind] : live.console ?? "等待 Jasna 的第一行输出";
   return (
     <>
-      <div className="film-stage"><strong className="t-green" data-testid="restore-heartbeat">{beat}</strong></div>
+      <div className="film-stage"><strong className="t-restore" data-testid="restore-heartbeat">{beat}</strong></div>
       <div className="stage-detail"><span className={live.split ? undefined : "mono"} style={ELLIPSIS} title={detail}>{detail}</span></div>
       <ParamsLine live={live} />
     </>
@@ -262,7 +263,7 @@ export function StageBlock({ item }: { item: WorkItem }) {
     return (
       <>
         <div className="film-stage">
-          <strong className="t-green">{stageLabel}</strong>
+          <strong className="t-restore">{stageLabel}</strong>
           <span className="mono">{percent === undefined ? "—" : `${ltx?.percent_text ?? percent}%`} <span className="muted small">本阶段</span></span>
         </div>
         <div className="progress" role="progressbar" aria-label={`${title} ${stageLabel} 本阶段进度`}
@@ -308,7 +309,7 @@ export function StepLine({ steps, title, durations }: {
           const percent = asrLive(s)?.percent ?? archiveLive(s)?.percent;
           const activeLabel = percent == null ? STEP_LABEL[s.key] : `${STEP_LABEL[s.key]} · ${percent}%`;
           return (
-            <li key={s.key} className={failed ? "failed" : "current"} aria-current="step" data-step={s.key}>
+            <li key={s.key} className={failed ? "failed" : "current"} aria-current="step" data-step={s.key} data-state={s.state}>
               {s.machine ? (
                 // P2-3 R15: the stage runs on a worker — its 设备 under the step
                 <span className="step-label">{activeLabel}<span className="step-time"><span className="sr-only">设备 </span>{s.machine.name}</span></span>
