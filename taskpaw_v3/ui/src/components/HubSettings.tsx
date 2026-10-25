@@ -5,7 +5,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, HttpError, type HubSettingsState, type HubSettingsValues, type OpenclawTest } from "../api";
+import { api, HttpError, restartSupported, type HubSettingsState, type HubSettingsValues, type OpenclawTest } from "../api";
 import { RestartBanner } from "./RestartBanner";
 
 // #299 R14/R15 (board Hub-Settings): the Hub's settings — OpenClaw 启用 / 地址 / 令牌 / 测试发送, 主控连接 (the
@@ -97,7 +97,14 @@ function HubForm({ state }: { state: HubSettingsState }) {
   const restartText = `已保存，重启 TaskPaw Hub 后生效（${state.fields.map((f) => LABELS[f] ?? f).join("、")}）`;
   return (
     <Stack spacing={2}>
-      {state.restart_required && <RestartBanner role="hub" text={restartText} />}
+      {state.restart_required && (restartSupported("hub") ? <RestartBanner role="hub" text={restartText} /> : (
+        <Alert severity="info" role="status">{restartText}。请在终端显式重启后台服务：
+          <Typography component="code" variant="body2" sx={{ display: "block", overflowWrap: "anywhere" }}>
+            {'"/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service restart'}
+          </Typography>
+          如安装到用户 Applications，请使用对应的应用路径。关闭或重新打开监控窗口不会重启后台服务。
+        </Alert>
+      ))}
       <Stack direction="row" spacing={1} justifyContent="flex-end">
         <Button variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={!dirty || save.isPending}
           onClick={() => { setForm(formOf(saved)); setErrors({}); setMsg(null); }}>撤销更改</Button>

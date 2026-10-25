@@ -24,6 +24,10 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     role = argv[0].lower() if argv else "agent"
+    if role == "hub-service":
+        from taskpaw_v3.hub.macos_service import main as hub_service_main
+
+        return hub_service_main(argv[1:])
     if role == "workflow-intake":
         from taskpaw_v3.workflow.intake_worker import main as intake_main
 

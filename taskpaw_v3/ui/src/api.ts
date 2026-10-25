@@ -1,3 +1,6 @@
+import { hubRequest } from "./hubTransport";
+import type { HubNotificationHealth, HubStatusHealth, HubEventChannel } from "./hubHealth";
+
 // Minimal REST client for the V3 backends.
 //
 // Native credentials are injected into the trusted main frame; development
@@ -83,6 +86,8 @@ export interface HubServer {
   online?: boolean;
   last_seen?: string | null;
   snapshot?: AgentStatus | null;
+  status_health?: HubStatusHealth | null;
+  event_channel?: HubEventChannel | null;
 }
 
 export interface HubStatus {
@@ -90,6 +95,7 @@ export interface HubStatus {
   servers: HubServer[];
   acks: Record<string, number>;
   self: Record<string, MonitorSnapshot>;
+  notifications?: HubNotificationHealth;
 }
 
 // A selectable monitor type from /control/plugins (#57): its form schema drives
@@ -681,10 +687,11 @@ export class HttpError extends Error {
     public readonly fields?: Record<string, string>) { super(message); }
 }
 
-async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
+async function get<T>(role: "agent" | "hub", path: string, signal?: AbortSignal): Promise<T> {
   const { baseUrl, controlToken } = cfg(role);
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await (role === "hub" ? hubRequest : fetch)(`${baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${controlToken}` },
+    ...(role === "hub" ? { signal } : {}),
   });
   checkUnauthorized(role, res);
   if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
@@ -705,7 +712,7 @@ export class FilmRequestError extends Error {
 
 async function hubFilmGet(path: string): Promise<unknown> {
   const { baseUrl, controlToken } = cfg("hub");
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await hubRequest(`${baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${controlToken}` },
   });
   checkUnauthorized("hub", res);
@@ -730,7 +737,7 @@ async function send<T>(
   body?: unknown,
 ): Promise<T> {
   const { baseUrl, controlToken } = cfg(role);
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await (role === "hub" ? hubRequest : fetch)(`${baseUrl}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${controlToken}`,
@@ -770,7 +777,7 @@ async function send<T>(
 // token and the packaged CSP only allows `img-src 'self' data:`.
 async function image(path: string, role: "agent" | "hub" = "agent"): Promise<string> {
   const { baseUrl, controlToken } = cfg(role);
-  const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
+  const res = await (role === "hub" ? hubRequest : fetch)(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
   checkUnauthorized(role, res);
   if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
   const blob = await res.blob();
@@ -806,7 +813,7 @@ export const api = {
   },
   logDays: () => get<LogDays>("agent", "/control/logs?days=true"),
   agentStatus: () => get<AgentStatus>("agent", "/control/status"),
-  hubStatus: () => get<HubStatus>("hub", "/status"),
+  hubStatus: (context?: { signal?: AbortSignal }) => get<HubStatus>("hub", "/status", context?.signal),
   plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
   // Full agent config (secrets masked as "***") — used to pre-fill the edit form.
   config: () => get<AgentConfigView>("agent", "/control/config"),
@@ -827,12 +834,12 @@ export const api = {
   startMonitor: (name: string) => send<MonitorMutationResult>("agent", "POST", `/control/monitors/start${q(name)}`),
   stopMonitor: (name: string) => send<MonitorMutationResult>("agent", "POST", `/control/monitors/stop${q(name)}`),
   // The Hub reads durable aggregated event history, by server id + level.
-  hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
+  hubEvents: (p: { server?: number; level?: string; limit?: number } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (p.server != null) qs.set("server", String(p.server));
     if (p.level) qs.set("level", p.level);
     qs.set("limit", String(p.limit ?? 200));
-    return get<{ events: EventItem[] }>("hub", `/events?${qs.toString()}`);
+    return get<{ events: EventItem[] }>("hub", `/events?${qs.toString()}`, signal);
   },
   // Manage the agents the Hub polls, from the dashboard (#124). Bearer-gated like
   // the rest of the Hub API (#106); errors surface the backend `detail`.
@@ -946,7 +953,7 @@ export const api = {
   restartState: () => get<RestartState>("agent", "/control/restart"),
   restart: (role: ControlRole, boot_id: string) =>
     send<{ restarting: boolean }>(role, "POST", role === "agent" ? "/control/restart" : "/restart", { boot_id }),
-  hubSettings: () => get<HubSettingsState>("hub", "/config/settings"),
+  hubSettings: (context?: { signal?: AbortSignal }) => get<HubSettingsState>("hub", "/config/settings", context?.signal),
   hubSaveSettings: (patch: Partial<Record<keyof HubSettingsValues | "controller_server_id", unknown>>) =>
     send<{ ok: boolean; restart_required: boolean; fields: string[] }>("hub", "PUT", "/config/settings", patch),
   hubOpenclawTest: (url: string, token: string) => send<OpenclawTest>("hub", "POST", "/config/openclaw/test", { url, token }),

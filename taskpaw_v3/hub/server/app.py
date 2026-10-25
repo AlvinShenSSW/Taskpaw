@@ -744,6 +744,7 @@ def run_hub(
     *,
     config_path: Path | None = None,
     yaml_config: HubConfig | None = None,
+    reclaim_stale: bool = True,
 ) -> GracefulShutdown:
     import uvicorn
 
@@ -763,13 +764,14 @@ def run_hub(
     shutdown = shutdown or GracefulShutdown()
     _guard_bind_exposure(config)
     strip_control_env()
-    reclaim_ports_from_stale_instance(
-        [
-            (config.bind_host, config.bind_port, "hub read API"),
-            (config.control_host, config.control_port, "hub control API"),
-        ],
-        role="hub",
-    )
+    if reclaim_stale:
+        reclaim_ports_from_stale_instance(
+            [
+                (config.bind_host, config.bind_port, "hub read API"),
+                (config.control_host, config.control_port, "hub control API"),
+            ],
+            role="hub",
+        )
     lease = FileLease(db_lease_path(store.db_path)).acquire()
     read_sock = control_sock = None
     try:

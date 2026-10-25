@@ -17,27 +17,12 @@ import { Settings } from "./Settings";
 import { ServiceIcon } from "../components/ServiceIcon";
 import { compareSemver, hubFilmKind } from "./hubDashboard.helpers";
 import { requestFailed } from "../components/requestEvidence";
+import { hubServerHealth, useHubResponseAge, type HubHealth } from "../hubHealth";
+import { HubSampleEvidence, HubNotificationEvidence } from "../components/HubHealth";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { MEDIA_FILMS_KEY, mediaSourceKey } from "../components/media/workspace";
 
-// ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
-// Derived from #96's per-server `online` + `snapshot` (NOT `acks`, which is an
-// event-id cursor, not heartbeat freshness — see the #95 design doc).
-type Health = "ok" | "degraded" | "offline";
-const HEALTH_STATE: Record<Health, string> = { ok: "ok", degraded: "degraded", offline: "stopped" };
-
-// Any monitor failure state (theme.statusColors) counts as degraded — not just
-// "alert". Plugins (Lada/ComfyUI/…) emit "error"/"degraded" on service failures,
-// and the worker can be alive while the monitored service is down (Codex 外门).
-const PROBLEM_STATES = new Set(["alert", "error", "degraded"]);
-function monitorProblem(m: MonitorSnapshot): boolean {
-  return m.alive === false || m.degraded === true || PROBLEM_STATES.has(m.state);
-}
-function serverHealth(s: HubServer): Health {
-  if (!s.online || !s.enabled) return "offline";
-  const mons = s.snapshot?.monitors ?? {};
-  return Object.values(mons).some(monitorProblem) ? "degraded" : "ok";
-}
+const HEALTH_STATE: Record<HubHealth, string> = { ok: "ok", degraded: "degraded", offline: "stopped", stale: "unknown", disabled: "disabled" };
 
 // Per-machine CPU/MEM from the agent's host_metrics monitor in its snapshot (#113).
 // Select by type_id === "host_metrics", NOT by scanning for cpu_pct/mem_pct — other
@@ -75,24 +60,27 @@ function fmtSeen(iso?: string | null): string {
 // summary + grid of drill-down machine cards + the Hub's own host-health
 // self-monitor, and an aggregated event log (#44). No marketing hero/CTA.
 export function HubDashboard() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const status = useQuery({
     queryKey: ["hubStatus"], queryFn: api.hubStatus,
     refetchInterval: 5000, // #95: auto-refresh like the agent console.
   });
   const { data, error, isLoading } = status;
+  const { elapsed, outdated } = useHubResponseAge(status.dataUpdatedAt);
+  const failed = requestFailed(status.failureCount, status.errorUpdatedAt, status.dataUpdatedAt, error);
+  const current = !!data && !failed && !outdated;
   const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings" | "media">("fleet");
   const [level, setLevel] = useState<string>("");
   const [serverFilter, setServerFilter] = useState<string>(""); // "" = all servers
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
     queryKey: ["hubEvents", level, serverFilter],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const id = serverFilter ? Number(serverFilter) : NaN;
       return api.hubEvents({
         level: level || undefined,
         server: Number.isFinite(id) ? id : undefined, // never ?server=NaN (Kimi)
-      });
+      }, signal);
     },
     refetchInterval: 5000, enabled: tab === "events",
   });
@@ -112,8 +100,8 @@ export function HubDashboard() {
     }
   }, [servers, serverFilter, status.isSuccess]);
 
-  const counts = { ok: 0, degraded: 0, offline: 0 };
-  for (const s of servers) counts[serverHealth(s)] += 1;
+  const counts = { ok: 0, degraded: 0, offline: 0, stale: 0, disabled: 0 };
+  for (const s of servers) counts[hubServerHealth(s, current)] += 1;
 
   return (
     <Stack spacing={1.5}>
@@ -166,10 +154,13 @@ export function HubDashboard() {
         </Card>
       ) : isLoading ? (
         <Typography>{t("common.loading")}</Typography>
-      ) : error ? (
+      ) : error && !data ? (
         <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>
       ) : (
         <Stack spacing={2}>
+          {failed ? <Alert severity="error">{t("hub.unreachable", { error: String(error ?? "request failed") })}</Alert>
+            : outdated && <Alert severity="warning">{i18n.language.startsWith("en") ? "Hub response is outdated; showing last known data" : "Hub 响应已过期，正在显示上次记录"}</Alert>}
+          <HubNotificationEvidence health={data?.notifications} elapsed={elapsed} current={current} />
           <Stack direction="row" alignItems="center" spacing={2} sx={{ flexWrap: "wrap" }}>
             <Typography variant="overline" color="text.secondary">
               {t("hub.fleetTitle", {
@@ -183,18 +174,20 @@ export function HubDashboard() {
                 <HealthCount health="ok" label={t("hub.healthOk")} n={counts.ok} />
                 <HealthCount health="degraded" label={t("hub.healthDegraded")} n={counts.degraded} />
                 <HealthCount health="offline" label={t("hub.healthOffline")} n={counts.offline} />
+                {counts.stale > 0 && <HealthCount health="stale" label={i18n.language.startsWith("en") ? "Stale" : "过期 / 未知"} n={counts.stale} />}
+                {counts.disabled > 0 && <HealthCount health="disabled" label={t("state.disabled")} n={counts.disabled} />}
               </Stack>
             )}
           </Stack>
 
           <Stack spacing={1.5}>
-            {servers.map((s) => <MachineRow key={s.id} server={s} />)}
+            {servers.map((s) => <MachineRow key={s.id} server={s} current={current} elapsed={elapsed} />)}
             {servers.length === 0 && (
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
           </Stack>
 
-          {Object.keys(self).length > 0 && (
+          {current && Object.keys(self).length > 0 && (
             <Card>
               <CardContent>
                 <Typography variant="overline" color="text.secondary">{t("hub.selfMonitor")}</Typography>
@@ -235,7 +228,7 @@ function HubMediaWorkspace({ servers, loading }: { servers: HubServer[]; loading
 }
 
 // Labelled health tally (dot + word + count — never color alone, a11y §1).
-function HealthCount({ health, label, n }: { health: Health; label: string; n: number }) {
+function HealthCount({ health, label, n }: { health: HubHealth; label: string; n: number }) {
   return (
     <Stack direction="row" alignItems="center" spacing={0.5} sx={{ opacity: n === 0 ? 0.4 : 1 }}>
       <StatusDot state={HEALTH_STATE[health]} live={false} />
@@ -251,10 +244,10 @@ function HealthCount({ health, label, n }: { health: Health; label: string; n: n
 // with its monitors + full metric gauges rendered FLUSH directly beneath — no
 // click-to-expand, no indent. Offline machines show the header only. Management and
 // the events feed live on their own tabs (#132/#133).
-function MachineRow({ server: s }: { server: HubServer }) {
-  const { t } = useTranslation();
-  const health = serverHealth(s);
-  const online = !!s.online && !!s.enabled;
+function MachineRow({ server: s, current, elapsed }: { server: HubServer; current: boolean; elapsed: number }) {
+  const { t, i18n } = useTranslation();
+  const health = hubServerHealth(s, current);
+  const online = health === "ok" || health === "degraded";
   const disabled = !s.enabled;
   const metrics = online ? hostMetrics(s) : null;
   const monitors = online ? (s.snapshot?.monitors ?? {}) : {};
@@ -280,7 +273,7 @@ function MachineRow({ server: s }: { server: HubServer }) {
           {/* A disabled server is forced offline by the backend; label it disabled
               (not just offline) so the two are distinguishable (Kimi). */}
           <Chip size="small"
-            label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
+            label={disabled ? t("state.disabled") : online ? t("hub.online") : health === "stale" ? (i18n.language.startsWith("en") ? "Stale / unknown" : "过期 / 未知") : t("hub.offline")}
             color={!disabled && online ? "success" : "default"}
             variant={!disabled && online ? "filled" : "outlined"} />
           {aiMon && isAiMetrics(aiMon.metrics) && <AiBadge metrics={aiMon.metrics} />}
@@ -296,6 +289,8 @@ function MachineRow({ server: s }: { server: HubServer }) {
             {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
           </Typography>
         </Stack>
+
+        <HubSampleEvidence server={s} elapsed={elapsed} current={current} />
 
         {newer && <Alert severity="warning" sx={{ mt: 1, minWidth: 0, overflowWrap: "anywhere" }}>
           {t("hub.versionSkew", { hub: __APP_VERSION__, agent: version })}

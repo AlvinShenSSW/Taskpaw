@@ -154,3 +154,18 @@ describe("Hub settings", () => {
     expect(await screen.findByText("正在重启 TaskPaw Hub…")).toBeInTheDocument();
   });
 });
+
+
+describe("connect-only Hub settings", () => {
+  it("requires an explicit background-service restart and never offers a GUI restart", async () => {
+    window.__TASKPAW__ = { baseUrl: "http://127.0.0.1:5691", controlToken: "hub-shell", role: "hub", bootId: BOOT, restart: false };
+    vi.spyOn(api, "hubSettings").mockResolvedValue(state({ restart_required: true, fields: ["poll_interval"] }));
+    const restart = vi.spyOn(api, "restart");
+    wrap();
+    expect(await screen.findByRole("status")).toHaveTextContent("后台服务");
+    expect(screen.getByRole("status")).toHaveTextContent("hub-service restart");
+    expect(screen.queryByText(/请退出并重新打开/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "立即重启" })).not.toBeInTheDocument();
+    expect(restart).not.toHaveBeenCalled();
+  });
+});

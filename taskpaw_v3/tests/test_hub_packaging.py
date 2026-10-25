@@ -1,0 +1,111 @@
+"""Hub packaging must exercise the Hub, without touching any installed service."""
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from scripts import macos_release as mac
+
+
+def test_hub_smoke_dispatches_to_hub_fixture(monkeypatch):
+    from scripts import macos_hub_smoke
+
+    calls = []
+    monkeypatch.setattr(macos_hub_smoke, "smoke", lambda *a: calls.append(a))
+    isolation = SimpleNamespace(require=lambda: None)
+    sidecar = Path("never-execute-fixture")
+    plan = mac.Plan("aarch64-apple-darwin", "adhoc")
+    mac.smoke(sidecar, plan, isolation, {}, "3.10.2", role="hub")
+    assert calls == [(sidecar, plan, isolation, {}, "3.10.2")]
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"identifier": "com.taskpaw.app.agent", "productName": "TaskPaw Hub"},
+        {"identifier": "com.taskpaw.app.hub", "productName": "TaskPaw Agent"},
+        {"identifier": "foreign.hub", "productName": "TaskPaw Hub"},
+    ],
+)
+def test_mismatched_role_cannot_publish_agent_evidence_as_hub(cfg, tmp_path):
+    with pytest.raises(mac.BuildError, match="bundle_role_invalid"):
+        mac.finalize(mac.Plan("aarch64-apple-darwin", "adhoc"), None, {}, tmp_path, cfg)
+
+
+def test_hub_runtime_refuses_unqualified_host_before_allocating(monkeypatch):
+    from scripts import macos_hub_smoke
+
+    def refuse():
+        raise mac.BuildError("macos_smoke_isolation_required")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unqualified fixture must not allocate or start anything")
+
+    monkeypatch.setattr(macos_hub_smoke.tempfile, "mkdtemp", forbidden)
+    with pytest.raises(mac.BuildError, match="isolation_required"):
+        mac.smoke(
+            Path("never-execute-fixture"),
+            mac.Plan("aarch64-apple-darwin", "adhoc"),
+            SimpleNamespace(require=refuse),
+            {},
+            "3.10.2",
+            role="hub",
+        )
+
+
+def test_hub_manager_is_explicit_and_does_not_eval_arguments(tmp_path):
+    mac.stage_hub_manager(tmp_path)
+    command = tmp_path / "Manage Hub Service.command"
+    text = command.read_text()
+    assert command.stat().st_mode & 0o100
+    assert 'hub-service "$action"' in text
+    assert "eval" not in text and "sudo" not in text
+    assert 'app="/Applications/TaskPaw Hub.app"' in text
+    assert 'backend="$app/Contents/MacOS/taskpaw-backend"' in text
+    assert "install" in text and "uninstall" in text
+
+
+def test_hub_readiness_does_not_accept_agent_frame():
+    import json
+
+    frame = {
+        "taskpaw_ready": True,
+        "role": "agent",
+        "base_url": "http://127.0.0.1:12345",
+        "boot_id": "1" * 32,
+        "control_token": "x" * 32,
+    }
+    assert not mac.ready_line(json.dumps(frame).encode(), frame["base_url"], role="hub")
+    frame["role"] = "hub"
+    assert mac.ready_line(json.dumps(frame).encode(), frame["base_url"], role="hub")
+
+
+def test_native_fixture_peers_use_real_protocol_and_join():
+    import http.client
+    import json
+
+    from scripts.macos_hub_smoke import Peers, request
+    from taskpaw_v3.hub.server.upstream_worker import decode_events, decode_status
+
+    with Peers() as peers:
+        port = peers.servers[0].server_port
+        assert request(port, "wrong", "/status") is None
+        status = request(port, peers.token, "/status")
+        assert decode_status(json.dumps(status))[0]["machine"] == "controlled-agent"
+        events = request(port, peers.token, "/events?ack=-1")
+        assert decode_events(json.dumps(events))["events"] == []
+        assert peers.samples == 1
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", peers.servers[1].server_port, timeout=2
+        )
+        try:
+            connection.request(
+                "POST", "/hooks/wake", b"{}", {"Authorization": "Bearer " + peers.token}
+            )
+            assert connection.getresponse().status == 200
+            assert peers.deliveries == 1
+        finally:
+            connection.close()
+    assert all(not thread.is_alive() for thread in peers.threads)
+    assert all(server.fileno() == -1 for server in peers.servers)

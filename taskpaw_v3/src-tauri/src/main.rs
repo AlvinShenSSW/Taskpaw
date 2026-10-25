@@ -1,12 +1,14 @@
 // TaskPaw V3 desktop shell (design §7.1: "X = exit").
 //
-// The shell spawns the headless backend as a CHILD and ensures the WHOLE child
+// The Agent shell spawns its headless backend as a CHILD and ensures the WHOLE child
 // tree is gone when the app exits — no orphan process holding a port (the V2
 // "click X → tray → zombie" problem):
 //   - Unix: SIGTERM the backend so its GracefulShutdown stops the supervisor +
 //     managed children (lada-cli) cleanly, then force-kill if it lingers.
 //   - Windows: the backend is assigned to a Job Object with KILL_ON_JOB_CLOSE,
 //     so when the shell exits the OS terminates the entire process tree.
+//
+// The Mac Hub shell connects to an independent service and owns no backend.
 //
 // Locked down (design §3.1): withGlobalTauri=false, empty capabilities (no
 // IPC/FS). The webview talks ONLY to the local backend over HTTP; control token +
@@ -16,6 +18,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod control_credentials;
+mod hub_connection;
 mod restart_supervisor;
 mod startup;
 #[cfg(any(windows, test))]
@@ -152,28 +155,14 @@ mod jobobj {
 #[cfg(windows)]
 struct JobHandle(Mutex<Option<jobobj::Job>>);
 
-/// The role this build/run targets: runtime TASKPAW_UI_ROLE wins; else the
-/// compile-time TASKPAW_BUILD_ROLE baked at build (so the release matrix can ship
-/// distinct agent and hub installers); else "agent".
+/// A packaged Mac Hub is always connect-only Hub. Other builds retain runtime
+/// TASKPAW_UI_ROLE precedence over the compile-time role, defaulting to Agent.
 fn ui_role() -> String {
-    let nonblank = |s: String| Some(s).filter(|v| !v.trim().is_empty());
-    let raw = std::env::var("TASKPAW_UI_ROLE")
-        .ok()
-        .and_then(nonblank)
-        .or_else(|| {
-            option_env!("TASKPAW_BUILD_ROLE")
-                .map(str::to_string)
-                .and_then(nonblank)
-        })
-        .unwrap_or_else(|| "agent".into());
-    // Normalize + validate: the frontend (App.tsx) and backend expect exactly
-    // "agent"/"hub"; anything else (e.g. "AGENT", typo) falls back to agent (Kimi).
-    let role = raw.trim().to_ascii_lowercase();
-    if matches!(role.as_str(), "agent" | "hub") {
-        role
-    } else {
-        "agent".into()
-    }
+    hub_connection::effective_role(
+        cfg!(target_os = "macos"),
+        option_env!("TASKPAW_BUILD_ROLE"),
+        std::env::var("TASKPAW_UI_ROLE").ok().as_deref(),
+    )
 }
 
 /// Resolve the backend command: an explicit dev override, else the bundled
@@ -1144,6 +1133,7 @@ fn supervise_backend(app: tauri::AppHandle, command: (String, Vec<String>)) {
     );
 }
 
+
 fn main() {
     tauri::Builder::default()
         // Native file/directory picker for the add-monitor path fields (#71). The
@@ -1156,6 +1146,11 @@ fn main() {
         .manage(UiLang(Mutex::new("zh-CN".to_string())))
         .invoke_handler(tauri::generate_handler![set_ui_lang])
         .setup(|app| {
+            // Before command resolution, spawn, recovery or ownership setup:
+            // the Mac Hub must never become a second Agent-event consumer.
+            if hub_connection::connect_only(cfg!(target_os = "macos"), &ui_role()) {
+                return hub_connection::setup(app.handle());
+            }
             // `mut`: the Windows Job-Object failure kill path AND taking the
             // backend's stdout for the readiness handshake (#48).
             let command = backend_command();
@@ -1288,6 +1283,9 @@ fn main() {
                 // momentary "no window" must not quit the app (#299 §3).
                 if code.is_none() && REBUILDING.load(SeqCst) {
                     api.prevent_exit();
+                    return;
+                }
+                if hub_connection::stop_reader(app) {
                     return;
                 }
                 let _quit = begin_exit(&LIFECYCLE, &EXITING);

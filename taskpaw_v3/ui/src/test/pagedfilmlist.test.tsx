@@ -18,8 +18,7 @@ const page = (n = 2, total = 25, extra = {}) => ({ run: "run-A", total, size: 10
 const metrics = { film: "PQRS-current.mp4", steps: [{ key: "asr", state: "active" }],
   films: [row("PQRS-fallback-1.mp4"), row("PQRS-fallback-2.mp4")], films_more: 23 };
 const extrasMetrics = { queue_pre_done: 3, queue_completed: 3, queue_total: 3 };
-const response = (body: unknown, ok = true) => ({ ok, status: ok ? 200 : 404,
-  json: async () => body });
+const response = (body: unknown, ok = true) => Response.json(body, { status: ok ? 200 : 404 });
 function deferred() {
   let resolve!: (value: ReturnType<typeof response>) => void;
   const promise = new Promise<ReturnType<typeof response>>((r) => { resolve = r; });
@@ -348,8 +347,7 @@ describe("#210 Hub paged films", () => {
     hubMount(); await screen.findByText(text(2));
     const failed = deferred(); serve = () => failed.promise; fireEvent.click(next());
     const recovery = deferred(); serve = () => recovery.promise;
-    await act(async () => failed.resolve({ ok: status === 200, status,
-      json: async () => ({ error: status === 404 ? "film_list_unavailable" : status === 503 ? "agent_offline" : status === 504 ? "agent_timeout" : "agent_request_failed" }) }));
+    await act(async () => failed.resolve(Response.json({ error: status === 404 ? "film_list_unavailable" : status === 503 ? "agent_offline" : status === 504 ? "agent_timeout" : "agent_request_failed" }, { status })));
     await waitFor(() => expect(requests.filter(u => !u.searchParams.has("page"))).toHaveLength(2));
     if (status === 404 || status === 503) {
       expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
@@ -392,7 +390,7 @@ it("#210 SR-2: an empty-success resync keeps subsequent transient failure visibl
     <MonitorMetrics metrics={metrics} taskName="same" taskType="avsubs" filmSource={{ kind: "hub", serverId: 1 }} />
   </QueryClientProvider></ThemeProvider>);
   await screen.findByText("Syncing the new run; showing films from status for now.");
-  serve = () => ({ ok: false, status: 504, json: async () => ({ error: "agent_timeout" }) });
+  serve = () => Response.json({ error: "agent_timeout" }, { status: 504 });
   await act(async () => { await qc.invalidateQueries({ queryKey: ["hubFilms"] }); });
   expect(await screen.findByText("Film list request timed out; retrying automatically.")).toBeInTheDocument();
   expect(screen.getByText("Showing the last successfully loaded list.")).toBeInTheDocument();

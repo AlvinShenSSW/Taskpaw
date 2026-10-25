@@ -52,8 +52,7 @@ function serve() {
       lookup: lookupFailed("未查到资料", true), ...planExtra,
     })) });
     if (/\/poster$|\/cover$/.test(resource)) {
-      // jsdom's FileReader accepts jsdom Blob rather than Node's Response Blob.
-      return { ok: true, status: 200, blob: async () => new Blob([`image-${sid}`], { type: "image/png" }) };
+      return new Response(`image-${sid}`, { headers: { "Content-Type": "image/png" } });
     }
     if (resource.startsWith("films/")) return Response.json(detail(resource.slice(6), {
       steps: restoreSteps("ltx"), has_poster: true, poster_source: "lookup-1", has_cover: true, cover_source: "lookup-1",
@@ -83,6 +82,9 @@ function onlyHubGets() {
 }
 
 beforeEach(() => {
+  vi.spyOn(Response.prototype, "blob").mockImplementation(async function (this: Response) {
+    return new Blob([await this.arrayBuffer()], { type: this.headers.get("Content-Type") ?? "" });
+  });
   setLang("zh-CN");
   vi.spyOn(nativePicker, "inTauri").mockReturnValue(true);
   setDevControlCredential("hub", "test-hub-control", HUB_BASE);

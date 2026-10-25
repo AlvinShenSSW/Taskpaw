@@ -20,7 +20,7 @@ function stubFetch() {
     "fetch",
     vi.fn((url: string, init?: RequestInit) => {
       calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+      return Promise.resolve(Response.json({ ok: true }));
     }),
   );
 }

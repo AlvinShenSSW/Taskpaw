@@ -20,7 +20,7 @@ Config locations per OS:
 Examples to copy: [`taskpaw_v3/examples/agent.example.yaml`](../../taskpaw_v3/examples/agent.example.yaml),
 [`hub.example.yaml`](../../taskpaw_v3/examples/hub.example.yaml).
 
-Prereq on every machine: Python 3.10+ and the project installed **with the V3
+For source/manual deployments, install Python 3.10+ and the project **with the V3
 dependency extra** — the V3 runtime imports `pydantic`, `PyYAML`, `fastapi`, and
 `uvicorn`, which live in the optional `v3` extra (a base install omits them and
 `python -m taskpaw_v3.*` fails on import):
@@ -31,16 +31,109 @@ uv sync --extra v3            # then prefix commands with `uv run`, e.g. uv run 
 pip install -e '.[v3]'
 ```
 
-Commands below assume that environment is active (or prefixed with `uv run`).
+Source commands below assume that environment is active (or prefixed with
+`uv run`). The packaged Mac Hub described next includes its backend and needs no
+Python, uv or repository checkout.
 
 ---
 
+## Mac Hub desktop and background service
+
+Install **TaskPaw Hub**, which is separate from TaskPaw Agent. The Hub desktop
+connects to an independent per-user background service. Opening the window does
+not install or start that service. Closing or quitting the window does not stop
+aggregation or OpenClaw forwarding while the service is running. An optional Mac
+Agent remains a separate installation for monitoring this Mac itself.
+
+### Install and connect
+
+1. Download the Hub artifact for the Mac's native architecture: arm64 for Apple
+   silicon, x86_64 for Intel. Verify its source/version and signing evidence as
+   described in [the macOS build guide](macos-signing.md). Agent DMGs do not
+   install this Hub service.
+2. Mount the DMG and drag `TaskPaw Hub.app` into `/Applications` or the current
+   user's `~/Applications`. For the app ZIP, extract and move the app to either
+   location. Keep its name unchanged; do not install the service from a mounted
+   DMG or Downloads.
+3. Separately run `Manage Hub Service.command` from the DMG and enter `install`.
+   This explicit action verifies and copies the bundled backend into a private
+   persistent runtime directory, registers the user's LaunchAgent and starts
+   aggregation. A blank answer cancels. The helper prefers `/Applications` if
+   both app locations exist.
+4. Open `TaskPaw Hub.app`. The dashboard automatically connects when the service's
+   protected local credentials are available. If it shows the waiting page,
+   check service `status` and logs rather than repeatedly reopening the window.
+5. In the Hub, register each Agent's LAN address/port and matching Bearer token.
+   Keep this Hub the sole consumer of each Agent's `/events` queue. Windows
+   remains the media execution/control side; the Mac media view stays read-only.
+
+The equivalent CLI works for both DMG and ZIP installs. Choose the command for
+where the app was installed; no token is passed on the command line:
+
+```bash
+# App installed for the machine:
+"/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install
+
+# App installed for the current user:
+"$HOME/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install
+```
+
+Use the same executable and replace `install` with an action below. The DMG
+helper offers the same actions; the dashboard does not invoke them.
+
+| Action | Effect |
+| --- | --- |
+| `status` | Reports `running`, `starting`, `stopped` or `not_installed`; conflicts and incomplete upgrades return an error. This is service state, not evidence of notification delivery. |
+| `install` | Installs and starts the bundled runtime, or upgrades the managed copy after an app update. Reinstalling identical running bytes does not restart the service. |
+| `start` | Starts the existing managed installation. |
+| `stop` | Unloads this managed service for the current login session and checks that its processes, ports and DB lease are released. |
+| `restart` | Stops and starts this service explicitly; use this for Hub settings marked as requiring restart. Closing/reopening the dashboard does not apply those settings. |
+| `uninstall` | Stops the managed service and removes its runtime and LaunchAgent registration. Preserves Hub configuration, database, history, cursors, outbox and logs. |
+
+The LaunchAgent is `com.taskpaw.hub.v3`, registered for the current user's GUI
+login session. It starts after login and restarts on failure with a 15-second
+throttle. It does not provide pre-login or logged-out availability, and a sleeping
+Mac does not keep sampling. `stop` leaves the login registration file in place;
+use `uninstall` to remove automatic startup on later logins.
+
+### State, logs and updates
+
+The managed runtime and bounded log are under
+`~/Library/Application Support/TaskPaw/HubService/`. `hub.log` rotates at 5 MiB
+with one backup, `hub.log.1`. The LaunchAgent plist is
+`~/Library/LaunchAgents/com.taskpaw.hub.v3.plist`. Hub configuration remains in
+`~/Library/Application Support/TaskPaw/hub.yaml`; `hub.db` and `status.md` are in
+its configured `data_dir` (default `~/.taskpaw-hub`). The service preserves an
+existing configuration and refuses an unresolved legacy DB location conflict.
+
+To update, replace the app in its installed location, then explicitly run
+`hub-service install` again. Merely replacing or opening the app leaves the
+existing runtime running. Installation stages and verifies new bytes before
+stopping the managed service; failed upgrades retain recovery information and
+attempt to restore the prior runtime without rolling back the database.
+
+The manager operates only on its recorded installation. It refuses unrelated
+registrations, modified managed files and unsafe paths. It does not reclaim an
+independently running Hub's ports or kill another Hub to resolve a conflict. If
+an old/manual Hub is running, arrange its explicit shutdown before installing
+this service so there is still only one event consumer. If a command reports
+`stop_incomplete`, `upgrade_incomplete` or another failure, preserve the runtime,
+configuration and database, inspect `status` and logs, and resolve the reported
+condition before retrying. Do not delete state files to force installation.
+
+Service state, dashboard display and notification delivery are separate checks.
+Use data age/last success/unreachable reason to assess Agent samples, and the
+notification pending/oldest/last-success/failure/dead-letter fields to assess
+forwarding. OpenClaw disabled or missing a token does not erase local Hub health
+history. See [the macOS verification boundary](macos-signing.md#hub-runtime-verification)
+for the native checks that still require installation/GUI evidence.
+
 ## 多机媒体工作流部署
 
-The media workflow (EPIC #271, phase 2) runs on several machines at home. With the
-packaged app you edit **no** yaml file: the first-run wizard writes everything, and
-the two settings that need a restart end with a 立即重启 button. Everything below
-is for one user on a trusted home LAN.
+The media workflow (EPIC #271, phase 2) runs on several machines at home. The
+packaged Windows Agent's first-run wizard writes its configuration, and settings
+that need a restart offer a 立即重启 button. The Mac Hub uses the separate service
+setup above. Everything below is for one user on a trusted home LAN.
 
 ### Roles
 
@@ -70,9 +163,9 @@ the rule does not apply to Public.
 
 ### Zero-config steps per role
 
-Install the packaged TaskPaw app, open it, and the wizard 「首次启动 · 选择角色」
-opens by itself. No file is edited on any machine. **Set up the controller first**:
-the workers need its 访问令牌 and its 配对码.
+On Windows, install the packaged TaskPaw Agent app and open it; the wizard
+「首次启动 · 选择角色」 opens by itself. **Set up the controller first**: the
+workers need its 访问令牌 and its 配对码. The Mac Hub steps follow separately.
 
 **媒体主控 (Windows)**
 
@@ -99,9 +192,12 @@ the workers need its 访问令牌 and its 配对码.
 
 **Mac Hub**
 
-The Hub has no wizard. Open the app on the Mac, register the controller as a polled
-server (its LAN address, port 5680, polled with the same 访问令牌), then pick it in
-设置 → 主控连接 (选择主控 / 更换主控). Keep the Mac the only `/events` consumer.
+The Hub has no wizard. First follow [Mac Hub desktop and background service](#mac-hub-desktop-and-background-service)
+to install/start its independent service, then open the app and register the
+controller as a polled server (its LAN address, port 5680, polled with the same
+访问令牌). Pick it in 设置 → 主控连接 (选择主控 / 更换主控). Keep the Mac the only
+`/events` consumer. Hub settings that require restart use the separate service
+manager, not the Windows app's 立即重启 flow.
 
 ### Pairing and 核验并启用
 
@@ -206,8 +302,10 @@ The manual steps below are the fallback / reference.
 
 ## 1. Mac Hub machine
 
-The Hub polls agents and remembers them in its own SQLite DB (`hub.db`, created
-next to `hub.yaml`) — the agent list is **not** in the yaml.
+For a source/manual Hub, the commands below run a foreground process. Closing its
+terminal can stop it; they do not install the packaged LaunchAgent described
+above. The Hub remembers Agents in `hub.db` in `data_dir` (default
+`~/.taskpaw-hub`); the Agent list is **not** in `hub.yaml`.
 
 ```bash
 # 1. config

@@ -1,10 +1,18 @@
 # Native macOS release builds
 
-The release workflow builds Agent installers on `macos-15` (arm64) and
-`macos-15-intel` (x86_64). Windows keeps its existing installer/signing path.
-Mac artifacts are a DMG and an app ZIP; raw `.app` uploads lose executable file
-permissions. The ZIP preserves them. These are Actions artifacts, not an
-automatic GitHub Release or deployment.
+The release workflow builds native Mac installers on `macos-15` (arm64) and
+`macos-15-intel` (x86_64). Agent and Hub are separate artifacts. In Actions →
+release → Run workflow, select `role=hub` to build the Mac Hub desktop and its
+independent service. The default `role=agent` and tag-triggered builds keep the
+existing Agent matrix, including Windows. There is no Windows Hub package.
+
+Hub artifacts are `taskpaw-hub-macos-arm64` and `taskpaw-hub-macos-intel`;
+Agent artifact names retain the `taskpaw-agent-` prefix. Each Mac artifact
+contains a DMG, an app ZIP and `macos-verification.json`. Raw `.app` uploads lose
+executable file permissions; the ZIP preserves them. The Hub DMG includes the
+separate `Manage Hub Service.command`; the ZIP uses the app's bundled CLI. See
+[Hub installation and management](deployment.md#mac-hub-desktop-and-background-service).
+These are Actions artifacts, not an automatic GitHub Release or deployment.
 
 ## Signing modes and migration
 
@@ -52,8 +60,10 @@ disposable native Intel/arm64 runners or VMs**, not a shared signing Mac.
 Every actual app, ZIP and DMG backend smoke needs a clean dedicated disposable
 host with **no real TaskPaw and no independent concurrent TaskPaw launch** during
 the entire session. A temporary HOME and released ephemeral ports do not provide
-atomic isolation: production startup has an existing stale-instance reclaim
-path. This change does not alter that production behavior.
+atomic isolation. The ordinary Agent/manual startup paths retain their existing
+stale-instance reclaim behavior. The managed Hub service disables stale-port
+reclamation, but its smoke also uses a fixed per-user LaunchAgent label and must
+not run alongside a real installation.
 
 The reviewed fresh hosted job sets
 `TASKPAW_MACOS_SMOKE_ISOLATION=github-hosted-fresh` and validates native GitHub job
@@ -96,8 +106,14 @@ On the qualified native host, install the locked build dependencies and run:
 
 ```bash
 uv sync --frozen --group dev --extra build --extra v3
-uv run python scripts/build.py
+uv run python scripts/build.py  # Agent by default
+# Or build the Mac Hub on that qualified host:
+TASKPAW_BUILD_ROLE=hub uv run python scripts/build.py
 ```
+
+Select one role per build invocation; a Hub build does not install a production
+service. Its qualification fixture temporarily installs and removes only its own
+service in an isolated home on the disposable host.
 
 Optional `TASKPAW_BUILD_TARGET` must match the native CPU/Python/rustc host.
 Cross/Rosetta/universal builds are rejected. Mac `TASKPAW_BUNDLE_TARGETS` accepts
@@ -114,12 +130,13 @@ The build does not force library privilege grants. Tauri builds the app with sig
 signs nested code inside out and verifies every native archive entry. It never
 uses deep signing as a repair.
 
-The isolated frozen backend must announce the right readiness role/base and
-return actual host-metrics CPU/memory/disk/network values. This exercises its
-Python, pydantic_core and psutil extensions. ZIP extraction and read-only DMG
-mount/copy repeat signatures, architecture and actual readiness; nothing is
-installed into Applications. Fixtures use their own config and ephemeral ports,
-then stop only their owned process group and verify released sockets.
+For Agent builds, the isolated frozen backend must announce the right readiness
+role/base and return actual host-metrics CPU/memory/disk/network values. This
+exercises its Python, pydantic_core and psutil extensions. ZIP extraction and
+read-only DMG mount/copy repeat signatures, architecture and actual readiness.
+Agent fixtures use their own config and ephemeral ports, then stop only their
+owned process group and verify released sockets. Hub builds use the separate
+service qualification below; an Agent smoke result cannot qualify a Hub.
 
 Formal mode requires accepted app and DMG notarization, staples/validates the
 app before the final ZIP and validates the DMG ticket. Timeout/rejection is an
@@ -128,6 +145,42 @@ account/history, tokens/descriptors and raw native output. **Notarization
 traceability is incomplete:** durable submission-ID/submitted-hash/final-byte
 mapping remains deferred. Accepted/staple booleans do not close that acceptance.
 
+## Hub runtime verification
+
+`scripts/macos_hub_smoke.py` exercises the actual frozen Hub backend through
+`hub-service` on the qualified disposable native host. It copies the Hub app to
+the fixture home's `Applications` directory, uses private configuration and DB,
+and starts controlled Agent/OpenClaw peers. It checks the protected descriptor's
+Hub role/base, authenticated current status, polling, `status.md`, local history
+and outbox delivery to the fake peer. No production Agent queue or real OpenClaw
+notification is used.
+
+The fixture checks identical reinstall without restart, explicit service restart
+with rotated boot identity, owned runtime crash recovery, helper cleanup, and
+continued sampling while a fake notification send is slow. Stop must release
+both ports and the DB lease and remove the live descriptor. Uninstall must
+preserve the fixture configuration and history. Uncertain stop prevents fixture
+runtime/data removal and fails the build rather than being labeled clean.
+
+The same Hub qualification runs against the app and extracted ZIP/DMG copies.
+DMG verification additionally checks the separate manager command. The report
+records `role: hub`, source/architecture/signature evidence and a `hub_runtime`
+section. A successful run may establish `service_lifecycle_verified`,
+`polling_and_outbox_verified`, `crash_recovery_verified`,
+`slow_send_stop_and_resource_release_verified` and
+`client_disconnect_verified` for those fixtures. These are acceptance checks to
+run; this guide is not a record that a particular build has passed them.
+
+`client_disconnect_verified` means a short-lived authenticated HTTP client
+closed while polling continued. It does **not** launch or close a Tauri window.
+The report deliberately leaves `native_window_close_verified: false` and
+`login_reboot_verified: false`. Record real GUI waiting/connection/reconnection,
+close/quit/crash while aggregation continues, login/reboot startup, and visual
+acceptance separately on clean native Macs. Do not turn those fields true from
+Rust tests, a successful build or HTTP-only smoke. A hosted runner lacking the
+required GUI login domain must fail service qualification; unit tests cannot
+substitute for it.
+
 ## Manual distribution boundary
 
 Actual formal credentials, clean dual-architecture downloads, installation and
@@ -135,11 +188,16 @@ Gatekeeper require operator evidence; local unit tests or build-host smoke do
 not establish them. On corresponding clean disposable/exclusive Intel and arm64
 Macs, record source/version/architecture, signing identity/Team consistency,
 hardened runtime/timestamp, accepted notarization and app/DMG ticket validation,
-Gatekeeper assessment, GUI start and actual sidecar readiness/native metrics.
-Normal desktop-close ownership acceptance depends on the separate lifecycle
-work; do not infer it from this smoke cleanup.
+Gatekeeper assessment and GUI start. For Agent, record sidecar readiness/native
+metrics and owned-backend cleanup on desktop close. For Hub, record the
+independent service's readiness and continued sampling when the desktop closes,
+plus the separate GUI/login checks above. Build-host cleanup does not establish
+either installed desktop lifecycle.
 
-For ad-hoc downloads, expect an unidentified-developer warning. If the operator
+Ad-hoc Hub and Agent artifacts are not Developer ID signed or notarized; a valid
+`codesign` check alone does not establish Gatekeeper acceptance or successful
+launch of the copied Hub runtime. For ad-hoc downloads, expect an
+unidentified-developer warning. If the operator
 trusts the artifact, follow Apple's current
 [Privacy & Security / Open Anyway guidance](https://support.apple.com/102445).
 Do not remove quarantine or disable Gatekeeper to manufacture acceptance.
