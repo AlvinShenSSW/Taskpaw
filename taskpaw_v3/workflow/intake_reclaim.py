@@ -27,9 +27,13 @@ def _guard(path: Path, root: Path) -> None:
     if ".." in path.parts or path == root or not path.is_relative_to(root):
         raise ValueError("outside reclamation root")
     # Even an ancestor junction targeting another directory INSIDE root is unsafe.
+    # Links above root (macOS /var, a linked install prefix) are covered by the
+    # resolved check below.
     for parent in path.parents:
         if _link(parent.lstat()):
             raise ValueError("linked reclamation ancestor")
+        if parent == root:
+            break
     # For a leaf link the object being deleted is the directory entry itself.
     resolved = path.parent.resolve() / path.name
     if resolved == root.resolve() or not resolved.is_relative_to(root.resolve()):
