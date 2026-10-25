@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, type WorkerConsole, type WorkflowStep } from "../api";
+import { api, type WorkerConsole, type WorkerFilm, type WorkflowStep } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { workerSteps } from "../components/media/workerModel";
 import { WorkerMonitor } from "../components/WorkerMonitor";
@@ -46,6 +46,46 @@ beforeEach(() => setLang("zh-CN"));
 afterEach(() => vi.restoreAllMocks());
 
 describe("worker 媒体处理 monitor", () => {
+  it.each([["finishing", "回传", "SendOutlinedIcon"], ["settling", "修复", "StopCircleOutlinedIcon"]] as const)("uses the actual %s phase icon on the current step while keeping its stable label", async (phase, label, icon) => {
+    const worker = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...worker, current: { ...worker.current!, phase } });
+    wrap(<WorkerMonitor />);
+    const line = await screen.findByRole("list", { name: "ABF-401 步骤" });
+    const badge = within(line).getByText(label, { selector: ".status-badge" });
+    expect(badge.parentElement).toHaveAttribute("aria-current", "step");
+    expect(badge).toHaveAttribute("data-status", phase);
+    expect(badge.querySelector("svg")).toHaveAttribute("data-testid", icon);
+    expect(within(line).getByText("下载 ✓")).toHaveAttribute("data-status", "completed");
+    expect(within(line).getByText(phase === "finishing" ? "修复" : "回传")).toHaveAttribute("data-status", "waiting");
+  });
+  it.each([["uploading", "回传中"], ["finishing", "提交结果"], ["settling", "停止未确认"]] as const)("keeps current-card heading on %s instead of compute", async (phase, label) => {
+    const worker = running();
+    vi.spyOn(api, "workflowWorker").mockResolvedValue({ ...worker, current: { ...worker.current!, phase } });
+    wrap(<WorkerMonitor />);
+    expect(await screen.findByRole("heading", { name: `${label} · ABF-401` })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "修复 · ABF-401" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("listitem", { name: "ABF-401" })).queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+  it("gives all seven worker states icons and uses transfer bytes only for real transfers", async () => {
+    const cases = [
+      ["queued", "排队中"], ["fetching", "下载源文件"], ["staged", "源文件就绪"], ["running", "正在修复"],
+      ["settling", "停止未确认"], ["uploading", "回传中"], ["finishing", "提交结果"],
+    ] as const;
+    const films: WorkerFilm[] = cases.map(([state]) => ({ film: state, rev: 1, name: `FILM-${state}`, state, position: 0, stages: {} }));
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(running({ films, current: null, transfers: [
+      { film: "fetching", dir: "down", done: 30, total: 100, rate: 1 },
+      { film: "uploading", dir: "up", done: 60, total: 100, rate: 1 },
+      { film: "queued", dir: "down", done: 99, total: 100, rate: 1 },
+    ] }));
+    wrap(<WorkerMonitor />);
+    for (const [state, label] of cases) {
+      const item = within(await screen.findByRole("listitem", { name: `FILM-${state}` }));
+      expect(item.getByText(label).querySelector("svg")).toBeInTheDocument();
+      if (state === "fetching" || state === "uploading") {
+        expect(item.getByRole("progressbar")).toHaveAttribute("aria-valuenow", state === "fetching" ? "30" : "60");
+      } else expect(item.queryByRole("progressbar")).not.toBeInTheDocument();
+    }
+  });
   it("shows the connection, the films, the running restore with the shared cards, and transfers", async () => {
     vi.spyOn(api, "workflowWorker").mockResolvedValue(running());
     wrap(<WorkerMonitor />);
@@ -65,7 +105,7 @@ describe("worker 媒体处理 monitor", () => {
     expect(screen.getByTestId("ltx-timing")).toBeInTheDocument();
     expect(screen.getByText("ABF-402 · 下载源文件 12.4/38.0 GB · 610 MB/s")).toBeInTheDocument();
     expect(screen.getByText("76.0 GB / 500.0 GB")).toBeInTheDocument();
-    expect(screen.getByText("NVIDIA GeForce RTX 5070 Ti · 媒体工作流使用中")).toBeInTheDocument();
+    expect(screen.getByText("媒体任务占用").parentElement).toHaveTextContent("NVIDIA GeForce RTX 5070 Ti · 媒体任务占用");
     expect(document.body.textContent).not.toMatch(SLOGANS);
   });
 
@@ -217,11 +257,11 @@ describe("remote progress on the controller", () => {
     vi.mocked(api.workflowFilm).mockImplementation(async (id) => detail(id, { steps: uploading, note }));
     wrap(<MediaWorkspace />);
     const open = await screen.findByRole("button", { name: "查看 浮光之间 详情" });
-    expect(screen.getByText(note ?? "回传中")).toBeInTheDocument();
+    expect(screen.getAllByText(note ?? "回传中").length).toBeGreaterThan(0);
     expect(screen.queryByText(/正在启动 Jasna/)).not.toBeInTheDocument();
     fireEvent.click(open);
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
-    await waitFor(() => expect(within(drawer).getByText(note ?? "回传中")).toBeInTheDocument());
+    await waitFor(() => expect(within(drawer).getAllByText(note ?? "回传中").length).toBeGreaterThan(0));
     expect(within(drawer).queryByTestId("restore-live")).not.toBeInTheDocument();
     expect(within(drawer).queryByText(/Jasna 正在加载模型|正在启动 Jasna/)).not.toBeInTheDocument();
   });

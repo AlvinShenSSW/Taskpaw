@@ -71,10 +71,14 @@ export const EXCEPTION_STATES: StatusKey[] = [
 export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match", "archiving"];
 
 // P3-6: shared by queue, overview and drawer; local stage labels stay unchanged.
-export function statusLabel(status: StatusKey, film?: FilmRemote & { note?: string | null }): string {
+export function statusLabel(status: StatusKey, film?: FilmRemote & { note?: string | null; steps?: WorkflowStep[] | null }): string {
+  if (film && isRestoring(status)) {
+    const step = restoreStep(film);
+    if (step?.state === "running" && step.phase && step.phase !== "running") return FILM_STATE[step.phase];
+  }
   if (film && isRemoteRow(film)) {
     if (status === "inbox") {
-      if (film.route && film.route.live !== "local") return film.note || `下载到 ${film.route.machine.name} · 0%`;
+      if (film.route && film.route.live !== "local") return `排队中 · 等 ${film.route.machine.name}`;
       return film.pin?.worker_id ? `排队中 · 等 ${film.pin.name}` : "排队中（自动）";
     }
     if (isRestoring(status) && film.route && film.route.live !== "local") return `修复中 · ${film.route.machine.name}`;

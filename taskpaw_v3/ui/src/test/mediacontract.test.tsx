@@ -119,7 +119,7 @@ describe("contract: 影片队列 / 异常", () => {
     await go("影片队列");
     await waitFor(() => expect(queueCard("film-restoring")).toBeTruthy());
     const r = within(queueCard("film-restoring"));
-    expect(r.getByText("LTX · Encode")).toBeInTheDocument();
+    expect(r.getByText("LTX · 编码")).toBeInTheDocument();
     const line = r.getByRole("list", { name: "movie 生命周期" });
     expect(within(line).getAllByRole("listitem").map((li) => li.textContent).slice(0, 3))
       .toEqual(["入库扫描（已完成）", "待处理（已完成）", "修复"]);
@@ -321,7 +321,7 @@ describe("contract: 待确认 and 图文确认", () => {
     expect(card.getByRole("heading", { level: 3, name: "假的标题" })).toBeInTheDocument();
     expect(card.getByText("ABC-123 · Actor")).toBeInTheDocument();
     await waitFor(() => expect(card.getByText("NAS / Actor")).toBeInTheDocument());
-    expect(card.getByText("待确认")).toBeInTheDocument();
+    expect(card.getByText("待确认入库")).toBeInTheDocument();
     expect(await card.findByText("最终成品包 6 个文件 · Miko 已完成")).toBeInTheDocument();
   });
 

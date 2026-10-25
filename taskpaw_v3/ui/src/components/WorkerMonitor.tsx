@@ -1,8 +1,10 @@
 import { Alert, Box, Button, Card, CardContent, Chip, Stack, Typography } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { api, type WorkerConsole, type WorkerFilm } from "../api";
 import { RestoreLivePanel } from "./media/RestoreLivePanel";
-import { FILM_STATE, HOLD_TEXT, stagingText, transferText, workerSteps } from "./media/workerModel";
+import { stagingText, transferText, workerSteps } from "./media/workerModel";
+import { presentWorkerStatus, StatusBadge, StatusProgress } from "./media/statusPresentation";
 import { DATA } from "./progressParts";
 
 // P2-3 (#294) §6: a worker's 「媒体处理」 tab (role=worker). Its controller connection, the films
@@ -16,7 +18,7 @@ const CONNECTION: Record<string, string> = {
   revoked: "凭据已失效", stopped: "已停止", failed: "出错", off: "未启用",
 };
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
     <Box component="div" sx={{ display: "flex", gap: 1, minWidth: 0 }}>
       <Typography component="dt" variant="body2" color="text.secondary" sx={{ flex: "0 0 4.5em" }}>{label}</Typography>
@@ -33,9 +35,8 @@ function StepRow({ film, w }: { film: WorkerFilm; w: WorkerConsole }) {
       {steps.map((s, i) => (
         <Box component="li" key={`${s.key}-${i}`} aria-current={s.state === "current" ? "step" : undefined}
           data-state={s.state}>
-          <Chip size="small" label={`${s.label}${s.state === "done" ? " ✓" : ""}`}
-            color={s.state === "current" ? "success" : "default"}
-            variant={s.state === "pending" ? "outlined" : "filled"} />
+          <StatusBadge status={s.state === "done" ? "completed" : s.state === "pending" || film.state === "queued" || film.state === "staged" ? "waiting"
+            : presentWorkerStatus(film, w.current).key} label={`${s.label}${s.state === "done" ? " ✓" : ""}`} />
         </Box>
       ))}
     </Box>
@@ -95,8 +96,9 @@ export function WorkerMonitor() {
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
                     <Typography variant="body2" sx={{ ...DATA, overflowWrap: "anywhere" }}>{film.name}</Typography>
                     <Chip size="small" variant="outlined" label={film.position === 0 ? "当前" : "预取"} />
-                    <Typography variant="caption" color="text.secondary">{FILM_STATE[film.state] ?? film.state}</Typography>
+                    <StatusBadge status={presentWorkerStatus(film, current, w.transfers).key} />
                   </Stack>
+                  <StatusProgress presentation={presentWorkerStatus(film, current, w.transfers)} label={film.name} />
                   <StepRow film={film} w={w} />
                 </Box>
               ))}
@@ -109,7 +111,8 @@ export function WorkerMonitor() {
         <Card>
           <CardContent>
             <Typography variant="subtitle1" component="h2" sx={{ mb: 1 }}>
-              {current.stage === "restore" ? "修复" : "识别"}{running ? ` · ${running.name}` : ""}
+              <StatusBadge status={running ? presentWorkerStatus(running, current, w.transfers).key
+                : current.phase === "running" ? current.stage : current.phase} />{running ? ` · ${running.name}` : ""}
             </Typography>
             {current.stage === "restore" && current.phase === "running" ? (
               <RestoreLivePanel step={current.step} />
@@ -129,7 +132,8 @@ export function WorkerMonitor() {
                 value={`${films.find((f) => f.film === t.film)?.name ?? t.film} · ${transferText(t)}`} />
             ))}
             {w.staging && <Row label="暂存" value={stagingText(w.staging.used, w.staging.cap)} />}
-            {w.gpu && <Row label="GPU" value={`${w.gpu.name ?? "—"} · ${HOLD_TEXT[w.gpu.hold] ?? w.gpu.hold}`} />}
+            {w.gpu && <Row label="GPU" value={<>{w.gpu.name ?? "—"} · <StatusBadge status={w.gpu.hold === "none" ? "idle"
+              : w.gpu.hold === "workflow" ? "hold_workflow" : w.gpu.hold === "manual" ? "hold_manual" : "hold_unknown"} /></>} />}
           </Box>
         </CardContent>
       </Card>
