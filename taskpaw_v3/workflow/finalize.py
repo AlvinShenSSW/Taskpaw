@@ -26,6 +26,7 @@ from taskpaw_v3.core.state import atomic_json
 from . import file_identity
 from . import models as m
 from .filmpaw_client import FilmpawClient, FilmpawRefused, FilmpawUnavailable
+from .intake_reclaim import remove_work_tree
 from .local_runtime import PRODUCER, LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.finalize")
@@ -869,7 +870,11 @@ class Finalizer:
             if wf.package_id and wf.snapshot_work_path:
                 if self._package_done(wf.package_id, "workcopy"):
                     snapshot = rt.work_dir / wf.snapshot_work_path
-                    shutil.rmtree(snapshot, ignore_errors=True)
+                    remove_work_tree(
+                        snapshot,
+                        rt.work_dir,
+                        operation_id=wf.intake_operation_id or film_id,
+                    )
                     done &= not snapshot.exists()
                 else:
                     done = False  # siblings still use the shared snapshot

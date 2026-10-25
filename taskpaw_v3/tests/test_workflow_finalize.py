@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -545,6 +546,34 @@ def test_store_refusal_during_confirm_is_a_confirm_error(world, monkeypatch):
     monkeypatch.setattr(world.rt.store, "put_approval_context", refuse)
     with world.fake, pytest.raises(ConfirmError):
         world.finalizer().confirm(world.film, "actor")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows read-only unlink")
+def test_completed_package_reclaims_its_readonly_intake_snapshot(world, monkeypatch):
+    world.scrape()
+    _in_package(world, monkeypatch, [])
+    real = world.rt.store.film_workflow
+
+    def film_workflow(auth, film_id):
+        return real(auth, film_id).model_copy(
+            update={"snapshot_work_path": ret.WORKCOPY}
+        )
+
+    monkeypatch.setattr(world.rt.store, "film_workflow", film_workflow)
+    snapshot = world.rt.work_dir / ret.WORKCOPY
+    copied = snapshot / "movie.mkv"
+    copied.chmod(stat.S_IREAD)
+    try:
+        with world.fake:
+            fin = world.finalizer()
+            fin.confirm(world.film, "actor")
+            world.ticks(fin)
+        assert world.status("cleanup_workcopy") == "succeeded"
+        assert not snapshot.exists()
+        assert not any(fin.reclaim_dir.iterdir())
+    finally:
+        if copied.exists():
+            copied.chmod(stat.S_IWRITE)
 
 
 @pytest.mark.skipif(
