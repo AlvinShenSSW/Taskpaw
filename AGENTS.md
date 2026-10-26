@@ -50,7 +50,7 @@ retirement.
   agent↔Hub poll protocol is **kept and only optimized**, not rewritten.
 - MacSubs is **excluded from V3 monitoring**. Actual V2/MacSubs shutdown,
   migration and rollback are operator work tracked separately in A06/V01.
-- Source versions are recorded in [V2 project metadata](pyproject.toml) and
+- Source versions are recorded in [project metadata](pyproject.toml) and
   [V3's version source](taskpaw_v3/__init__.py); the
   [version consistency test](taskpaw_v3/tests/test_version.py) checks V3 bundle/UI
   copies. They do not establish what is installed or running on a machine.

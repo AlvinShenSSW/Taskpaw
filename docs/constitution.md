@@ -18,7 +18,7 @@ The AFK / review gates self-check against this file — a violation is a blocker
 - **Never widen an operator-given scope.** In AFK mode, touch only the issues /
   files handed to you. Out-of-scope work → stop and report, don't do it.
 
-## 2. Security invariants (apply to V2 and V3)
+## 2. Security invariants
 
 - **No `shell=True`** with any user-influenced input. Use `shlex.split()` +
   `shell=False`.
@@ -42,7 +42,7 @@ The AFK / review gates self-check against this file — a violation is a blocker
   dedupes by `last_event_ids`. Do not break this wire shape — V3 only *adds*
   optional fields (`level`/`title`/`data`) and changes queue-trim timing
   (clear-on-ack), never the endpoint or required fields.
-- **Ports:** V2 agent `5678`, MacSubs `5679` (being retired), V3 agent `5680`.
+- **Ports:** V3 agent `5680` (V2 used `5678` and MacSubs `5679`; both removed).
   A new component must not silently collide; detect port-in-use and fail loudly.
 - **Timezone:** pick one authority (Hub local time) and convert on ingest; never
   compare timestamps from different machines lexically.
