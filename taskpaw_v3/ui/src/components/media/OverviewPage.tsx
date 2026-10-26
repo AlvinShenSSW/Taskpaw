@@ -23,6 +23,9 @@ import { LostRow } from "./RemoteParts";
 import { SourceMissingRow } from "./SourceMissing";
 import { DEVICES_KEY, errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
 
+// #347: the fleet has five machines, so 「正在处理」 shows five films before folding the rest.
+const ACTIVE_ROWS = 5;
+
 // 概览 (§4.1 + U1 V3): heading actions, the paused notice, four stats, the flow strip, the
 // active rows, the cleanup rule, the next films to confirm and the local GPU.
 export function OverviewPage() {
@@ -144,11 +147,11 @@ export function OverviewPage() {
               <button type="button" className="link-btn" onClick={() => ws.navigate("queue")}>全部队列<Icon of={ArrowForwardIcon} /></button>
             </div>
             <div className="film-list">
-              {data.active.slice(0, 4).map((item) => <FilmRowView key={item.id} item={item} />)}
+              {data.active.slice(0, ACTIVE_ROWS).map((item) => <FilmRowView key={item.id} item={item} />)}
               {data.active.length === 0 && <div className="empty"><p>当前没有正在处理的影片</p></div>}
             </div>
-            {data.active.length > 4 && (
-              <div className="queue-summary"><span>另有 {data.active.length - 4} 部正在处理</span></div>
+            {data.active.length > ACTIVE_ROWS && (
+              <div className="queue-summary"><span>另有 {data.active.length - ACTIVE_ROWS} 部正在处理</span></div>
             )}
           </section>
           {waitingRows.length > 0 && (
