@@ -92,7 +92,7 @@ def _llm_cfg() -> AgentConfig:
 
 
 @pytest.mark.parametrize("fail_start", [False, True])
-def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
+def test_sensor_owner_serves_cached_readings_with_power_off_and_stops(
     tmp_path, monkeypatch, fail_start
 ):
     from unittest.mock import Mock
@@ -101,7 +101,7 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.agent.server import launcher
-    from taskpaw_v3.core import temperatures
+    from taskpaw_v3.core import sensors
     from taskpaw_v3.core.lifecycle import GracefulShutdown
     from taskpaw_v3.core.protocol import EventQueue
     from taskpaw_v3.monitors import runtime
@@ -109,7 +109,7 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
     config = _llm_cfg()
     config.power.enabled = False
     config.workflow.enabled = False
-    config.api_token = "temperature-network-test"
+    config.api_token = "sensor-network-test"
     shutdown = GracefulShutdown()
     monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
     monkeypatch.setattr(
@@ -121,17 +121,23 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
     monkeypatch.setattr(
         "taskpaw_v3.agent.server.admin.MonitorAdmin.status_view", lambda self: {}
     )
-    native = Mock(return_value=temperatures.parse_gpu("0, 45"))
-    thermal = temperatures.TemperatureSampler(reader=native)
+    reading = {
+        "source": "lhm",
+        "cpu_c": 61.0,
+        "gpu_c": 45.0,
+        "fans": [{"name": "CPU Fan", "rpm": 1218}],
+    }
+    native = Mock(return_value=reading)
+    probe = sensors.SensorSampler(reader=native)
 
     def start():
-        thermal.tick()
+        probe.tick()
         if fail_start:
-            raise RuntimeError("temperature startup fixture failure")
+            raise RuntimeError("sensor startup fixture failure")
 
-    thermal.start = Mock(side_effect=start)
-    thermal.stop = Mock(wraps=thermal.stop)
-    monkeypatch.setattr(temperatures, "TemperatureSampler", lambda: thermal)
+    probe.start = Mock(side_effect=start)
+    probe.stop = Mock(wraps=probe.stop)
+    monkeypatch.setattr(sensors, "SensorSampler", lambda: probe)
     sessions = []
     original_bootstrap = launcher.bootstrap_control
 
@@ -146,7 +152,7 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
     monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
     try:
         if fail_start:
-            with pytest.raises(RuntimeError, match="temperature startup fixture"):
+            with pytest.raises(RuntimeError, match="sensor startup fixture"):
                 launcher.run_agent(
                     config,
                     queue=EventQueue("m"),
@@ -162,7 +168,7 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
                 config_path=tmp_path / "agent.yaml",
                 block=False,
             )
-            thermal.start.assert_called_once()
+            probe.start.assert_called_once()
             network = TestClient(apps[0])
             control = TestClient(apps[1])
             assert network.get("/status").status_code == 401
@@ -170,18 +176,22 @@ def test_temperature_owner_serves_cached_readings_with_power_off_and_stops(
                 "/status", headers={"Authorization": f"Bearer {config.api_token}"}
             ).json()
             assert status["power"] is None
-            assert status["temperatures"]["gpu"]["celsius"] == 45
+            assert "temperatures" not in status
+            assert {k: status["sensors"][k] for k in reading} == reading
+            assert status["sensors"]["at"] is not None
             for range_ in ("24h", "7d", "30d"):
                 view = control.get(
                     f"/control/power?range={range_}",
                     headers={"Authorization": f"Bearer {sessions[0].token}"},
                 ).json()
-                assert view["temperatures"]["gpu"]["celsius"] == 45
-                assert view["temperatures"]["cpu"]["reason"] == "no_reader"
+                assert "temperatures" not in view
+                assert view["sensors"]["cpu_c"] == 61.0
+                assert view["sensors"]["fans"] == reading["fans"]
+                assert view["sensors_age_s"] >= 0
             native.assert_called_once()
     finally:
         shutdown.shutdown()
-    thermal.stop.assert_called_once()
+    probe.stop.assert_called_once()
     assert shutdown.stopped.is_set()
 
 

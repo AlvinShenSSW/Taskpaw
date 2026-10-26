@@ -1,7 +1,8 @@
 """The 功耗 tab's machines: this agent plus its peers (PWR-3, #289).
 
 Design: docs/specs/2026-10-22-power-estimation.md, v2 PW06/PW08. Power and
-energy are estimates (估算); optional #323 temperatures are sensor readings.
+energy are estimates (估算); optional #336 `sensors` are readings, passed
+through as received and aged on this agent's monotonic clock.
 
 - **Peers** are `{name, address}` in agent.yaml `power.peers`; requests carry
   this agent's own api_token (the Hub's single polling token already has to
@@ -59,7 +60,6 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
@@ -509,76 +509,6 @@ def _text(value: Any, limit: int = 128) -> Optional[str]:
     return value[:limit] if isinstance(value, str) else None
 
 
-def _thermal_number(value: Any) -> Optional[float]:
-    try:
-        return _num(value)
-    except OverflowError:
-        # A JSON integer may exceed float range; only its thermal field fails.
-        return None
-
-
-def _temperatures(value: Any, elapsed: float) -> Optional[dict[str, Any]]:
-    """Validate thermal data separately: a bad sensor never discards watts.
-
-    Age uses durations only. Add the complete request time conservatively;
-    `sampled_at` is diagnostic, never a clock shared with another machine.
-    """
-    if not isinstance(value, dict):
-        return None
-    age = _thermal_number(value.get("age_s"))
-    sampled = _thermal_number(value.get("sampled_at"))
-    age = age if age is not None and age >= 0 else None
-    sampled = sampled if sampled is not None and sampled >= 0 else None
-    out: dict[str, Any] = {
-        "sampled_at": sampled,
-        "age_s": age + elapsed if age is not None else None,
-        "stale": value.get("stale") is not False or age is None or sampled is None,
-    }
-    for key in ("cpu", "gpu", "board"):
-        sensor = value.get(key)
-        if not isinstance(sensor, dict):
-            return None
-        number = _thermal_number(sensor.get("celsius"))
-        number = number if number is not None and -50 <= number <= 200 else None
-        label, source = _text(sensor.get("label")), _text(sensor.get("source"), 64)
-        reason = _text(sensor.get("reason"), 64)
-        if not label:
-            return None
-        if sensor.get("celsius") is not None and (number is None or not source):
-            number, reason = None, "invalid_reading"
-        clean = {"celsius": number, "label": label, "source": source, "reason": reason}
-        if key == "gpu":
-            readable, total = sensor.get("readable"), sensor.get("total")
-            if (
-                type(readable) is not int
-                or type(total) is not int
-                or not 0 <= readable <= total <= 128
-                or (number is not None and readable == 0)
-            ):
-                return None
-            clean.update(readable=readable if number is not None else 0, total=total)
-        out[key] = clean
-    return out
-
-
-def _aged_temperatures(entry: dict[str, Any], now: float) -> Optional[dict[str, Any]]:
-    sample = entry.get("temperatures")
-    if sample is None:
-        return None
-    result = deepcopy(sample)
-    age = result["age_s"]
-    if age is not None:
-        age += max(0.0, now - entry["temperature_mono"])
-        result["age_s"] = age
-    result["stale"] = bool(
-        result["stale"]
-        or not entry.get("temperature_status_ok", False)
-        or age is None
-        or age >= STALE_SECONDS
-    )
-    return result
-
-
 def _new_entry(name: str, address: str) -> dict[str, Any]:
     return {
         "name": name,
@@ -872,10 +802,8 @@ class PowerFleet:
                 state="invalid_address",
                 error="invalid_address",
                 power=None,
-                temperature_status_ok=False,
             )
             return []
-        requested_at = self._clock()
         try:
             status = self._fetch(url, token)
         except PeerError as exc:
@@ -896,7 +824,6 @@ class PowerFleet:
                 error=exc.code,
                 checked_at=self._wall(),
                 power=None,
-                temperature_status_ok=False,
             )
             return []
         if not isinstance(status, dict):
@@ -907,7 +834,6 @@ class PowerFleet:
                 error="invalid",
                 checked_at=self._wall(),
                 power=None,
-                temperature_status_ok=False,
             )
             return []
         worker = status.get("workflow_worker")
@@ -918,6 +844,7 @@ class PowerFleet:
             answered=True,
             outcome="idle",
         )
+        sensors = status.get("sensors")  # #336: as received
         seen = dict(
             machine=_text(status.get("machine")),
             server_id=_text(status.get("server_id")),
@@ -926,11 +853,8 @@ class PowerFleet:
             checked_at=self._wall(),
             checked_mono=self._clock(),
             error=None,
-            temperatures=_temperatures(
-                status.get("temperatures"), max(0.0, self._clock() - requested_at)
-            ),
-            temperature_mono=self._clock(),
-            temperature_status_ok=True,
+            sensors=sensors if isinstance(sensors, dict) else None,
+            sensors_mono=self._clock(),
         )
         if self._is_self(status):
             self._update(peer, **seen, state="self", power=None, history={}, energy={})
@@ -1032,6 +956,7 @@ class PowerFleet:
             name, address = key
             seen = entry.get("checked_mono")
             age = None if seen is None else max(0.0, now - seen)
+            sensed = entry.get("sensors_mono")
             stale = age is None or age > STALE_SECONDS
             first = duplicates.get(key)
             state = "duplicate" if first else entry.get("state", "pending")
@@ -1059,7 +984,8 @@ class PowerFleet:
                     "version": entry.get("version"),
                     "os": entry.get("os"),
                     "power": None if first else entry.get("power"),
-                    "temperatures": _aged_temperatures(entry, now),
+                    "sensors": entry.get("sensors"),
+                    "sensors_age_s": None if sensed is None else now - sensed,
                     "energy": energy,
                     "energy_stale": energy is not None
                     and not (

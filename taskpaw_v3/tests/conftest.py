@@ -82,14 +82,15 @@ def _power_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _temperature_isolation(monkeypatch):
-    """#323: launcher tests never invoke the machine's native thermal reader."""
-    from taskpaw_v3.core import temperatures
+def _sensor_isolation(monkeypatch):
+    """#336: no test reaches LibreHardwareMonitor (127.0.0.1:8085) or a real
+    nvidia-smi through the sensor sampler."""
+    from taskpaw_v3.core import sensors
 
     monkeypatch.setattr(
-        temperatures,
-        "_gpu_reader",
-        lambda: temperatures.GpuReading(reason="provider_missing", valid=False),
+        sensors,
+        "read_sensors",
+        lambda: {"source": None, "cpu_c": None, "gpu_c": None, "fans": []},
     )
 
 

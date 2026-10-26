@@ -402,6 +402,27 @@ The Hub also writes `~/.taskpaw-hub/hub.db` (SQLite `status_log`) and
 **[openclaw-integration.md](openclaw-integration.md)** for the schema, the metric
 field reference, and the `state`-not-`enabled` rule.
 
+## 传感器（可选）
+
+The 功耗 page shows each Windows machine's CPU and GPU temperature and its fan
+speeds when LibreHardwareMonitor (LHM) runs on that machine. Without LHM an
+NVIDIA GPU's temperature still comes from `nvidia-smi`, and CPU and fans show
+「LHM 未运行」. Board and chassis temperatures are not shown.
+
+On each machine, once:
+
+1. Install LibreHardwareMonitor and run it as administrator. Install PawnIO
+   when LHM asks for it; without the driver LHM cannot read the CPU or the
+   motherboard fans.
+2. Options: enable **Run on Windows startup**, **Start minimized** and
+   **Minimize to tray**.
+3. Options → **Remote Web Server**: **Run**, port **8085**, listen on
+   **127.0.0.1** (loopback only; nothing is opened to the LAN).
+
+TaskPaw reads it automatically every 5 s; there is nothing to configure in
+TaskPaw. A reading older than 30 s is shown as 已过期, and a machine running an
+older TaskPaw shows 「传感器未提供 · 需升级 TaskPaw」.
+
 ## Running as a background service
 
 These are plain foreground processes. For always-on operation wrap each in your

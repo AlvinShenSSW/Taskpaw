@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from taskpaw_v3 import __version__
-from taskpaw_v3.core import power, power_fleet, restart, temperatures
+from taskpaw_v3.core import power, power_fleet, restart, sensors
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
@@ -185,7 +185,7 @@ def run_agent(
     workflow_host = None
     worker_host = None  # P2-2: role=worker
     power_sampler: Optional[power.PowerSampler] = None
-    temperature_sampler: Optional[temperatures.TemperatureSampler] = None
+    sensor_sampler: Optional[sensors.SensorSampler] = None
     fleet: Optional[power_fleet.PowerFleet] = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
@@ -214,12 +214,12 @@ def run_agent(
                     log.error("The power peers refresher did not stop in time")
                 if power_fleet.get_fleet() is fleet:
                     power_fleet.set_fleet(None)
-            if temperature_sampler is not None:
+            if sensor_sampler is not None:
                 try:
-                    if not temperature_sampler.stop():
-                        log.error("The temperature sampler did not stop in time")
+                    if not sensor_sampler.stop():
+                        log.error("The sensor sampler did not stop in time")
                 except Exception:
-                    log.exception("Could not stop the temperature sampler")
+                    log.exception("Could not stop the sensor sampler")
             if power_sampler is not None:
                 try:
                     power_sampler.stop()  # flushes the open 15-minute bucket
@@ -327,9 +327,9 @@ def run_agent(
             ),
             data_dir=config_path.parent if config_path is not None else None,
         )
-        # #323: its own bounded reader/thread, including when power is disabled.
-        # HTTP reads only this cache; failures cannot consume a power tick's budget.
-        thermal = temperature_sampler = temperatures.TemperatureSampler()
+        # #336: CPU / GPU temperature and fans, its own thread, including when
+        # power is disabled. HTTP reads only this cache.
+        probe = sensor_sampler = sensors.SensorSampler()
 
         # PWR-3 (#289, PW06): the 功耗 tab's peers, refreshed in the background
         # with this agent's own (live) api_token; routes read only the cache.
@@ -355,7 +355,8 @@ def run_agent(
             return {
                 **view,
                 "machine": {"name": config.machine, "os": platform.system()},
-                "temperatures": thermal.snapshot(),
+                "sensors": probe.snapshot(),
+                "sensors_age_s": probe.age_s(),
                 "peers": peers.snapshot(range_),
             }
 
@@ -383,7 +384,7 @@ def run_agent(
                 "power": sampler.live(),
                 # the retained today / week / month Wh, kept while sampling is off
                 "energy": sampler.energy(),
-                "temperatures": thermal.snapshot(),
+                "sensors": probe.snapshot(),
             }
             if config.workflow.role == "worker":  # P2-3 R16
                 status["workflow_worker"] = (
@@ -491,7 +492,7 @@ def run_agent(
         runtime_started = True
         power.set_sampler(sampler)
         sampler.start()
-        thermal.start()
+        probe.start()
         power_fleet.set_fleet(peers)
         peers.start()
         startup.checkpoint()
