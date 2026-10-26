@@ -14,7 +14,7 @@ $dir = Split-Path $exe; $cfg = Join-Path $dir "LibreHardwareMonitor.config"
 <add key="startMinMenuItem" value="true" /><add key="minTrayMenuItem" value="true" /><add key="minCloseMenuItem" value="true" />
 </appSettings></configuration>
 '@ | Set-Content -Path $cfg -Encoding UTF8
-New-NetFirewallRule -DisplayName "LibreHardwareMonitor 8085 LAN block" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Block | Out-Null
+New-NetFirewallRule -DisplayName "LibreHardwareMonitor 8085 LAN block" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Block -ErrorAction Stop | Out-Null
 Register-ScheduledTask -TaskName "LibreHardwareMonitor" -Action (New-ScheduledTaskAction -Execute $exe -WorkingDirectory $dir) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask -TaskName "LibreHardwareMonitor"; Start-Sleep 15
 (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8085/metrics).Content | Select-String 'temperature_celsius|fan_rpm'`;
