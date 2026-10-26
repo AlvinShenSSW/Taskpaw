@@ -22,8 +22,10 @@ from taskpaw_v3.core import gpu_sample
 SAMPLE_SECONDS = 5.0
 LHM_URL = "http://127.0.0.1:8085/metrics"
 LHM_TIMEOUT = 2.0
-# Step 0 (#336) may rename these: they are the single point of change.
-CPU_SENSOR, GPU_SENSOR = "CPU Package", "GPU Core"
+# Step 0 (#336), verified on the fleet: Intel reports "CPU Package", AMD Ryzen
+# reports "Core (Tctl/Tdie)"; NVIDIA reports "GPU Core". The single point of change.
+CPU_SENSORS = ("CPU Package", "Core (Tctl/Tdie)")
+GPU_SENSOR = "GPU Core"
 
 _LINE = re.compile(
     r"^lhm_[a-z0-9_]+_(?P<kind>temperature_celsius|fan_rpm)"
@@ -57,7 +59,7 @@ def parse_metrics(text: str) -> dict[str, Any]:
         if match["kind"] == "fan_rpm":
             if value > 0:
                 fans.append({"name": sensor, "rpm": round(value)})
-        elif sensor == CPU_SENSOR:
+        elif sensor in CPU_SENSORS:
             cpus.append(value)
         elif sensor == GPU_SENSOR:
             gpus.append(value)

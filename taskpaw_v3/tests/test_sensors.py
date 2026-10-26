@@ -66,6 +66,24 @@ def test_metrics_give_cpu_package_hottest_gpu_core_and_spinning_fans():
     }
 
 
+AMD_096 = (
+    'lhm_cpu_temperature_celsius {"sensorName"="Core (Tctl/Tdie)", "sensorAlias"="Core (Tctl/Tdie) (/temperature/2)", "hardwareName"="AMD Ryzen 9 8945HX with Radeon Graphics", "hardwareId"="/amdcpu/0"} 100.84375\n'
+    'lhm_cpu_temperature_celsius {"sensorName"="CCD1 (Tdie)", "sensorAlias"="CCD1 (Tdie) (/temperature/3)", "hardwareName"="AMD Ryzen 9 8945HX with Radeon Graphics", "hardwareId"="/amdcpu/0"} 100.375007629395\n'
+    'lhm_motherboard_fan_rpm {"sensorName"="Fan 3", "sensorAlias"="Fan 3 (/fan/2)", "hardwareName"="DRFXL", "hardwareId"="/lpc/it8613e/0"} 751.68115234375\n'
+    'lhm_motherboard_fan_rpm {"sensorName"="Fan 2", "sensorAlias"="Fan 2 (/fan/1)", "hardwareName"="DRFXL", "hardwareId"="/lpc/it8613e/0"} 0\n'
+    'lhm_gpunvidia_temperature_celsius {"sensorName"="GPU Core", "sensorAlias"="GPU Core (/temperature/0)", "hardwareName"="NVIDIA GeForce RTX 5060 Ti", "hardwareId"="/gpu-nvidia/0"} 72.9794921875\n'
+)
+
+
+def test_amd_ryzen_worker_output_parses():
+    """Step 0 (#336): the AMD worker names its package sensor Core (Tctl/Tdie)."""
+    assert sensors.parse_metrics(AMD_096) == {
+        "cpu_c": 100.8,
+        "gpu_c": 73.0,
+        "fans": [{"name": "Fan 3", "rpm": 752}],
+    }
+
+
 def test_lhm_0_9_6_output_parses():
     assert sensors.parse_metrics(LHM_096) == {
         "cpu_c": 68.0,
