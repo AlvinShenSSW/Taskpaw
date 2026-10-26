@@ -126,8 +126,6 @@ class DeliveryWorker:
                 },
                 deadline,
             )
-            if not self._transport.clean():
-                self.request_stop()
             if not result.get("ok"):
                 raise UpstreamError(result.get("reason", "upstream_failed"))
         finally:

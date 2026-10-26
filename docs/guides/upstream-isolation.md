@@ -44,10 +44,14 @@ It never flushes or synchronously closes another thread's active buffered writer
 
 A physically blocked creation, OS I/O or kill cannot be promised an absolute kernel
 deadline. Time spent in process creation is charged when it returns. A retained
-process/thread/pipe produces `helper_cleanup_failed`, forbids replacement helpers
-and prevents successful service stop; later bounded cleanup can retry. It is not
-successful native cleanup. Frozen runtime wrappers require actual platform
-verification, including the owned interpreter rather than just Popen reaping.
+process/thread/pipe forbids replacement helpers and prevents successful service
+stop. A reply that already arrived is still returned when its cleanup overruns; a
+failed request whose record is retained reports `helper_cleanup_failed`. The next
+request, including the next OpenClaw send, first retries that bounded cleanup and
+starts a new helper only after it succeeds; otherwise it reports
+`helper_cleanup_failed`. A retained record is not successful native cleanup.
+Frozen runtime wrappers require actual platform verification, including the owned
+interpreter rather than just Popen reaping.
 
 Failed requests retry at the existing poll cadence. An oversized/malformed whole
 envelope requires upstream repair; the Hub does not repeatedly acknowledge a
