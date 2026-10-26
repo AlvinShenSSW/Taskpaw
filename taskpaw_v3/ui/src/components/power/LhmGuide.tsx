@@ -14,6 +14,7 @@ $dir = Split-Path $exe; $cfg = Join-Path $dir "LibreHardwareMonitor.config"
 <add key="startMinMenuItem" value="true" /><add key="minTrayMenuItem" value="true" /><add key="minCloseMenuItem" value="true" />
 </appSettings></configuration>
 '@ | Set-Content -Path $cfg -Encoding UTF8
+New-NetFirewallRule -DisplayName "LibreHardwareMonitor 8085 LAN block" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Block | Out-Null
 Register-ScheduledTask -TaskName "LibreHardwareMonitor" -Action (New-ScheduledTaskAction -Execute $exe -WorkingDirectory $dir) -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask -TaskName "LibreHardwareMonitor"; Start-Sleep 15
 (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8085/metrics).Content | Select-String 'temperature_celsius|fan_rpm'`;
@@ -57,7 +58,7 @@ export function LhmGuide({ machine }: { machine: string }) {
       <ol>
         <li>在 <b>{machine}</b> 上打开<b>管理员</b> PowerShell，先跑第 1 段安装，再跑第 2 段设置。</li>
         <li>第一次启动若弹出安装 PawnIO 驱动的提示，点同意。</li>
-        <li>它在 8085 端口提供只读的传感器读数（局域网内可见），TaskPaw 无需任何配置，Agent 下次采样即显示。</li>
+        <li>它只对本机开放：第 2 段会加一条防火墙规则，把 8085 端口对局域网封住（本机回环不受影响）；TaskPaw 无需任何配置，Agent 下次采样即显示。</li>
       </ol>
       <Cmd label="1 · 安装" text={INSTALL_CMD} />
       <Cmd label="2 · 设置并启动（写配置、开机自启、立即启动、打印读数验证）" text={SETUP_CMD} />

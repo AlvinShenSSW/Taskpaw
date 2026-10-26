@@ -192,7 +192,8 @@ describe("LHM install guide", () => {
     expect(SETUP_CMD).toContain('"$env:LOCALAPPDATA\\Microsoft\\WinGet\\Packages","$env:ProgramFiles\\WinGet\\Packages","$env:ProgramFiles\\LibreHardwareMonitor"');
     expect(SETUP_CMD).toContain('-User "$env:USERDOMAIN\\$env:USERNAME"');
     expect(SETUP_CMD).toContain('<add key="listenerIp" value="127.0.0.1" />');
-    expect(SETUP_CMD.split("\n")).toHaveLength(13);
+    expect(SETUP_CMD).toContain('New-NetFirewallRule -DisplayName "LibreHardwareMonitor 8085 LAN block" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Block');
+    expect(SETUP_CMD.split("\n")).toHaveLength(14);
     expect(SETUP_CMD).not.toMatch(/&lt;|&gt;|^\s|\s$/);
   });
 
