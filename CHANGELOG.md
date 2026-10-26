@@ -4,10 +4,10 @@
 
 ---
 
-## V3 3.11.0 — 功耗页内置 LibreHardwareMonitor 安装引导（#345）
+## V3 3.11.1 — 功耗页内置 LibreHardwareMonitor 安装引导（#345）
 
 - 界面：功耗页某台机器的传感器行显示「LHM 未运行」时，行尾出现「安装步骤」链接，点开在该行下方展开引导（按已确认的 V3 预览）：代入机器名的说明、三步操作，以及「安装」「设置并启动」两段 PowerShell 命令，各带复制按钮；剪贴板不可用时自动选中命令文本。
-- 仅前端改动，无后端、协议或设置变化；TaskPaw 不会自动安装或远程推送 LHM。版本号不变，发布时统一升级。
+- 仅前端改动，无后端、协议或设置变化；TaskPaw 不会自动安装或远程推送 LHM。V3 构建内六处版本同步为 3.11.1；经内部评审、Codex（gpt-6-astra，xhigh）独立外门五轮与本地全量回归。
 - 更正：LHM 0.9.6 会忽略不在本机地址列表里的 `listenerIp`（127.0.0.1 即如此）而监听全部网卡，且其 web 服务默认不鉴权、带 `/Sensor?action=Set` 风扇控制端点，所以 3.11.0 说明中「只读本机 127.0.0.1:8085」不准确。设置命令现在在启动 LHM 前加一条入站防火墙规则封住 TCP 8085（规则建不成则脚本中止、不启动 LHM；本机回环不受 Windows 防火墙过滤，Agent 读数不受影响）。**按 3.11.0 说明装过 LHM 的机器请以管理员 PowerShell 补跑一次：** `New-NetFirewallRule -DisplayName "LibreHardwareMonitor 8085 LAN block" -Direction Inbound -Protocol TCP -LocalPort 8085 -Action Block`。设置命令的可执行文件搜索路径补上 winget 机器级安装目录。
 
 ## V3 3.11.0 — 审计修复批次
