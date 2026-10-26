@@ -43,7 +43,8 @@ class Harness:
             operator_principal_id=identity(),
             operator_credential_id=identity(),
             operator_secret_digest=digest_secret(self.secret),
-            operator_expires_at=self.clock.now() + timedelta(days=7),
+            # ready/service fixtures jump to real time; 7 days expired on 2026-10-26.
+            operator_expires_at=self.clock.now() + timedelta(days=3650),
             tls=TlsBinding(
                 authority_id=authority_id,
                 certificate_sha256="a" * 64,
