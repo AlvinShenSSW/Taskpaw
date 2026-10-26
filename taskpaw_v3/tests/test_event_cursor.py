@@ -588,6 +588,51 @@ def test_unverified_reinitialised_agent_adopts_only_past_the_floor(tmp_path, nex
         store.close()
 
 
+@pytest.mark.parametrize("next_id", [1, 4])
+def test_identityless_unverified_row_adopts_only_past_the_floor(tmp_path, next_id):
+    config, queue = trusted_queue(tmp_path, next_id)
+    for n in range(3):
+        queue.add("fixture", f"offered {n}")
+    queue.payload(next_id - 1)  # offered, never acknowledged
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        sid = store.add_server("fixture", "127.0.0.1", 15680)
+        store._conn.execute(
+            "UPDATE event_cursors SET state='unverified', identity_json=NULL,"
+            " boot_id=NULL, resume_floor=NULL WHERE server_id=?",
+            (sid,),
+        )
+        store._conn.commit()
+        store.set_config("last_event_ids", json.dumps({str(sid): 2}))
+        assert store.get_event_cursor(sid)["identity"] is None
+        cursor = queue.cursor_snapshot()
+        assert cursor["offered_highwater"] >= 2
+        with actual_agent(config, queue) as (port, requests):
+            store.update_server(sid, port=port)
+            poller = Poller(
+                store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
+            )
+            poller.poll_once()
+            channel = poller.snapshot_event_channels()[sid]
+            binding = store.get_event_cursor(sid)
+            if next_id == 4:
+                # The agent's durable floor (3) is past the Hub's floor (2).
+                assert channel["state"] == "ready"
+                assert [path for path, _ in requests] == ["/status", "/events"]
+                assert "ack=2" in requests[1][1]
+                assert binding["state"] == "bound"
+            else:
+                # resume_floor 0 < 2: adopting would drop the offered 1-2.
+                assert channel["state"] == "paused"
+                assert channel["reason"] == "state_identity_changed"
+                assert requests == [("/status", "")]
+                assert binding["state"] == "unverified"
+                assert store.read_acks() == {sid: 2}
+    finally:
+        queue.close()
+        store.close()
+
+
 def test_unverified_floor_above_offered_highwater_is_not_adopted(tmp_path):
     config, queue = trusted_queue(tmp_path)
     store, sid = _upgraded_hub(tmp_path, queue.cursor_snapshot(), 900)

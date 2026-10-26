@@ -2,7 +2,7 @@
 
 Date: 2026-10-26 · Base: `cb9aca4` (main, 3.10.6) · Branch: `afk/hub-cursor-autoadopt-332`
 Planner: Claude (driver). Implementer: Claude Opus 5.5. Gate: Codex astra xhigh.
-Design v3 (after critic rounds 1-3; see Debate record).
+Design v4 (after critic rounds 1-3 and Codex gate r1; see Debate record).
 
 ## Spec review
 
@@ -64,12 +64,17 @@ after passing it).
   binding's stream differs from it (store.py 1447-1457), which would turn the
   adoption into a permanent `cursor_store_invalid` (critic C8, probed). The
   CLI refuses the same case (`__main__.py` ~166), so re-registering the agent
-  stays the documented path. An `unverified` row whose recorded pre-upgrade
-  identity differs from the agent's current identity adopts only when
-  `cursor["resume_floor"] >= floor` (the re-initialised stream is already
-  past the Hub's floor), else it stays `paused` with `state_identity_changed`
-  (critic C9); no consumed row can exist for such a row yet, so the C8
-  trap does not apply.
+  stays the documented path. An `unverified` row whose recorded pre-upgrade identity differs from the
+  agent's current identity, **or whose recorded identity is unknown** (the
+  migration found no parseable status, `identity_json` NULL), adopts only when
+  `cursor["resume_floor"] >= floor` (the stream is already past the Hub's
+  floor, i.e. the agent rebooted after passing it), else it stays `paused`
+  with `state_identity_changed` (critic C9; Codex CX1 v4: with an unknown
+  identity the stream may be a replacement that still holds unacknowledged
+  ids below the floor, which `ack = floor` would drop). A same-stream agent
+  under an identity-less row therefore binds at its next reboot; the guide
+  says so. No consumed row can exist for such a row yet, so the C8 trap does
+  not apply.
 - AC5 `cursor_floor_regressed` stays `paused` exactly as today.
 - AC6 `/status` and the `event_channel` field keep their shape; an adopted
   channel reports `ready`. One `log.warning("Event cursor adopted server=%s
@@ -161,11 +166,8 @@ if binding["state"] == "bound":
 elif floor == -1:
     acks[sid] = -1
 else:
-    if (
-        binding["identity"] not in (None, identity)
-        and cursor["resume_floor"] < floor
-    ):
-        raise StateError("state_identity_changed")      # unverified, re-initialised stream (C9)
+    if binding["identity"] != identity and cursor["resume_floor"] < floor:
+        raise StateError("state_identity_changed")      # unverified: differing or unknown identity (C9, CX1)
     adopt = True
 if adopt:
     if cursor["offered_highwater"] < floor:
@@ -263,6 +265,11 @@ RED: the AC7 test changes fail on `cb9aca4`. GREEN: targeted, then full suite + 
   the bound-row identity adoption (AC4) and keeps the hint change. C9 (minor):
   `unverified` rows with a differing recorded identity now require
   `resume_floor >= floor`. Checks (a)–(e): no finding.
+
+- v3 → v4 (Codex gate r1, CX1 P1, reproduced): identity-less `unverified`
+  rows bypassed the new-stream guard; v4 treats an unknown identity like a
+  differing one (`binding["identity"] != identity`), adds the test for both
+  outcomes and a guide line (bind at the next agent reboot).
 
 ## Handoff notes
 

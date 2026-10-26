@@ -318,12 +318,9 @@ class Poller:
         elif floor == -1:
             acks[sid] = -1
         else:
-            # An unverified row recorded before the upgrade may name an older
-            # stream; a new stream is adopted only once it is past the floor.
-            if (
-                binding["identity"] not in (None, identity)
-                and cursor["resume_floor"] < floor
-            ):
+            # An unverified row may name an older stream or none; a differing or
+            # unknown stream is adopted only once it is past the floor.
+            if binding["identity"] != identity and cursor["resume_floor"] < floor:
                 raise StateError("state_identity_changed")
             adopt = True
         if adopt:

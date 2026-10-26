@@ -60,14 +60,17 @@ macOS 安装包验收覆盖旧计数器迁移、迁移后启动及退出再启�
 事件、outbox 与已消费水位的最大 ID），不重复投递，也不跳过 Agent 仍持有的事件。
 每次采纳记一条 `Event cursor adopted` 警告日志，事件通道恢复 `ready`：
 
-- 升级前已有的注册（`unverified`）或已有历史的新注册：Agent 本次启动已提供到该下界
-  即采纳；否则保持 `cursor_adoption_required`。
+- 升级前已有的注册（`unverified`，记录的身份与 Agent 当前一致）：Agent 已提供到该下界
+  即采纳；否则保持 `cursor_adoption_required`。记录的身份不同或未知（包括已有历史的
+  新注册）：还要求 Agent 的 `resume_floor` 不低于 Hub 下界，否则保持 `state_identity_changed`。
 - 已绑定注册的 ack 条目丢失：身份和水位检查照常，通过后采纳。
 - `last_event_ids` 配置损坏：下一次轮询替换，原始值保存一次为
   `last_event_ids.fault-*` 配置行；没有已存事件的注册从头确认，可能重收 Agent 仍
   保留的队列一次。
 - 升级前记录的事件流与 Agent 当前事件流不同（Agent 已重新初始化）：新事件流的
   `resume_floor` 不低于 Hub 下界时采纳；否则保持 `state_identity_changed`。
+- 升级前登记但没有可解析状态的 Agent，在它下一次重启（其 resume_floor 不低于 Hub 下界）
+  后自动绑定；在此之前通道显示 `state_identity_changed`。
 
 仍需操作者处理：已绑定注册的身份变化（`state_identity_changed`）需重新登记该
 Agent；`cursor_floor_regressed`（Agent 回滚到旧状态）和手动删除游标行但已有已消费
