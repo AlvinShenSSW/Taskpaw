@@ -209,7 +209,7 @@ export interface WorkerTransfer { film: string; dir: "down" | "up"; done: number
 export interface WorkerCurrent {
   film_id: string; rev?: number; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
   progress: string; elapsed_s: number; uses_gpu: boolean; step: WorkflowStep; started_at: string;
-  power?: LivePower | null; energy?: Record<string, unknown> | null; temperatures?: MachineTemperatures | null;
+  power?: LivePower | null; energy?: Record<string, unknown> | null;
 }
 
 export interface MonitorMutationResult {
@@ -496,14 +496,11 @@ export interface PowerHistory {
 // rolled over); `energy_stale` when the peer is not answering now. `duplicate`: the same machine as the
 // earlier peer `duplicate_of` — listed, never summed.
 export interface PeerEnergy { today_wh: number | null; week_wh: number | null; month_wh: number | null }
-// #323: current sensor readings, independent of estimated watts and their history.
-export interface TemperatureSensor {
-  celsius: number | null; label: string; source: string | null; reason: string | null;
-}
-export interface MachineTemperatures {
-  sampled_at: number | null; age_s: number | null; stale: boolean;
-  cpu: TemperatureSensor; board: TemperatureSensor;
-  gpu: TemperatureSensor & { readable: number; total: number };
+// #336: the machine's last sensor sample (LibreHardwareMonitor, else nvidia-smi GPU only), independent of
+// estimated watts. `sensors_age_s` beside it is seconds since the controller sampled / received it.
+export interface MachineSensors {
+  at: number | null; source: "lhm" | "nvidia-smi" | null; cpu_c: number | null; gpu_c: number | null;
+  fans: { name: string; rpm: number }[];
 }
 export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
@@ -511,12 +508,12 @@ export interface PowerPeerRow {
   energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
   // P2-4 R11: `workflow` = an enrolled GPU worker that joined automatically (工作机 · 自动加入)
   source?: "config" | "workflow";
-  temperatures?: MachineTemperatures | null;
+  sensors?: MachineSensors | null; sensors_age_s?: number | null;
 }
 export interface PowerView {
   // `energy`: this machine's retained today / week / month Wh, present while `power` is null (sampling off)
   power: LivePower | null; energy?: PeerEnergy | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];
-  temperatures?: MachineTemperatures | null;
+  sensors?: MachineSensors | null; sensors_age_s?: number | null;
 }
 export interface PowerPeerSetting { name: string; address: string }
 export interface PowerSettings {

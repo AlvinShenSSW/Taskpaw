@@ -1,7 +1,7 @@
 // PWR-3 「功耗」 (approved preview design-system/taskpaw-v3/preview/power-v3.html): this machine and its
 // peers — live estimate, today / week / month, the stacked chart, energy per machine and activity,
-// and every film's energy from the media workflow. Watts/energy are estimates; current temperatures
-// are actual sensor readings. This AgentConsole tab does not depend on the console.
+// and every film's energy from the media workflow. Watts/energy are estimates; temperatures and fan
+// speeds are actual sensor readings. This AgentConsole tab does not depend on the console.
 import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import MemoryIcon from "@mui/icons-material/Memory";
@@ -9,9 +9,9 @@ import MovieIcon from "@mui/icons-material/Movie";
 import TuneIcon from "@mui/icons-material/Tune";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { GlobalStyles, Snackbar } from "@mui/material";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { api, HttpError, type EnergyRate, type FilmRow, type PowerRange, type PowerSettings } from "../../api";
+import { api, HttpError, type EnergyRate, type FilmRow, type PowerRange, type PowerSettings, type PowerView } from "../../api";
 import { MEDIA_CSS } from "../media/mediaStyles";
 import { Chip, Icon, Notice, PageTitle } from "../media/parts";
 import { readFilmTiming } from "../media/mediaModel";
@@ -24,8 +24,7 @@ import {
 } from "./powerModel";
 import { activityTotals, chartSeries, machinesOf, peakOf, rangeAgg, rangeLabel, stateChip, type Machine } from "./powerView";
 import { POWER_CSS } from "./powerStyles";
-import { TemperatureStrip } from "./TemperatureStrip";
-import { stampPowerTemperatures, type TimedPowerView } from "./temperatureView";
+import { SensorLine } from "./SensorLine";
 
 const RANGES: PowerRange[] = ["24h", "7d", "30d"];
 const CALENDAR: Record<PowerRange, ["today_wh" | "week_wh" | "month_wh", string]> = {
@@ -42,17 +41,14 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   const [range, setRange] = useState<PowerRange>("24h");
   const [params, setParams] = useState(false);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
-  const queryClient = useQueryClient();
   const [nowMs, setNowMs] = useState(() => performance.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(performance.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  const readDay = async () => {
-    const started = performance.now();
-    const value = await api.power("24h");
-    return stampPowerTemperatures(value, started, performance.now(), queryClient.getQueryData<TimedPowerView>(["power", "24h"]));
-  };
+  // #336: the browser's receipt time, so the sensor age keeps counting between polls
+  const readDay = async (): Promise<PowerView & { sensorsReceivedMs: number }> =>
+    ({ ...await api.power("24h"), sensorsReceivedMs: performance.now() });
   const day = useQuery({ queryKey: ["power", "24h"], queryFn: readDay, refetchInterval: POLL_MS, retry: false });
   const ranged = useQuery({
     queryKey: ["power", range], queryFn: () => range === "24h" ? readDay() : api.power(range),
@@ -63,8 +59,6 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   const view = range === "24h" ? day.data : ranged.data;
   const machines = useMemo(() => machinesOf(day.data, view).map((m) => day.isError
     ? { ...m, live: null, stale: true, state: m.state === "ok" ? "unreachable" : m.state, energyStale: !!m.energy } : m), [day.data, view, day.isError]);
-  const temperatureCacheS = day.data?.temperatureReceivedMs === undefined ? null
-    : Math.max(0, nowMs - day.data.temperatureReceivedMs) / 1000;
   const say = (text: string) => setToast({ text, key: Date.now() });
   const settings = config.data?.power as PowerSettings | undefined;
 
@@ -82,7 +76,7 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
     body = <>{day.isError && <Notice tone="red" icon={WarningAmberIcon}>无法读取功耗与温度，最后温度读数已过期，请重试。</Notice>}
       <PowerBody machines={machines} range={range} rows={films.data?.state === "running" ? films.data.films : undefined}
       rates={films.data?.energy_rates} workflowOff={films.data ? films.data.state !== "running" : films.isError}
-      temperatureCacheS={temperatureCacheS} temperatureFailed={day.isError} onOpenMedia={onOpenMedia} say={say} /></>;
+      sensorsReceivedMs={day.data?.sensorsReceivedMs} nowMs={nowMs} failed={day.isError} onOpenMedia={onOpenMedia} say={say} /></>;
   }
 
   return (
@@ -119,10 +113,10 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   );
 }
 
-function PowerBody({ machines, range, rows, rates, workflowOff, temperatureCacheS, temperatureFailed, onOpenMedia, say }: {
+function PowerBody({ machines, range, rows, rates, workflowOff, sensorsReceivedMs, nowMs, failed, onOpenMedia, say }: {
   machines: Machine[]; range: PowerRange; rows: FilmRow[] | undefined; rates: EnergyRate[] | undefined;
   workflowOff: boolean; onOpenMedia?: () => void; say: (text: string) => void;
-  temperatureCacheS: number | null; temperatureFailed: boolean;
+  sensorsReceivedMs: number | undefined; nowMs: number; failed: boolean;
 }) {
   const online = machines.filter((m) => m.live);
   const all = sumSplits(online.map((m) => splitOf(m.live)));
@@ -175,7 +169,7 @@ function PowerBody({ machines, range, rows, rates, workflowOff, temperatureCache
             <div><h2 id="pw-machines-title">机器</h2><p>整机功耗估算 = GPU 实测 + CPU + 其他基线 · 每 5 秒刷新 · 温度为传感器读数</p></div>
             <Chip>{machines.length} 台 · {online.length} 台有读数</Chip>
           </div>
-          <ul className="machines">{machines.map((m) => <MachineRow key={m.id} m={m} temperatureCacheS={temperatureCacheS} temperatureFailed={temperatureFailed} />)}</ul>
+          <ul className="machines">{machines.map((m) => <MachineRow key={m.id} m={m} sensorsReceivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />)}</ul>
           <p className="section-note">其他机器在「估算参数」中按名称与地址添加；只运行 Hub 的 Mac 没有 TaskPaw Agent，暂不计入。</p>
         </section>
 
@@ -213,7 +207,9 @@ function PowerBody({ machines, range, rows, rates, workflowOff, temperatureCache
   );
 }
 
-function MachineRow({ m, temperatureCacheS, temperatureFailed }: { m: Machine; temperatureCacheS: number | null; temperatureFailed: boolean }) {
+function MachineRow({ m, sensorsReceivedMs, nowMs, failed }: {
+  m: Machine; sensorsReceivedMs: number | undefined; nowMs: number; failed: boolean;
+}) {
   const split = splitOf(m.live);
   const [stateText, tone] = stateChip(m);
   const act = activityNow(m.live?.activity);
@@ -243,7 +239,7 @@ function MachineRow({ m, temperatureCacheS, temperatureFailed }: { m: Machine; t
       <div className="m-today"><span className="k">今日</span>
         <strong>{m.live ? fmtKwh(m.live.today_wh) : m.energy?.today_wh != null ? fmtKwh(m.energy.today_wh) : "—"}<small>度</small></strong>
         {!m.live && m.energy?.today_wh != null && m.energyStale && <small>数据过期</small>}</div>
-      <TemperatureStrip value={m.temperatures} cacheS={temperatureCacheS} failed={temperatureFailed} />
+      <SensorLine sensors={m.sensors} ageS={m.sensors_age_s} receivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />
     </li>
   );
 }
