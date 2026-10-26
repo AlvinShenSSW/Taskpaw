@@ -1,6 +1,6 @@
 # Run on the Windows Lada / ComfyUI (GPU) box to set up + start a TaskPaw V3 agent.
 #   Right-click → "Run with PowerShell", or:  powershell -ExecutionPolicy Bypass -File scripts\setup-agent.ps1
-# Migrates the existing V2 (taskpaw.py) config to V3 monitors, scaffolds
+# Migrates the existing V2 agent config to V3 monitors, scaffolds
 # agent.yaml, and starts. (This is NOT moomoo — moomoo is a Mac; use
 # setup-agent-moomoo.command there.)
 $ErrorActionPreference = "Stop"

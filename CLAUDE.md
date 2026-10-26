@@ -11,8 +11,8 @@ Claude-specific notes:
   use full paths) when a command isn't found. Python 3.10+ comes from `uv`
   (system `python3` is 3.9).
 - **Canonical test command is `uv run pytest`** (there is no `web` extra). See AGENTS.md.
-- **V2 is frozen, V3 is greenfield under `taskpaw_v3/`.** Don't refactor V2 for
-  taste; new work follows [docs/specs/2026-06-27-taskpaw-v3-design.md](docs/specs/2026-06-27-taskpaw-v3-design.md).
+- **V3 lives under `taskpaw_v3/`.** V2 was removed in 3.10.x (tag `v3.10.6`
+  holds it); new work follows [docs/specs/2026-06-27-taskpaw-v3-design.md](docs/specs/2026-06-27-taskpaw-v3-design.md).
 - The V3 UI design system lives in
   [design-system/taskpaw-v3/](design-system/taskpaw-v3/) — read `MASTER.md` and
   the relevant `pages/*.md` before building any V3 frontend page.

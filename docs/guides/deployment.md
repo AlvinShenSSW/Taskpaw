@@ -349,7 +349,7 @@ python -m taskpaw_v3.agent
 
 ## 4. Windows Lada / ComfyUI box (GPU)
 
-Where the V2 `taskpaw.py` ran — so this is the machine with a config to migrate,
+Where the V2 agent ran — so this is the machine with a config to migrate,
 and where GPU/VRAM monitoring lives.
 
 ```powershell

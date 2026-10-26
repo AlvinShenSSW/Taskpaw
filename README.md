@@ -18,9 +18,8 @@ The UI ships **Simplified Chinese (default) and English**, a Settings tab
 (language · agent config · about), a live status dashboard, and native
 file/folder pickers for path fields.
 
-> **V2 is frozen.** The original single-file Windows app (`taskpaw.py`) still
-> works but is no longer developed. All new work lives under
-> [`taskpaw_v3/`](taskpaw_v3/).
+> **V2 was removed** in 3.10.x; tag `v3.10.6` holds the original single-file
+> app. All work lives under [`taskpaw_v3/`](taskpaw_v3/).
 
 ## What it monitors
 
