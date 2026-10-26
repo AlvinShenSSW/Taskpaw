@@ -174,6 +174,7 @@ class WorkflowEvents:
             )
             now = datetime.now(timezone.utc)
             completed = []
+            walked: set[str] = set()
             for film, row in zip(films, rows):
                 if row["group"] == "done":
                     ends = [
@@ -189,12 +190,22 @@ class WorkflowEvents:
                     ):
                         continue
                     completed.append(max(ends).isoformat())
+                walked.add(film.film_id)
                 self._observe_film(
                     film,
                     row,
                     plans.get(film.film_id),
                     remote=getattr(host, "fleet", None) is not None,
                 )
+            # #334: drop markers of films no longer walked (old done or removed);
+            # a failed save keeps them dirty for the next `_ready` to flush.
+            with self._lock:
+                if self._loaded:
+                    stale = {k for k in self._seen if _film_of(k) not in walked}
+                    if stale:
+                        self._seen -= stale
+                        self._dirty = True
+                        self._save()
             current = dispatch.get("current")
             summary = {
                 "counts": board.counts(rows, packages),
@@ -348,6 +359,14 @@ def _currents(
         key=lambda entry: (entry[0], entry[1]),
     )
     return [item for _local, _machine, item in found[:MAX_CURRENTS]]
+
+
+def _film_of(key: str) -> str | None:
+    try:
+        value = json.loads(key)[0]
+    except (ValueError, LookupError, TypeError):
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _current(value: Any) -> dict[str, Any] | None:
