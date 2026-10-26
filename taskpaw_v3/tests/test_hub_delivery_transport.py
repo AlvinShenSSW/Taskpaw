@@ -300,6 +300,35 @@ def test_delivery_worker_parent_deadline_includes_cleanup_reserve(monkeypatch):
     assert worker.stop(timeout=2)
 
 
+def test_delivery_worker_keeps_draining_after_dirty_transport(monkeypatch):
+    from taskpaw_v3.hub.server.delivery_worker import DeliveryWorker
+
+    sent = []
+    drained = threading.Event()
+
+    def drain(send):
+        for text in ("first", "second"):
+            send("http://127.0.0.1:1/hook", "", {"text": text}, 5)
+        drained.set()
+
+    worker = DeliveryWorker(drain, interval=30)
+
+    def send(request, timeout):
+        sent.append(request["payload"]["text"])
+        return {"ok": True}
+
+    # The first send leaves a retained record; the next request heals it.
+    monkeypatch.setattr(worker._transport, "request", send)
+    monkeypatch.setattr(worker._transport, "clean", lambda: len(sent) != 1)
+    try:
+        assert worker.start()
+        assert drained.wait(3)
+        assert sent == ["first", "second"]
+        assert not worker.cancelled() and not worker.stopped
+    finally:
+        assert worker.stop(timeout=2)
+
+
 def test_owned_openclaw_accepts_rendered_message_larger_than_agent_request_cap(
     endpoint,
 ):

@@ -187,14 +187,10 @@ def test_cancel_result_after_owned_cleanup(monkeypatch, stop, failed):
 
     monkeypatch.setattr(transport, "_cleanup", at_cleanup)
     try:
-        result = transport.request({}, 3)
+        # A reply already in hand survives both a late stop and a cleanup overrun.
+        assert transport.request({}, 3) == {"ok": True}
         if failed:
-            assert result == {"ok": False, "reason": "helper_cleanup_failed"}
             assert transport._owned is records[0] and not transport.clean()
-        elif stop:
-            assert result == {"ok": False, "reason": "helper_cancelled"}
-        else:
-            assert result == {"ok": True}
         assert records[0].proc.stdin.closed and records[0].proc.stdout.closed
     finally:
         monkeypatch.setattr(transport, "_cleanup", cleanup)
@@ -1160,6 +1156,52 @@ def test_retained_cleanup_denies_replacement_and_can_retry(monkeypatch):
     assert transport._owned is record
     monkeypatch.setattr(transport, "_cleanup", cleanup)
     assert transport.retry_cleanup() and transport.clean()
+
+
+@pytest.mark.parametrize("heals", [True, False], ids=["healed", "still-retained"])
+def test_next_request_retries_retained_cleanup_before_new_helper(monkeypatch, heals):
+    import sys
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    events = []
+
+    def argv():
+        events.append("helper")
+        return [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdin.buffer.readline(); print('{\"ok\":true}')",
+        ]
+
+    monkeypatch.setattr(uw, "worker_argv", argv)
+    transport = uw.Transport()
+    cleanup = transport._cleanup
+    records = []
+
+    def flaky_cleanup(rec, cancel):
+        records.append(rec)
+        events.append("cleanup")
+        return cleanup(rec, cancel) and heals and len(records) > 1
+
+    monkeypatch.setattr(transport, "_cleanup", flaky_cleanup)
+    try:
+        assert transport.request({}, 3) == {"ok": True}
+        first = transport._owned
+        assert first is records[0] and not transport.clean()
+        second = transport.request({}, 3)
+        if heals:
+            assert second == {"ok": True} and transport.clean()
+            assert events == ["helper", "cleanup", "cleanup", "helper", "cleanup"]
+            assert records[1] is first and records[2] is not first
+        else:
+            assert second == {"ok": False, "reason": "helper_cleanup_failed"}
+            assert events == ["helper", "cleanup", "cleanup"]
+            assert transport._owned is first and records[1] is first
+    finally:
+        monkeypatch.setattr(transport, "_cleanup", cleanup)
+        transport.cancel()
+        assert transport.retry_cleanup() and transport.clean()
 
 
 @pytest.mark.parametrize(

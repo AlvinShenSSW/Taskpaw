@@ -1133,11 +1133,18 @@ class Transport:
         with self._lock:
             if self._stopped.is_set():
                 return {"ok": False, "reason": "helper_cancelled"}
+            retained = self._owned is not None and not self._creating
+        if retained and not self.retry_cleanup():
+            return {"ok": False, "reason": "helper_cleanup_failed"}
+        with self._lock:
+            if self._stopped.is_set():
+                return {"ok": False, "reason": "helper_cancelled"}
             if self._owned or self._creating:
                 return {"ok": False, "reason": "helper_cleanup_failed"}
             self._creating = True
         deadline = time.monotonic() + timeout
         rec = None
+        result: dict
         try:
             if os.name == "nt":
                 native = _WindowsProcess()
@@ -1196,18 +1203,21 @@ class Transport:
                     break
                 rec.cancel.wait(min(0.01, max(0, deadline - time.monotonic())))
             if rec.cancel.is_set():
-                return {"ok": False, "reason": rec.error or "helper_cancelled"}
-            if proc.returncode != 0:
-                return {"ok": False, "reason": "helper_failed"}
-            try:
-                result = json.loads(rec.output)
-                if not isinstance(result, dict) or type(result.get("ok")) is not bool:
-                    raise ValueError()
-                return result
-            except (ValueError, UnicodeError, RecursionError):
-                return {"ok": False, "reason": "helper_reply_invalid"}
+                result = {"ok": False, "reason": rec.error or "helper_cancelled"}
+            elif proc.returncode != 0:
+                result = {"ok": False, "reason": "helper_failed"}
+            else:
+                try:
+                    result = json.loads(rec.output)
+                    if (
+                        not isinstance(result, dict)
+                        or type(result.get("ok")) is not bool
+                    ):
+                        raise ValueError()
+                except (ValueError, UnicodeError, RecursionError):
+                    result = {"ok": False, "reason": "helper_reply_invalid"}
         except Exception:
-            return {"ok": False, "reason": "helper_failed"}
+            result = {"ok": False, "reason": "helper_failed"}
         finally:
             cleaned = rec is None
             if rec is not None:
@@ -1221,11 +1231,11 @@ class Transport:
                 self._creating = False
                 if cleaned:
                     self._owned = None
-                stopped = self._stopped.is_set()
-            if not cleaned:
-                return {"ok": False, "reason": "helper_cleanup_failed"}
-            if stopped:
-                return {"ok": False, "reason": "helper_cancelled"}
+        # A reply that arrived survives a cleanup overrun; the retained record
+        # is retried by the next request. A failed request keeps this reason.
+        if not cleaned and not result.get("ok"):
+            return {"ok": False, "reason": "helper_cleanup_failed"}
+        return result
 
 
 if __name__ == "__main__":
