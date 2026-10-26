@@ -28,7 +28,7 @@ one issue at a time.
 Pulled from `AGENTS.md` and `docs/constitution.md`. Treat as blocking.
 
 - **V2 is frozen; V3 is greenfield under `taskpaw_v3/`.** Never refactor V2
-  (`taskpaw.py`, `taskpaw_hub.py`, `macsubs.py`) for taste. All new UI work is V3.
+- V2 (`taskpaw.py`, `taskpaw_hub.py`, `macsubs.py`) was removed in 3.10.x; tag `v3.10.6` holds it. Never reintroduce it.
 - **The agent↔Hub poll protocol is kept and only optimized, not rewritten.**
 - **Security invariants** (constitution §2–3): atomic writes, no `shell=True`,
   Bearer auth on cross-machine calls, agent control API is loopback-only, the

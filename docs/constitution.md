@@ -6,16 +6,12 @@ The AFK / review gates self-check against this file — a violation is a blocker
 
 ## 1. Scope discipline
 
-- **V2 is frozen.** `taskpaw.py`, `taskpaw_hub.py`, `macsubs.py` accept only
-  critical bug fixes until V3 ships (operator decision §9.6 of the V3 design).
-  No new features, no refactors-for-taste in V2.
-  - **Documented exception — issue #14 (event-delivery optimization).** The
-    operator explicitly chose to implement #14's clear-on-ack + Hub→OpenClaw
-    outbox + additive event fields on the **existing V2 code** (not the V3
-    monorepo), because #14 precedes the V3 backend (#15) in the dependency order
-    and §10 #1 scopes it as optimizing the *current* protocol implementation.
-    These changes are backward-compatible. V3 inherits them. This is the only
-    sanctioned V2 feature work; it does not reopen V2 for anything else.
+- **V2 was removed in 3.10.x; tag `v3.10.6` holds it.** The V2 agent, Hub and
+  MacSubs scripts are no longer in the repository.
+  - **History — issue #14 (event-delivery optimization).** #14's clear-on-ack +
+    Hub→OpenClaw outbox + additive event fields were implemented on the V2 code
+    before the V3 backend (#15) existed; they are backward-compatible and V3
+    inherits them.
 - **V3 is greenfield** and lives under `taskpaw_v3/` (a scaffolded monorepo). New
   capability goes there, per
   [docs/specs/2026-06-27-taskpaw-v3-design.md](specs/2026-06-27-taskpaw-v3-design.md).

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sqlite3
@@ -18,6 +17,24 @@ from taskpaw_v3.hub.server import store as store_module
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
+# The V2 Hub's delivery_outbox DDL, copied from taskpaw_hub.py at tag v3.10.6
+# (only re-indented); the frozen V2 writer has since been removed.
+V2_DELIVERY_OUTBOX_DDL = """
+CREATE TABLE IF NOT EXISTS delivery_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_name TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('event', 'summary')),
+    delivery_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (delivery_state IN ('pending', 'failed', 'dead_letter')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    dead_letter_alerted INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 
 def legacy_db(
     path: Path,
@@ -25,19 +42,8 @@ def legacy_db(
     timestamp: str = "2026-10-01T12:00:00",
     payload: str = '{"text":"fake"}',
 ) -> None:
-    # Extract the actual frozen writer's DDL without importing its GUI/runtime.
-    tree = ast.parse(
-        (Path(__file__).resolve().parents[2] / "taskpaw_hub.py").read_text()
-    )
-    ddl = next(
-        n.value
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Constant)
-        and isinstance(n.value, str)
-        and "CREATE TABLE IF NOT EXISTS delivery_outbox" in n.value
-    )
     with sqlite3.connect(path) as conn:
-        conn.execute(ddl)
+        conn.execute(V2_DELIVERY_OUTBOX_DDL)
         conn.execute(
             "INSERT INTO delivery_outbox(server_name,payload_json,kind,delivery_state,attempts,next_attempt_at,created_at) VALUES(?,?,'event','failed',3,?,?)",
             ("legacy", payload, timestamp, timestamp),

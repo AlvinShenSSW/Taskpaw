@@ -26,7 +26,6 @@ from .models import (
     PairingComplete,
     PairingIssue,
     StageRecord,
-    TlsBinding,
     WorkerAttempt,
     WorkerRecord,
     WorkerRegistration,
@@ -795,13 +794,6 @@ class WorkerCommands(ReadCommands):
             principal = self._check_auth(auth, self._observe_time())
             if principal["role"] != "compute_worker":
                 raise WorkflowError("forbidden")
-
-    def get_authority_binding(self) -> TlsBinding:
-        with self._lock:
-            self._ensure_open()
-            return TlsBinding.model_validate_json(
-                self._one("SELECT tls_binding_json FROM authority WHERE singleton=1")[0]
-            )
 
     def list_audit(self, auth: AuthProof, after: int, limit: int = 100) -> AuditPage:
         if (
