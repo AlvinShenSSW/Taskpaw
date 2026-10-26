@@ -180,7 +180,7 @@ a background cleanup retry thread (new mechanism for a single-operator LAN).
 - Reads/executes: `uv run pytest taskpaw_v3/tests/test_upstream_isolation.py
   taskpaw_v3/tests/test_hub_delivery_transport.py` (targeted), then the full
   `uv run pytest`, `uv run ruff check . && uv run ruff format --check . && uv run mypy`.
-  Always pass `--basetemp C:/Users/304/AppData/Local/taskpaw-pytest/afk-330`
+  Always pass `--basetemp <LOCALAPPDATA>/taskpaw-pytest/afk-330`
   (create the parent first; delete it when the issue is done). Never touch
   `%APPDATA%\TaskPaw`.
 - No generated outputs.
