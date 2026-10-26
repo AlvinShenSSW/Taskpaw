@@ -189,7 +189,7 @@ describe("LHM install guide", () => {
 
   it("keeps the commands verbatim, backslashes and angle brackets included", () => {
     expect(INSTALL_CMD).toBe("winget install --id LibreHardwareMonitor.LibreHardwareMonitor -e --accept-source-agreements");
-    expect(SETUP_CMD).toContain('"$env:LOCALAPPDATA\\Microsoft\\WinGet\\Packages","$env:ProgramFiles\\LibreHardwareMonitor"');
+    expect(SETUP_CMD).toContain('"$env:LOCALAPPDATA\\Microsoft\\WinGet\\Packages","$env:ProgramFiles\\WinGet\\Packages","$env:ProgramFiles\\LibreHardwareMonitor"');
     expect(SETUP_CMD).toContain('-User "$env:USERDOMAIN\\$env:USERNAME"');
     expect(SETUP_CMD).toContain('<add key="listenerIp" value="127.0.0.1" />');
     expect(SETUP_CMD.split("\n")).toHaveLength(13);

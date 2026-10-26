@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 export const INSTALL_CMD = String.raw`winget install --id LibreHardwareMonitor.LibreHardwareMonitor -e --accept-source-agreements`;
 
-export const SETUP_CMD = String.raw`$exe = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages","$env:ProgramFiles\LibreHardwareMonitor" -Recurse -Filter LibreHardwareMonitor.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+export const SETUP_CMD = String.raw`$exe = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages","$env:ProgramFiles\WinGet\Packages","$env:ProgramFiles\LibreHardwareMonitor" -Recurse -Filter LibreHardwareMonitor.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 if (-not $exe) { throw "LibreHardwareMonitor.exe not found" }
 $dir = Split-Path $exe; $cfg = Join-Path $dir "LibreHardwareMonitor.config"
 @'
@@ -57,7 +57,7 @@ export function LhmGuide({ machine }: { machine: string }) {
       <ol>
         <li>在 <b>{machine}</b> 上打开<b>管理员</b> PowerShell，先跑第 1 段安装，再跑第 2 段设置。</li>
         <li>第一次启动若弹出安装 PawnIO 驱动的提示，点同意。</li>
-        <li>它只监听本机 127.0.0.1:8085，TaskPaw 无需任何配置，Agent 下次采样即显示。</li>
+        <li>它在 8085 端口提供只读的传感器读数（局域网内可见），TaskPaw 无需任何配置，Agent 下次采样即显示。</li>
       </ol>
       <Cmd label="1 · 安装" text={INSTALL_CMD} />
       <Cmd label="2 · 设置并启动（写配置、开机自启、立即启动、打印读数验证）" text={SETUP_CMD} />
