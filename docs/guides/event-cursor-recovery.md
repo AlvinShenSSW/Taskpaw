@@ -54,6 +54,27 @@ macOS 安装包验收覆盖旧计数器迁移、迁移后启动及退出再启�
 一份新状态后检查后端；Windows 原生安装包仍须单独验证这些路径。
 
 
+## Hub 自动采纳
+
+3.10.6 起 Hub 轮询时自行采纳 Agent 当前报告的游标，ack 取 Hub 已收到的下界（已存
+事件、outbox 与已消费水位的最大 ID），不重复投递，也不跳过 Agent 仍持有的事件。
+每次采纳记一条 `Event cursor adopted` 警告日志，事件通道恢复 `ready`：
+
+- 升级前已有的注册（`unverified`）或已有历史的新注册：Agent 本次启动已提供到该下界
+  即采纳；否则保持 `cursor_adoption_required`。
+- 已绑定注册的 ack 条目丢失：身份和水位检查照常，通过后采纳。
+- `last_event_ids` 配置损坏：下一次轮询替换，原始值保存一次为
+  `last_event_ids.fault-*` 配置行；没有已存事件的注册从头确认，可能重收 Agent 仍
+  保留的队列一次。
+- 升级前记录的事件流与 Agent 当前事件流不同（Agent 已重新初始化）：新事件流的
+  `resume_floor` 不低于 Hub 下界时采纳；否则保持 `state_identity_changed`。
+
+仍需操作者处理：已绑定注册的身份变化（`state_identity_changed`）需重新登记该
+Agent；`cursor_floor_regressed`（Agent 回滚到旧状态）和手动删除游标行但已有已消费
+水位（`cursor_store_invalid`）仍用下文的离线 `adopt-event-cursor`。重新开始的事件流
+仍低于 Hub 下界时，Agent 须先发出超过该下界的事件并重启一次，下一次轮询才能绑定：
+离线采纳写入的绑定 `boot_id` 为空，下一次轮询要求 `resume_floor` 不低于下界。
+
 ## 选择恢复操作
 
 先停止 Agent，运行 `inspect`。以下操作是按故障类型选择的替代方案，不应依次执行：
@@ -142,7 +163,7 @@ SQLite 事件落库、可用 outbox 入队之后持久化；重放沿用现有�
 
 | Agent / Hub | 行为 |
 |---|---|
-| 新可靠 / 新 | 正常确认与重启恢复；升级前已有注册需要一次离线采纳 |
+| 新可靠 / 新 | 正常确认与重启恢复；升级前已有注册由 Hub 自动采纳（见上文） |
 | 新可靠 / 旧 | 仍接受原数字 ack 和不带 ack 请求，无须新增证明；旧 clear-on-read 响应丢失边界保留 |
 | 新不可信 / 任意 | 启动显式拒绝，在恢复或新配对前不发布事件 |
 | 旧 / 新 | 继续 status 采样，事件通道显式暂停，不发破坏性 `/events` 或 404 fallback；升级并采纳后恢复 |

@@ -267,7 +267,7 @@ class Poller:
             return self.store.read_acks()
         except StateError:
             self._ack_store_invalid = True
-            log.error("Event cursor config invalid; offline adoption required")
+            log.error("Event cursor config invalid; it is replaced at the next poll")
             return {}
 
     def snapshot_event_channels(self) -> dict[int, dict]:
@@ -278,9 +278,11 @@ class Poller:
         value = {
             "state": "paused" if reason else "ready",
             "reason": reason,
-            "recovery_hint": "Upgrade/inspect the Agent and use verified offline cursor adoption."
-            if reason
-            else None,
+            "recovery_hint": None
+            if not reason
+            else "重新登记该 Agent（事件流已重新开始）"
+            if reason == "state_identity_changed"
+            else "Upgrade/inspect the Agent and use verified offline cursor adoption.",
         }
         with self._channel_lock:
             changed = self._event_channels.get(sid) != value
@@ -292,8 +294,6 @@ class Poller:
         sid = server["id"]
         if not self._transport.admit_result():
             raise StateError("helper_cancelled")
-        if self._ack_store_invalid:
-            raise StateError("cursor_store_invalid")
         cursor = parse_cursor(
             status.get("event_cursor") if isinstance(status, dict) else None
         )
@@ -301,15 +301,8 @@ class Poller:
         identity = {k: cursor[k] for k in ("server_id", "stream_id")}
         floor = self.store.event_floor(sid, self.last_event_ids)
         acks = dict(self.last_event_ids)
-        if binding["state"] == "fresh":
-            if floor != -1:
-                raise StateError("cursor_adoption_required")
-            acks[sid] = -1
-        elif binding["state"] != "bound":
-            raise StateError("cursor_adoption_required")
-        else:
-            if sid not in acks:
-                raise StateError("cursor_store_invalid")
+        adopt = False
+        if binding["state"] == "bound":
             if binding["identity"] != identity:
                 raise StateError("state_identity_changed")
             if binding["boot_id"] != cursor["boot_id"]:
@@ -320,18 +313,46 @@ class Poller:
                 or cursor["offered_highwater"] < floor
             ):
                 raise StateError("cursor_floor_regressed")
+            if sid not in acks:
+                adopt = True
+        elif floor == -1:
+            acks[sid] = -1
+        else:
+            # An unverified row recorded before the upgrade may name an older
+            # stream; a new stream is adopted only once it is past the floor.
+            if (
+                binding["identity"] not in (None, identity)
+                and cursor["resume_floor"] < floor
+            ):
+                raise StateError("state_identity_changed")
+            adopt = True
+        if adopt:
+            # The agent refuses an ack above what it has offered.
+            if cursor["offered_highwater"] < floor:
+                raise StateError("cursor_adoption_required")
+            acks[sid] = floor
+            if floor != -1:
+                log.warning("Event cursor adopted server=%s floor=%s", sid, floor)
         new_binding = {
             "state": "bound",
             "identity": identity,
             "boot_id": cursor["boot_id"],
             "resume_floor": cursor["resume_floor"],
         }
-        if binding != new_binding:
+        if adopt or binding != new_binding:
             with self._acks_lock:
                 if not self._transport.admit_result():
                     raise StateError("helper_cancelled")
-                self.store.commit_event_cursor(sid, new_binding, acks)
+                self.store.commit_event_cursor(
+                    sid,
+                    new_binding,
+                    acks,
+                    diagnostic=self.store.get_config("last_event_ids")
+                    if self._ack_store_invalid
+                    else None,
+                )
                 self.last_event_ids = acks
+                self._ack_store_invalid = False
         return cursor
 
     def _persist_acks(self) -> bool:
