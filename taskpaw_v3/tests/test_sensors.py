@@ -19,7 +19,17 @@ from taskpaw_v3.core import gpu_sample, sensors
 
 READ_SENSORS = sensors.read_sensors
 
-METRICS = """\
+# LibreHardwareMonitor 0.9.6 `HttpServer.cs`: a space before `{`, quoted label
+# keys and `, ` separators; `#` is stripped from sensor names.
+LHM_096 = """\
+lhm_cpu_temperature_celsius {"sensorName"="CPU Package", "sensorAlias"="CPU Package (/temperature/0)", "hardwareName"="Intel Core Ultra 9 275HX", "hardwareAlias"="Intel Core Ultra 9 275HX (/intelcpu/0)", "sensorId"="/temperature/0", "hardwareId"="/intelcpu/0", "host"="BLACKGOLDPIG"} 68
+lhm_gpunvidia_temperature_celsius {"sensorName"="GPU Core", "sensorAlias"="GPU Core (/temperature/0)", "hardwareName"="NVIDIA GeForce RTX 5090 Laptop GPU", "hardwareAlias"="NVIDIA GeForce RTX 5090 Laptop GPU (/gpu-nvidia/0)", "sensorId"="/temperature/0", "hardwareId"="/gpu-nvidia/0", "host"="BLACKGOLDPIG"} 44
+lhm_motherboard_fan_rpm {"sensorName"="Chassis Fan 1", "sensorAlias"="Chassis Fan 1 (/fan/0)", "hardwareName"="Nuvoton NCT6799D", "hardwareAlias"="Nuvoton NCT6799D (/lpc/nct6799d/0)", "sensorId"="/fan/0", "hardwareId"="/lpc/nct6799d/0", "host"="BLACKGOLDPIG"} 830
+"""
+
+METRICS = (
+    LHM_096
+    + """\
 # HELP lhm_cpu_temperature_celsius Temperature
 # TYPE lhm_cpu_temperature_celsius gauge
 lhm_cpu_temperature_celsius{sensorName="Core #1",hardwareName="Intel Core i9",sensorId="/intelcpu/0/temperature/0"} 52
@@ -36,6 +46,7 @@ lhm_gpunvidia_fan_rpm{sensorName="GPU Fan 1",hardwareName="NVIDIA GeForce RTX 40
 lhm_gpunvidia_fan_rpm{sensorName="GPU Fan 2",hardwareName="NVIDIA GeForce RTX 4080",sensorId="/gpu-nvidia/0/fan/1"} +Inf
 lhm_cpu_load_percent{sensorName="CPU Package",hardwareName="Intel Core i9",sensorId="/intelcpu/0/load/0"} 99
 """
+)
 
 NULLS = {"source": None, "cpu_c": None, "gpu_c": None, "fans": []}
 
@@ -46,11 +57,20 @@ def test_metrics_give_cpu_package_hottest_gpu_core_and_spinning_fans():
         "cpu_c": 68.2,
         "gpu_c": 47.0,
         "fans": [
+            {"name": "Chassis Fan 1", "rpm": 830},
             {"name": "CPU Fan", "rpm": 1218},
             {"name": "SYS Fan1", "rpm": 2554},
             {"name": 'Pump "AIO"', "rpm": 2890},
             {"name": "GPU Fan 1", "rpm": 1100},
         ],
+    }
+
+
+def test_lhm_0_9_6_output_parses():
+    assert sensors.parse_metrics(LHM_096) == {
+        "cpu_c": 68.0,
+        "gpu_c": 44.0,
+        "fans": [{"name": "Chassis Fan 1", "rpm": 830}],
     }
 
 
@@ -149,7 +169,7 @@ def test_lhm_readings_are_marked_lhm(monkeypatch):
     )
     got = READ_SENSORS()
     assert got["source"] == "lhm"
-    assert (got["cpu_c"], got["gpu_c"], len(got["fans"])) == (68.2, 47.0, 4)
+    assert (got["cpu_c"], got["gpu_c"], len(got["fans"])) == (68.2, 47.0, 5)
 
 
 def test_without_lhm_the_gpu_comes_from_the_shared_nvidia_smi_sample(monkeypatch):

@@ -27,9 +27,9 @@ CPU_SENSOR, GPU_SENSOR = "CPU Package", "GPU Core"
 
 _LINE = re.compile(
     r"^lhm_[a-z0-9_]+_(?P<kind>temperature_celsius|fan_rpm)"
-    r"\{(?P<labels>[^}]*)\}\s+(?P<value>\S+)"
+    r"\s*\{(?P<labels>[^}]*)\}\s+(?P<value>\S+)"
 )
-_NAME = re.compile(r'sensorName="((?:[^"\\]|\\.)*)"')
+_NAME = re.compile(r'"?sensorName"?="((?:[^"\\]|\\.)*)"')
 _ESCAPE = re.compile(r"\\(.)")
 
 
