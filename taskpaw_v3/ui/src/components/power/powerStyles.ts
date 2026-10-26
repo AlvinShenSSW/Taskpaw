@@ -102,6 +102,19 @@ export const POWER_CSS = `
 .mw .m-sensors.stale .sensor b,.mw .m-sensors.stale .fan b,.mw .m-sensors.stale .meta{color:#f0c57a}
 .mw .m-sensors .unavailable{color:var(--muted)}
 .mw .m-sensors .unavailable b{color:#b2c3d5;font:500 12px var(--sans)}
+/* #345: the LHM install guide, expanded under the sensor line as a full-width grid item */
+.mw .guide-link{background:none;border:0;padding:0;color:var(--blue);font:12px var(--sans);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+.mw .guide-link:hover{color:#93c5fd}
+.mw .m-guide{grid-column:1/-1;margin-top:6px;padding:12px 14px;border:1px solid #34485b;border-radius:8px;background:#0d1626;font-size:12px;color:#d8e5f6;min-width:0}
+.mw .m-guide p{margin:0 0 8px;line-height:1.6}
+.mw .m-guide p.lead{color:var(--text);font-weight:500}
+.mw .m-guide ol{margin:0 0 10px;padding-left:18px;line-height:1.7}
+.mw .m-guide .cmd{position:relative;margin:6px 0 10px}
+.mw .m-guide .cmd-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-bottom:4px}
+.mw .m-guide pre{margin:0;padding:10px 12px;background:#070d18;border:1px solid var(--line);border-radius:6px;font:11px/1.55 var(--mono);color:#cfe0f4;overflow-x:auto;white-space:pre}
+.mw .m-guide .copy{min-height:28px;padding:3px 10px;border:1px solid #34485b;border-radius:6px;background:transparent;color:#b2c3d5;font:11px var(--sans);cursor:pointer}
+.mw .m-guide .copy:hover{border-color:var(--blue);color:#b5d4ff}
+.mw .m-guide .note{font-size:11px;color:var(--muted);margin:0}
 .mw .section-note{font-size:10px;color:var(--muted);padding:12px 20px 16px;line-height:1.75}
 .mw .legend{display:flex;gap:6px;flex-wrap:wrap;padding:14px 20px 0}
 .mw .legend button{min-height:44px;display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid #33455d;border-radius:7px;background:transparent;color:#c3d0e0;font-size:11px;transition:background .16s,border-color .16s,opacity .16s}

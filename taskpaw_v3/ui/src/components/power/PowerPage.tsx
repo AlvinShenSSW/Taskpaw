@@ -239,7 +239,7 @@ function MachineRow({ m, sensorsReceivedMs, nowMs, failed }: {
       <div className="m-today"><span className="k">今日</span>
         <strong>{m.live ? fmtKwh(m.live.today_wh) : m.energy?.today_wh != null ? fmtKwh(m.energy.today_wh) : "—"}<small>度</small></strong>
         {!m.live && m.energy?.today_wh != null && m.energyStale && <small>数据过期</small>}</div>
-      <SensorLine sensors={m.sensors} ageS={m.sensors_age_s} receivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />
+      <SensorLine machine={m.name} sensors={m.sensors} ageS={m.sensors_age_s} receivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />
     </li>
   );
 }
