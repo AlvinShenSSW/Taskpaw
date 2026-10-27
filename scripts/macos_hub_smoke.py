@@ -10,6 +10,7 @@ import hashlib
 import http.client
 import json
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -197,7 +198,7 @@ def released(ports, db):
         pass
 
 
-def smoke(sidecar, plan, isolation, env, version):
+def smoke(sidecar, plan, isolation, env, version, *, installer=None):
     isolation.require()  # Before temporary files, sockets, launchctl or any Popen.
     root = Path(tempfile.mkdtemp(prefix="taskpaw-hub-smoke-")).resolve()
     safe_to_remove = True
@@ -211,7 +212,25 @@ def smoke(sidecar, plan, isolation, env, version):
     shutil.copytree(sidecar.parents[2], app, symlinks=True)
     executable = app / "Contents/MacOS/taskpaw-backend"
     runtime_env = mac.child_env(env, runtime=True)
-    runtime_env.update(HOME=str(home), PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+    fake_bin = root / "fake-bin"
+    fake_bin.mkdir()
+    opened_apps = root / "opened-apps"
+    fake_open = fake_bin / "open"
+    fake_open.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> " + shlex.quote(str(opened_apps)) + "\n"
+    )
+    fake_open.chmod(0o755)
+    runtime_env.update(
+        HOME=str(home), PATH=str(fake_bin) + ":/usr/bin:/bin:/usr/sbin:/sbin"
+    )
+    if installer is None:
+        package = root / "package"
+        package.mkdir()
+        mac.stage_hub_manager(package)
+        installer = package / "Install Hub.command"
+    mac.verify_hub_package(installer.parent)
+    installer_digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+    installs = 0
     reservations = [socket.socket(), socket.socket()]
     try:
         for sock in reservations:
@@ -249,6 +268,25 @@ def smoke(sidecar, plan, isolation, env, version):
         if record.get("state") != "running":
             raise mac.BuildError("macos_hub_smoke_not_running")
         return record
+
+    def install():
+        nonlocal installs
+        isolation.require()
+        mac.tool(
+            "hub_install_entry",
+            [str(installer)],
+            env=runtime_env,
+            cwd=root,
+            timeout=110,
+            exact_output=True,
+        )
+        installs += 1
+        if (
+            not opened_apps.is_file()
+            or opened_apps.read_text().splitlines() != [str(app)] * installs
+        ):
+            raise mac.BuildError("macos_hub_smoke_installer_open_target")
+        return manage("status")
 
     def current_status():
         value = request(read_port, token, "/status")
@@ -293,7 +331,7 @@ def smoke(sidecar, plan, isolation, env, version):
                 store.close()
             try:
                 safe_to_remove = False
-                installed = manage("install")
+                installed = install()
                 if (
                     installed.get("state") != "running"
                     or installed.get("version") != version
@@ -314,7 +352,7 @@ def smoke(sidecar, plan, isolation, env, version):
                     lambda: (db.parent / "status.md").is_file(), "status_file"
                 )
                 # Repeated installation of identical bytes must not restart.
-                manage("install")
+                install()
                 if runtime()["created"] != initial["created"]:
                     raise mac.BuildError("macos_hub_smoke_reinstall_restarted")
                 # A short-lived read-only client disconnects; polling continues.
@@ -383,6 +421,9 @@ def smoke(sidecar, plan, isolation, env, version):
                     store.close()
                 return {
                     "role": "hub",
+                    "installer_entry_verified": True,
+                    "installer_entry_sha256": installer_digest,
+                    "native_window_open_verified": False,
                     "service_lifecycle_verified": True,
                     "polling_and_outbox_verified": True,
                     "crash_recovery_verified": True,

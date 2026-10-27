@@ -163,7 +163,10 @@ preserve the fixture configuration and history. Uncertain stop prevents fixture
 runtime/data removal and fails the build rather than being labeled clean.
 
 The same Hub qualification runs against the app and extracted ZIP/DMG copies.
-DMG verification additionally checks the separate manager command. The report
+DMG verification additionally checks the fixed install entry, service manager
+and installation instructions. The native fixture runs the install entry with
+the real frozen manager and a harmless replacement for `open`; this proves
+installation ordering without claiming a real dashboard window opened. The report
 records `role: hub`, source/architecture/signature evidence and a `hub_runtime`
 section. A successful run may establish `service_lifecycle_verified`,
 `polling_and_outbox_verified`, `crash_recovery_verified`,

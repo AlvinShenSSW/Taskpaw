@@ -70,12 +70,15 @@ Agent remains a separate installation for monitoring this Mac itself.
    user's `~/Applications`. For the app ZIP, extract and move the app to either
    location. Keep its name unchanged; do not install the service from a mounted
    DMG or Downloads.
-3. Separately run `Manage Hub Service.command` from the DMG and enter `install`.
-   This explicit action verifies and copies the bundled backend into a private
-   persistent runtime directory, registers the user's LaunchAgent and starts
-   aggregation. A blank answer cancels. The helper prefers `/Applications` if
-   both app locations exist.
-4. Open `TaskPaw Hub.app`. The dashboard automatically connects when the service's
+3. Double-click `Install Hub.command` in the DMG. No command input is needed.
+   This explicit entry verifies and copies the bundled backend into a private
+   persistent runtime directory, registers the user's LaunchAgent, starts
+   aggregation and opens the installed Hub app after successful installation.
+   The helper prefers `/Applications` if both app locations exist. A missing app
+   or installation failure stays visible in Terminal; the dashboard is not
+   opened as a false success. The DMG includes both frontend and backend; no
+   additional backend download is needed.
+4. The dashboard automatically connects when the service's
    protected local credentials are available. If it shows the waiting page,
    check service `status` and logs rather than repeatedly reopening the window.
 5. In the Hub, register each Agent's LAN address/port and matching Bearer token.
@@ -93,8 +96,9 @@ where the app was installed; no token is passed on the command line:
 "$HOME/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install
 ```
 
-Use the same executable and replace `install` with an action below. The DMG
-helper offers the same actions; the dashboard does not invoke them.
+Use the same executable and replace `install` with an action below. The DMG's
+`Manage Hub Service.command` offers these actions for maintenance; the dashboard
+does not invoke them. It remains available alongside the fixed install entry.
 
 | Action | Effect |
 | --- | --- |
@@ -122,7 +126,7 @@ its configured `data_dir` (default `~/.taskpaw-hub`). The service preserves an
 existing configuration and refuses an unresolved legacy DB location conflict.
 
 To update, replace the app in its installed location, then explicitly run
-`hub-service install` again. Merely replacing or opening the app leaves the
+`Install Hub.command` (or `hub-service install`) again. Merely replacing or opening the app leaves the
 existing runtime running. Installation stages and verifies new bytes before
 stopping the managed service; failed upgrades retain recovery information and
 attempt to restore the prior runtime without rolling back the database.

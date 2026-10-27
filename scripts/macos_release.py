@@ -57,6 +57,11 @@ MAGICS = {
     b"\xbf\xba\xfe\xca",
 }
 TAIL_LIMIT = 65536
+HUB_PACKAGE_FILES = (
+    ("Manage Hub Service.command", 0o755),
+    ("Install Hub.command", 0o755),
+    ("Hub 安装说明.txt", 0o644),
+)
 _cancellation = None
 
 
@@ -1004,11 +1009,21 @@ def smoke_lineage(config, previous=None):
         raise BuildError("macos_smoke_lineage_invalid") from None
 
 
-def smoke(sidecar, plan, isolation, env, version, *, upgrade=False, role="agent"):
+def smoke(
+    sidecar,
+    plan,
+    isolation,
+    env,
+    version,
+    *,
+    upgrade=False,
+    role="agent",
+    installer=None,
+):
     if role == "hub":
         from scripts.macos_hub_smoke import smoke as hub_smoke
 
-        return hub_smoke(sidecar, plan, isolation, env, version)
+        return hub_smoke(sidecar, plan, isolation, env, version, installer=installer)
     if role != "agent":
         raise BuildError("macos_bundle_role_invalid")
     # This is intentionally before HOME/ports or any backend Popen.
@@ -1288,11 +1303,27 @@ def bundle_role(product_name, identifier=None):
 
 
 def stage_hub_manager(staging):
-    """An explicit operator command, never invoked by the desktop shell."""
-    source = Path(__file__).with_name("Manage Hub Service.command")
-    target = staging / source.name
-    shutil.copyfile(source, target)
-    target.chmod(0o755)
+    """Explicit operator entries and instructions, never run by the GUI."""
+    for name, mode in HUB_PACKAGE_FILES:
+        source = Path(__file__).with_name(name)
+        target = staging / name
+        shutil.copyfile(source, target)
+        target.chmod(mode)
+
+
+def verify_hub_package(staging):
+    for name, mode in HUB_PACKAGE_FILES:
+        target = staging / name
+        try:
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or target.read_bytes() != Path(__file__).with_name(name).read_bytes()
+                or (os.name != "nt" and stat.S_IMODE(target.stat().st_mode) != mode)
+            ):
+                raise BuildError("macos_hub_package_invalid")
+        except OSError:
+            raise BuildError("macos_hub_package_invalid") from None
 
 
 def verify_zip(path, plan, isolation, env, root, version, product_name):
@@ -1329,15 +1360,18 @@ def verify_dmg(path, plan, isolation, env, root, version, product_name):
             app.parent.mkdir(mode=0o700)
             shutil.copytree(mount / (product_name + ".app"), app, symlinks=True)
             sidecar, _ = verify_app(app, plan, env, root)
+            installer = None
             if bundle_role(product_name) == "hub":
-                manager = mount / "Manage Hub Service.command"
-                source = Path(__file__).with_name(manager.name)
-                if manager.read_bytes() != source.read_bytes() or not os.access(
-                    manager, os.X_OK
-                ):
-                    raise BuildError("macos_hub_manager_invalid")
-            smoke(
-                sidecar, plan, isolation, env, version, role=bundle_role(product_name)
+                verify_hub_package(mount)
+                installer = mount / "Install Hub.command"
+            return smoke(
+                sidecar,
+                plan,
+                isolation,
+                env,
+                version,
+                role=bundle_role(product_name),
+                installer=installer,
             )
         finally:
             # Also covers attach failure after a successful mount operation.
@@ -1414,9 +1448,11 @@ def finalize(plan, isolation, env, root, cfg):
                 signature(dmg, plan, env, root, dmg=True)
                 notarize(dmg, plan, env)
                 staple(dmg, env)
-            verify_dmg(
+            dmg_evidence = verify_dmg(
                 dmg, plan, isolation, env, root, cfg["version"], cfg["productName"]
             )
+            if role == "hub":
+                runtime_evidence = dmg_evidence
             artifacts.append((dmg, bundle / "dmg" / dmg.name))
         for source, dest in artifacts:
             dest.parent.mkdir(parents=True, exist_ok=True)

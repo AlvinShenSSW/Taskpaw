@@ -1,5 +1,6 @@
 """Hub packaging must exercise the Hub, without touching any installed service."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,12 +13,14 @@ def test_hub_smoke_dispatches_to_hub_fixture(monkeypatch):
     from scripts import macos_hub_smoke
 
     calls = []
-    monkeypatch.setattr(macos_hub_smoke, "smoke", lambda *a: calls.append(a))
+    monkeypatch.setattr(
+        macos_hub_smoke, "smoke", lambda *a, **kw: calls.append((a, kw))
+    )
     isolation = SimpleNamespace(require=lambda: None)
     sidecar = Path("never-execute-fixture")
     plan = mac.Plan("aarch64-apple-darwin", "adhoc")
     mac.smoke(sidecar, plan, isolation, {}, "3.10.2", role="hub")
-    assert calls == [(sidecar, plan, isolation, {}, "3.10.2")]
+    assert calls == [((sidecar, plan, isolation, {}, "3.10.2"), {"installer": None})]
 
 
 @pytest.mark.parametrize(
@@ -58,12 +61,117 @@ def test_hub_manager_is_explicit_and_does_not_eval_arguments(tmp_path):
     mac.stage_hub_manager(tmp_path)
     command = tmp_path / "Manage Hub Service.command"
     text = command.read_text()
-    assert command.stat().st_mode & 0o100
+    if os.name != "nt":  # Windows stat does not represent POSIX execute bits.
+        assert command.stat().st_mode & 0o100
     assert 'hub-service "$action"' in text
     assert "eval" not in text and "sudo" not in text
     assert 'app="/Applications/TaskPaw Hub.app"' in text
     assert 'backend="$app/Contents/MacOS/taskpaw-backend"' in text
     assert "install" in text and "uninstall" in text
+
+
+@pytest.mark.parametrize(
+    "name,mode",
+    [
+        ("Manage Hub Service.command", 0o755),
+        ("Install Hub.command", 0o755),
+        ("Hub 安装说明.txt", 0o644),
+    ],
+)
+def test_hub_package_stages_exact_files_and_modes(tmp_path, name, mode):
+    mac.stage_hub_manager(tmp_path)
+    target = tmp_path / name
+    assert target.read_bytes() == Path(mac.__file__).with_name(name).read_bytes()
+    if os.name != "nt":
+        assert target.stat().st_mode & 0o777 == mode
+    mac.verify_hub_package(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "name", ["Manage Hub Service.command", "Install Hub.command", "Hub 安装说明.txt"]
+)
+@pytest.mark.parametrize("damage", ["bytes", "missing", "mode"])
+def test_hub_package_rejects_changed_shipped_files(tmp_path, name, damage):
+    if damage == "mode" and os.name == "nt":
+        pytest.skip("Windows stat does not represent POSIX file modes")
+    mac.stage_hub_manager(tmp_path)
+    target = tmp_path / name
+    if damage == "bytes":
+        target.write_bytes(b"changed shipped contents")
+    elif damage == "missing":
+        target.unlink()
+    else:
+        target.chmod(0o600)
+    with pytest.raises(mac.BuildError, match="macos_hub_package_invalid"):
+        mac.verify_hub_package(tmp_path)
+
+
+def test_dmg_smoke_consumes_exact_mounted_installer(monkeypatch, tmp_path):
+    calls = []
+    evidence = {"installer_entry_verified": True}
+
+    def mount_fixture(stage, argv, **kwargs):
+        assert stage == "dmg_mount"
+        mount = Path(argv[argv.index("-mountpoint") + 1])
+        (mount / "TaskPaw Hub.app").mkdir()
+        mac.stage_hub_manager(mount)
+
+    def verify_app(app, *args):
+        return app / "Contents/MacOS/taskpaw-backend", 1
+
+    def smoke(sidecar, plan, isolation, env, version, **kwargs):
+        installer = kwargs["installer"]
+        assert installer.name == "Install Hub.command"
+        assert installer.parent.name == "mount"
+        assert (
+            installer.read_bytes()
+            == Path(mac.__file__).with_name(installer.name).read_bytes()
+        )
+        calls.append(kwargs)
+        return evidence
+
+    monkeypatch.setattr(mac, "tool", mount_fixture)
+    monkeypatch.setattr(mac, "verify_app", verify_app)
+    monkeypatch.setattr(mac, "smoke", smoke)
+    result = mac.verify_dmg(
+        tmp_path / "fixture.dmg", None, None, {}, tmp_path, "3.11.1", "TaskPaw Hub"
+    )
+    assert calls[0]["role"] == "hub"
+    assert result is evidence
+
+
+def test_hub_smoke_dispatches_shipped_installer(monkeypatch, tmp_path):
+    from scripts import macos_hub_smoke
+
+    calls = []
+    monkeypatch.setattr(
+        macos_hub_smoke, "smoke", lambda *a, **kw: calls.append((a, kw))
+    )
+    installer = tmp_path / "Install Hub.command"
+    mac.smoke(None, None, None, {}, "3.11.1", role="hub", installer=installer)
+    assert calls == [((None, None, None, {}, "3.11.1"), {"installer": installer})]
+
+
+def test_hub_finalizer_records_dmg_installer_evidence(monkeypatch, tmp_path):
+    import json
+
+    from taskpaw_v3.tests.test_build_macos import finalizer_fixture
+
+    plan, cfg, bundle, _ = finalizer_fixture(tmp_path, monkeypatch)
+    (bundle / "macos/TaskPaw Agent.app").rename(bundle / "macos/TaskPaw Hub.app")
+    cfg.update(identifier="com.taskpaw.app.hub", productName="TaskPaw Hub")
+    evidence = {"installer_entry_verified": True, "installer_entry_sha256": "d" * 64}
+    monkeypatch.setattr(mac, "smoke", lambda *a, **kw: {"stage": "before-dmg"})
+
+    def verified_dmg(*args):
+        mac.verify_hub_package(args[0].parent / "dmg-staging")
+        return evidence
+
+    monkeypatch.setattr(mac, "verify_dmg", verified_dmg)
+    mac.finalize(plan, None, {}, tmp_path, cfg)
+    report = json.loads((bundle / "macos-verification.json").read_text())
+    assert report["role"] == "hub"
+    assert report["hub_runtime"] == evidence
 
 
 def test_hub_readiness_does_not_accept_agent_frame():
@@ -132,6 +240,10 @@ def test_hub_smoke_waits_for_status_file_after_api_ready(
     status_file = home / "data/status.md"
     clock = {"now": 0.0, "api_ready_without_file": False, "published": False}
     actions = []
+    staged_entry = tmp_path / "actual dmg mount"
+    staged_entry.mkdir()
+    mac.stage_hub_manager(staged_entry)
+    installer = staged_entry / "Install Hub.command"
 
     def advance(seconds):
         clock["now"] += seconds
@@ -140,8 +252,21 @@ def test_hub_smoke_waits_for_status_file_after_api_ready(
             clock["published"] = True
 
     def fake_cli(stage, argv, **kwargs):
-        assert argv[1] == "hub-service"
-        action = argv[2]
+        if stage == "hub_install_entry":
+            assert argv == [str(installer)]
+            assert (
+                Path(argv[0]).read_bytes()
+                == Path(mac.__file__).with_name("Install Hub.command").read_bytes()
+            )
+            fake_open = root / "fake-bin/open"
+            assert kwargs["env"]["PATH"].startswith(str(fake_open.parent) + ":")
+            assert fake_open.is_file() and "opened-apps" in fake_open.read_text()
+            with (root / "opened-apps").open("a") as out:
+                out.write(str(home / "Applications/TaskPaw Hub.app") + "\n")
+            action = "install"
+        else:
+            assert argv[1] == "hub-service"
+            action = argv[2]
         actions.append(action)
         if action == "install":
             if actions.count("install") == 2:
@@ -182,7 +307,14 @@ def test_hub_smoke_waits_for_status_file_after_api_ready(
     with pytest.raises(
         expected, match=None if publish_later else "macos_hub_smoke_status_file"
     ):
-        smoke.smoke(source, None, SimpleNamespace(require=lambda: None), {}, "3.10.2")
+        smoke.smoke(
+            source,
+            None,
+            SimpleNamespace(require=lambda: None),
+            {},
+            "3.10.2",
+            installer=installer,
+        )
     assert clock["api_ready_without_file"]
     assert actions[-2:] == ["stop", "uninstall"]
     if publish_later:
