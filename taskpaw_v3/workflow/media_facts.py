@@ -34,6 +34,7 @@ from .raw_media_models import (
     RawStreamFacts,
     RotationObservation,
     SpatialFormat,
+    agreed_duration_ms,
 )
 
 
@@ -327,10 +328,6 @@ def _stream(data: dict[str, object], issues: list[ProbeIssue]) -> RawStreamFacts
     return result
 
 
-def _milliseconds(value: Rational) -> int:
-    return (2 * value.numerator * 1000 + value.denominator) // (2 * value.denominator)
-
-
 def parse_ffprobe(payload: bytes, *, limits: ProbeParseLimits) -> RawMediaFacts:
     if type(payload) is not bytes or not payload or len(payload) > limits.max_bytes:
         raise ValueError("probe_payload_bound")
@@ -401,11 +398,11 @@ def parse_ffprobe(payload: bytes, *, limits: ProbeParseLimits) -> RawMediaFacts:
                 if angle in (90, 270):
                     width, height = height, width
         same_scope = primary.duration_observations
-        values = {_milliseconds(value.seconds) for value in same_scope}
-        if len(values) > 1:
+        agreed = agreed_duration_ms(same_scope)
+        if same_scope and agreed is None:
             issues.append("duration_conflict")
         elif same_scope:
-            duration_ms = values.pop()
+            duration_ms = agreed
             duration_source = cast("Literal['stream', 'ticks']", same_scope[0].source)
         else:
             issues.append("missing_duration")

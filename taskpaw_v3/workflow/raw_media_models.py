@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from math import gcd
 from typing import Annotated, Literal, get_origin
 
@@ -142,6 +143,32 @@ class RawStreamFacts(RawModel):
         return self
 
 
+def _milliseconds(seconds: Rational) -> int:
+    return (2 * seconds.numerator * 1000 + seconds.denominator) // (
+        2 * seconds.denominator
+    )
+
+
+def agreed_duration_ms(observations: tuple[DurationObservation, ...]) -> int | None:
+    """One stream's duration in half-up milliseconds when its observations agree.
+
+    They agree when they round to the same millisecond, or when they lie within
+    ffprobe's six-decimal print precision of each other: a tick duration just
+    below a half-millisecond is printed onto it and rounds up (#349). Then the
+    first observation's value is used.
+    """
+    rounded = {_milliseconds(value.seconds) for value in observations}
+    exact = [
+        Fraction(value.seconds.numerator, value.seconds.denominator)
+        for value in observations
+    ]
+    if len(rounded) == 1 or (
+        exact and max(exact) - min(exact) <= Fraction(1, 1_000_000)
+    ):
+        return _milliseconds(observations[0].seconds)
+    return None
+
+
 class RawMediaFacts(RawModel):
     schema_version: Literal[1] = 1
     format_name: RawText | None
@@ -188,12 +215,9 @@ class RawMediaFacts(RawModel):
             raise ValueError("invalid_derived_duration")
         if self.duration_ms is not None:
             observations = videos[0].duration_observations
-            milliseconds = {
-                (2 * value.seconds.numerator * 1000 + value.seconds.denominator)
-                // (2 * value.seconds.denominator)
-                for value in observations
-            }
-            if milliseconds != {self.duration_ms} or self.duration_source not in {
+            if agreed_duration_ms(
+                observations
+            ) != self.duration_ms or self.duration_source not in {
                 value.source for value in observations
             }:
                 raise ValueError("duration_projection_mismatch")

@@ -147,6 +147,29 @@ def test_ticks_same_scope_half_up_and_conflict_retained():
     assert "duration_conflict" in conflicting.issues
 
 
+def half_ms_straddle():
+    # #349 (MKON-151-4K): ffprobe prints the stream duration with six decimals, so a
+    # tick duration 0.1 us below a half-millisecond is printed onto the boundary.
+    return source(
+        duration="7711.203500", duration_ts=77112034999, time_base="1/10000000"
+    )
+
+
+def test_print_rounding_across_half_ms_is_not_conflict():
+    result = parse(half_ms_straddle())
+    assert "duration_conflict" not in result.issues
+    assert result.duration_ms == 7711204
+    assert result.duration_source == "stream"
+    assert type(result).model_validate(result.model_dump()) == result
+
+
+def test_print_rounding_straddle_probe_is_eligible():
+    value = probe(half_ms_straddle())
+    assert value.duration_ms == 7711204
+    result = evaluate_eligibility((value,), (profile(),), policy_revision=1)
+    assert result.decision == "eligible"
+
+
 def test_no_implicit_container_duration_fallback():
     data = source()
     del data["streams"][0]["duration"]
