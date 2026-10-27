@@ -34,7 +34,6 @@ from .raw_media_models import (
     RawStreamFacts,
     RotationObservation,
     SpatialFormat,
-    agreed_duration_ms,
 )
 
 
@@ -277,6 +276,8 @@ def _stream(data: dict[str, object], issues: list[ProbeIssue]) -> RawStreamFacts
                         source="ticks", stream_index=index, seconds=seconds
                     )
                 )
+    if len(durations) == 2 and _print_rounding(*durations):
+        durations = durations[1:]
     order = data.get("field_order", "unknown")
     if order not in ("progressive", "tt", "bb", "tb", "bt", "unknown"):
         order = "unknown"
@@ -326,6 +327,24 @@ def _stream(data: dict[str, object], issues: list[ProbeIssue]) -> RawStreamFacts
     if len(known_angles) > 1:
         issues.append("rotation_conflict")
     return result
+
+
+def _milliseconds(value: Rational) -> int:
+    return (2 * value.numerator * 1000 + value.denominator) // (2 * value.denominator)
+
+
+def _print_rounding(printed: DurationObservation, ticks: DurationObservation) -> bool:
+    """ffprobe prints `duration` with six decimals, so a tick duration just below a
+    half-millisecond is printed onto it and rounds up a millisecond (#349). Such a
+    printed value adds nothing to the exact ticks and is dropped, which keeps the
+    facts valid for workers that still require equal milliseconds."""
+    exact = [
+        Fraction(value.seconds.numerator, value.seconds.denominator)
+        for value in (printed, ticks)
+    ]
+    return _milliseconds(printed.seconds) != _milliseconds(ticks.seconds) and abs(
+        exact[0] - exact[1]
+    ) <= Fraction(1, 1_000_000)
 
 
 def parse_ffprobe(payload: bytes, *, limits: ProbeParseLimits) -> RawMediaFacts:
@@ -398,11 +417,11 @@ def parse_ffprobe(payload: bytes, *, limits: ProbeParseLimits) -> RawMediaFacts:
                 if angle in (90, 270):
                     width, height = height, width
         same_scope = primary.duration_observations
-        agreed = agreed_duration_ms(same_scope)
-        if same_scope and agreed is None:
+        values = {_milliseconds(value.seconds) for value in same_scope}
+        if len(values) > 1:
             issues.append("duration_conflict")
         elif same_scope:
-            duration_ms = agreed
+            duration_ms = values.pop()
             duration_source = cast("Literal['stream', 'ticks']", same_scope[0].source)
         else:
             issues.append("missing_duration")

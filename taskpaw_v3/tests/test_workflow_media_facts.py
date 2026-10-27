@@ -155,17 +155,29 @@ def half_ms_straddle():
     )
 
 
-def test_print_rounding_across_half_ms_is_not_conflict():
+def test_print_rounding_across_half_ms_keeps_exact_ticks():
     result = parse(half_ms_straddle())
     assert "duration_conflict" not in result.issues
-    assert result.duration_ms == 7711204
-    assert result.duration_source == "stream"
+    assert result.duration_ms == 7711203
+    assert result.duration_source == "ticks"
+    # Workers on the previous release re-validate these facts with the unchanged
+    # equal-milliseconds rule, so only the exact observation may remain.
+    assert [v.source for v in result.streams[0].duration_observations] == ["ticks"]
     assert type(result).model_validate(result.model_dump()) == result
+
+
+def test_beyond_print_precision_is_still_conflict():
+    # 10.000500 s vs 10.0004989 s: 1.1 us apart and on both sides of 10000.5 ms.
+    result = parse(
+        source(duration="10.000500", duration_ts=100004989, time_base="1/10000000")
+    )
+    assert "duration_conflict" in result.issues
+    assert result.duration_ms is None
 
 
 def test_print_rounding_straddle_probe_is_eligible():
     value = probe(half_ms_straddle())
-    assert value.duration_ms == 7711204
+    assert value.duration_ms == 7711203
     result = evaluate_eligibility((value,), (profile(),), policy_revision=1)
     assert result.decision == "eligible"
 
