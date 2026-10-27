@@ -95,6 +95,8 @@ def claim(
     auth: AuthProof,
     worker: m.WorkerRecord,
     body: Mapping[str, Any],
+    *,
+    admission_error: str | None = None,
 ) -> dict[str, Any]:
     """The worker's exact claim body under the key `claim:<a>`; the server
     fills the worker, its physical GPU and the profile fields, so a resend of
@@ -118,6 +120,7 @@ def claim(
             resource_id=binding.resource_id,
             tool_versions=tools,
         ),
+        admission_error=admission_error,
     )
     return {
         "assignment_id": result.assignment_id,

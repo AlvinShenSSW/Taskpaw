@@ -1,7 +1,7 @@
 // PWR-3 「功耗」 (approved preview design-system/taskpaw-v3/preview/power-v3.html): this machine and its
 // peers — live estimate, today / week / month, the stacked chart, energy per machine and activity,
-// and every film's energy from the media workflow. Every figure is an estimate (估算); the smart plug
-// is the measurement. Phase 1 mounts it as an AgentConsole tab; it does not depend on the console.
+// and every film's energy from the media workflow. Watts/energy are estimates; temperatures and fan
+// speeds are actual sensor readings. This AgentConsole tab does not depend on the console.
 import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import MemoryIcon from "@mui/icons-material/Memory";
@@ -10,8 +10,8 @@ import TuneIcon from "@mui/icons-material/Tune";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { GlobalStyles, Snackbar } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { api, HttpError, type EnergyRate, type FilmRow, type PowerRange, type PowerSettings } from "../../api";
+import { useEffect, useMemo, useState } from "react";
+import { api, HttpError, type EnergyRate, type FilmRow, type PowerRange, type PowerSettings, type PowerView } from "../../api";
 import { MEDIA_CSS } from "../media/mediaStyles";
 import { Chip, Icon, Notice, PageTitle } from "../media/parts";
 import { readFilmTiming } from "../media/mediaModel";
@@ -24,6 +24,7 @@ import {
 } from "./powerModel";
 import { activityTotals, chartSeries, machinesOf, peakOf, rangeAgg, rangeLabel, stateChip, type Machine } from "./powerView";
 import { POWER_CSS } from "./powerStyles";
+import { SensorLine } from "./SensorLine";
 
 const RANGES: PowerRange[] = ["24h", "7d", "30d"];
 const CALENDAR: Record<PowerRange, ["today_wh" | "week_wh" | "month_wh", string]> = {
@@ -40,20 +41,30 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   const [range, setRange] = useState<PowerRange>("24h");
   const [params, setParams] = useState(false);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
-  const day = useQuery({ queryKey: ["power", "24h"], queryFn: () => api.power("24h"), refetchInterval: POLL_MS, retry: false });
+  const [nowMs, setNowMs] = useState(() => performance.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(performance.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  // #336: the browser's receipt time, so the sensor age keeps counting between polls
+  const readDay = async (): Promise<PowerView & { sensorsReceivedMs: number }> =>
+    ({ ...await api.power("24h"), sensorsReceivedMs: performance.now() });
+  const day = useQuery({ queryKey: ["power", "24h"], queryFn: readDay, refetchInterval: POLL_MS, retry: false });
   const ranged = useQuery({
-    queryKey: ["power", range], queryFn: () => api.power(range), refetchInterval: 60000, enabled: range !== "24h", retry: false,
+    queryKey: ["power", range], queryFn: () => range === "24h" ? readDay() : api.power(range),
+    refetchInterval: 60000, enabled: range !== "24h", retry: false,
   });
   const films = useQuery({ queryKey: ["power", "films"], queryFn: () => api.workflowFilms(), refetchInterval: 30000, retry: false });
   const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const view = range === "24h" ? day.data : ranged.data;
-  const machines = useMemo(() => machinesOf(day.data, view), [day.data, view]);
+  const machines = useMemo(() => machinesOf(day.data, view).map((m) => day.isError
+    ? { ...m, live: null, stale: true, state: m.state === "ok" ? "unreachable" : m.state, energyStale: !!m.energy } : m), [day.data, view, day.isError]);
   const say = (text: string) => setToast({ text, key: Date.now() });
   const settings = config.data?.power as PowerSettings | undefined;
 
   let body;
   if (day.isLoading) body = <div className="panel empty"><p>正在读取功耗估算…</p></div>;
-  else if (day.error) {
+  else if (day.error && !day.data) {
     body = day.error instanceof HttpError && day.error.status === 404
       ? <Notice tone="amber" icon={WarningAmberIcon}>
         功耗估算已关闭（{onOpenSettings
@@ -62,9 +73,10 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
       </Notice>
       : <Notice tone="red" icon={WarningAmberIcon}>无法读取功耗估算，请重试。</Notice>;
   } else {
-    body = <PowerBody machines={machines} range={range} rows={films.data?.state === "running" ? films.data.films : undefined}
+    body = <>{day.isError && <Notice tone="red" icon={WarningAmberIcon}>无法读取功耗与温度，最后温度读数已过期，请重试。</Notice>}
+      <PowerBody machines={machines} range={range} rows={films.data?.state === "running" ? films.data.films : undefined}
       rates={films.data?.energy_rates} workflowOff={films.data ? films.data.state !== "running" : films.isError}
-      onOpenMedia={onOpenMedia} say={say} />;
+      sensorsReceivedMs={day.data?.sensorsReceivedMs} nowMs={nowMs} failed={day.isError} onOpenMedia={onOpenMedia} say={say} /></>;
   }
 
   return (
@@ -83,7 +95,7 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
               <Icon of={TuneIcon} />估算参数
             </button>
           </>} />
-          <Notice icon={InfoOutlinedIcon}>整机实测请以智能插座为准；此处为估算，用于看分布和每片能耗。</Notice>
+          <Notice icon={InfoOutlinedIcon}>功耗和能耗为估算；整机实测以智能插座为准。温度来自实际可读传感器，仅显示当前读数。</Notice>
           {body}
         </main>
         <Snackbar key={toast?.key} open={toast !== null} autoHideDuration={4800} onClose={() => setToast(null)}
@@ -101,9 +113,10 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   );
 }
 
-function PowerBody({ machines, range, rows, rates, workflowOff, onOpenMedia, say }: {
+function PowerBody({ machines, range, rows, rates, workflowOff, sensorsReceivedMs, nowMs, failed, onOpenMedia, say }: {
   machines: Machine[]; range: PowerRange; rows: FilmRow[] | undefined; rates: EnergyRate[] | undefined;
   workflowOff: boolean; onOpenMedia?: () => void; say: (text: string) => void;
+  sensorsReceivedMs: number | undefined; nowMs: number; failed: boolean;
 }) {
   const online = machines.filter((m) => m.live);
   const all = sumSplits(online.map((m) => splitOf(m.live)));
@@ -153,10 +166,10 @@ function PowerBody({ machines, range, rows, rates, workflowOff, onOpenMedia, say
       <div className="stack">
         <section className="panel" aria-labelledby="pw-machines-title">
           <div className="panel-head">
-            <div><h2 id="pw-machines-title">机器</h2><p>整机 = GPU 实测 + CPU + 其他基线 · 每 5 秒刷新 · 全部为估算</p></div>
+            <div><h2 id="pw-machines-title">机器</h2><p>整机功耗估算 = GPU 实测 + CPU + 其他基线 · 每 5 秒刷新 · 温度为传感器读数</p></div>
             <Chip>{machines.length} 台 · {online.length} 台有读数</Chip>
           </div>
-          <ul className="machines">{machines.map((m) => <MachineRow key={m.id} m={m} />)}</ul>
+          <ul className="machines">{machines.map((m) => <MachineRow key={m.id} m={m} sensorsReceivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />)}</ul>
           <p className="section-note">其他机器在「估算参数」中按名称与地址添加；只运行 Hub 的 Mac 没有 TaskPaw Agent，暂不计入。</p>
         </section>
 
@@ -194,7 +207,9 @@ function PowerBody({ machines, range, rows, rates, workflowOff, onOpenMedia, say
   );
 }
 
-function MachineRow({ m }: { m: Machine }) {
+function MachineRow({ m, sensorsReceivedMs, nowMs, failed }: {
+  m: Machine; sensorsReceivedMs: number | undefined; nowMs: number; failed: boolean;
+}) {
   const split = splitOf(m.live);
   const [stateText, tone] = stateChip(m);
   const act = activityNow(m.live?.activity);
@@ -224,6 +239,7 @@ function MachineRow({ m }: { m: Machine }) {
       <div className="m-today"><span className="k">今日</span>
         <strong>{m.live ? fmtKwh(m.live.today_wh) : m.energy?.today_wh != null ? fmtKwh(m.energy.today_wh) : "—"}<small>度</small></strong>
         {!m.live && m.energy?.today_wh != null && m.energyStale && <small>数据过期</small>}</div>
+      <SensorLine machine={m.name} sensors={m.sensors} ageS={m.sensors_age_s} receivedMs={sensorsReceivedMs} nowMs={nowMs} failed={failed} />
     </li>
   );
 }

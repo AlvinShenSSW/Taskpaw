@@ -1,7 +1,8 @@
 """The 功耗 tab's machines: this agent plus its peers (PWR-3, #289).
 
-Design: docs/specs/2026-10-22-power-estimation.md, v2 PW06/PW08. Every figure
-is an estimate (估算).
+Design: docs/specs/2026-10-22-power-estimation.md, v2 PW06/PW08. Power and
+energy are estimates (估算); optional #336 `sensors` are readings, passed
+through as received and aged on this agent's monotonic clock.
 
 - **Peers** are `{name, address}` in agent.yaml `power.peers`; requests carry
   this agent's own api_token (the Hub's single polling token already has to
@@ -797,7 +798,10 @@ class PowerFleet:
             url = peer_url(address, "/status")
         except ValueError:
             self._update(
-                peer, state="invalid_address", error="invalid_address", power=None
+                peer,
+                state="invalid_address",
+                error="invalid_address",
+                power=None,
             )
             return []
         try:
@@ -840,6 +844,7 @@ class PowerFleet:
             answered=True,
             outcome="idle",
         )
+        sensors = status.get("sensors")  # #336: as received
         seen = dict(
             machine=_text(status.get("machine")),
             server_id=_text(status.get("server_id")),
@@ -848,6 +853,8 @@ class PowerFleet:
             checked_at=self._wall(),
             checked_mono=self._clock(),
             error=None,
+            sensors=sensors if isinstance(sensors, dict) else None,
+            sensors_mono=self._clock(),
         )
         if self._is_self(status):
             self._update(peer, **seen, state="self", power=None, history={}, energy={})
@@ -949,6 +956,7 @@ class PowerFleet:
             name, address = key
             seen = entry.get("checked_mono")
             age = None if seen is None else max(0.0, now - seen)
+            sensed = entry.get("sensors_mono")
             stale = age is None or age > STALE_SECONDS
             first = duplicates.get(key)
             state = "duplicate" if first else entry.get("state", "pending")
@@ -976,6 +984,8 @@ class PowerFleet:
                     "version": entry.get("version"),
                     "os": entry.get("os"),
                     "power": None if first else entry.get("power"),
+                    "sensors": entry.get("sensors"),
+                    "sensors_age_s": None if sensed is None else now - sensed,
                     "energy": energy,
                     "energy_stale": energy is not None
                     and not (

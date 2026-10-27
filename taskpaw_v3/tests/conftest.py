@@ -82,6 +82,19 @@ def _power_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _sensor_isolation(monkeypatch):
+    """#336: no test reaches LibreHardwareMonitor (127.0.0.1:8085) or a real
+    nvidia-smi through the sensor sampler."""
+    from taskpaw_v3.core import sensors
+
+    monkeypatch.setattr(
+        sensors,
+        "read_sensors",
+        lambda: {"source": None, "cpu_c": None, "gpu_c": None, "fans": []},
+    )
+
+
+@pytest.fixture(autouse=True)
 def _media_workflow_everywhere(monkeypatch):
     """#299 §12 OD: the media workflow is Windows-only in the product; its
     settings tests exercise the rules on every CI OS. The refusal off Windows

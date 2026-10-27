@@ -316,6 +316,18 @@ describe("概览", () => {
     expect(screen.getByText("156 / 300 帧")).toBeInTheDocument();
     expect(screen.getByText("中文翻译 · 112 / 240 条字幕")).toBeInTheDocument();
   });
+
+  it("shows five active films before folding the rest into 另有 N 部正在处理 (#347)", async () => {
+    mockApi();
+    const films = [...FILMS,
+      row({ film_id: "abf-501", title: "远山来信", stage: "return", status: "running", steps: steps("return") }),
+      row({ film_id: "abf-502", title: "潮汐之间", stage: "scrape", status: "running", steps: steps("scrape") })];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    wrap(<MediaWorkspace />);
+    const region = await screen.findByRole("region", { name: "正在处理" });
+    expect(await within(region).findByText("另有 1 部正在处理")).toBeInTheDocument();
+    expect(region.querySelectorAll("article.film-row")).toHaveLength(5);
+  });
 });
 
 describe("待处理", () => {

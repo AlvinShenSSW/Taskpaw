@@ -91,6 +91,110 @@ def _llm_cfg() -> AgentConfig:
     )
 
 
+@pytest.mark.parametrize("fail_start", [False, True])
+def test_sensor_owner_serves_cached_readings_with_power_off_and_stops(
+    tmp_path, monkeypatch, fail_start
+):
+    from unittest.mock import Mock
+
+    import uvicorn
+    from fastapi.testclient import TestClient
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import sensors
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors import runtime
+
+    config = _llm_cfg()
+    config.power.enabled = False
+    config.workflow.enabled = False
+    config.api_token = "sensor-network-test"
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(launcher, "claim_port", lambda *a, **k: Mock())
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: Mock())
+    monkeypatch.setattr(
+        "taskpaw_v3.agent.server.admin.MonitorAdmin.status_view", lambda self: {}
+    )
+    reading = {
+        "source": "lhm",
+        "cpu_c": 61.0,
+        "gpu_c": 45.0,
+        "fans": [{"name": "CPU Fan", "rpm": 1218}],
+    }
+    native = Mock(return_value=reading)
+    probe = sensors.SensorSampler(reader=native)
+
+    def start():
+        probe.tick()
+        if fail_start:
+            raise RuntimeError("sensor startup fixture failure")
+
+    probe.start = Mock(side_effect=start)
+    probe.stop = Mock(wraps=probe.stop)
+    monkeypatch.setattr(sensors, "SensorSampler", lambda: probe)
+    sessions = []
+    original_bootstrap = launcher.bootstrap_control
+
+    def bootstrap(*args, **kwargs):
+        session = original_bootstrap(*args, **kwargs)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    apps = []
+    monkeypatch.setattr(uvicorn, "Config", lambda app, **kw: apps.append(app))
+    monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
+    try:
+        if fail_start:
+            with pytest.raises(RuntimeError, match="sensor startup fixture"):
+                launcher.run_agent(
+                    config,
+                    queue=EventQueue("m"),
+                    shutdown=shutdown,
+                    config_path=tmp_path / "agent.yaml",
+                    block=False,
+                )
+        else:
+            launcher.run_agent(
+                config,
+                queue=EventQueue("m"),
+                shutdown=shutdown,
+                config_path=tmp_path / "agent.yaml",
+                block=False,
+            )
+            probe.start.assert_called_once()
+            network = TestClient(apps[0])
+            control = TestClient(apps[1])
+            assert network.get("/status").status_code == 401
+            status = network.get(
+                "/status", headers={"Authorization": f"Bearer {config.api_token}"}
+            ).json()
+            assert status["power"] is None
+            assert "temperatures" not in status
+            assert {k: status["sensors"][k] for k in reading} == reading
+            assert status["sensors"]["at"] is not None
+            for range_ in ("24h", "7d", "30d"):
+                view = control.get(
+                    f"/control/power?range={range_}",
+                    headers={"Authorization": f"Bearer {sessions[0].token}"},
+                ).json()
+                assert "temperatures" not in view
+                assert view["sensors"]["cpu_c"] == 61.0
+                assert view["sensors"]["fans"] == reading["fans"]
+                assert view["sensors_age_s"] >= 0
+            native.assert_called_once()
+    finally:
+        shutdown.shutdown()
+    probe.stop.assert_called_once()
+    assert shutdown.stopped.is_set()
+
+
 class _Sentinel(Exception):
     pass
 

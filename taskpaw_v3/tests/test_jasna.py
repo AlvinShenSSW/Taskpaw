@@ -2420,13 +2420,100 @@ def test_missing_model_waits_without_consuming_films_or_gpu(
     assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
     assert inst.respond_prompt(prompt["request_id"], False)
     assert not inst.respond_prompt(prompt["request_id"], True)
-    assert inst.check(emit).metrics["ltx_download"]["state"] == "paused"
+    # #331: a decline clears the request and fails the run's LTX films
+    assert inst._download.status == {} and inst._ltx_declined
+    assert inst._advance_requested  # the next check() dispatches (C1)
+    status = inst.check(emit)
+    assert "ltx_download" not in status.metrics
+    assert launcher.n == 0 and inst._pending == []
+    assert inst._done == 0 and inst._failed == 2
+    assert inst._consecutive_failures == 0 and inst._gpu_holder is None
+    assert [(r["film"], r["data"]) for r in _tasklog("restore.skipped")] == [
+        ("a.mp4", {"reason": "ltx_model_missing"}),
+        ("b.mp4", {"reason": "ltx_model_missing"}),
+    ]
+    done = [e for e in evs if e[0] == "done"]
+    assert len(done) == 1 and "0/2 done, 2 failed" in done[0][2]
+    assert [
+        (r["data"]["done"], r["data"]["failed"]) for r in _tasklog("task.done")
+    ] == [(0, 2)]
     inst.stop(timeout=0.5)
     assert not inst.respond_prompt(prompt["request_id"], True)
     inst.start(emit)
+    assert not inst._ltx_declined and not inst._ltx_declined_alerted
     assert (
         inst.check(emit).metrics["ltx_download"]["request_id"] != prompt["request_id"]
     )
+    inst.stop(timeout=0.5)
+
+
+def test_declined_download_launches_the_non_ltx_film_on_the_same_check(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=True)
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher, _probe({"b.mp4": (3840, 2160)}))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    prompt = inst.check(emit).metrics["ltx_download"]
+    assert inst.respond_prompt(prompt["request_id"], False)
+    inst.check(emit)  # a.mp4 fails, the 4K b.mp4 launches
+    assert launcher.inputs() == ["b.mp4"]
+    assert inst._failed == 1 and [p.name for p in inst._pending] == ["c.mp4"]
+    assert not [e for e in evs if e[0] == "done"]
+    launcher.procs[0]._rc = 0
+    status = inst.check(emit)  # b.mp4 done; c.mp4 fails without a new prompt
+    assert "ltx_download" not in status.metrics
+    assert launcher.inputs() == ["b.mp4"]
+    assert inst._done == 1 and inst._failed == 2 and inst._pending == []
+    assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
+    done = [e for e in evs if e[0] == "done"]
+    assert len(done) == 1 and "1/3 done, 2 failed" in done[0][2]
+    inst.stop(timeout=0.5)
+
+
+def test_declined_download_alerts_once_per_run(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=True)
+    _videos(inp, "a.mp4", "b.mp4")
+    _patch(monkeypatch, _Launcher([None]))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    def decline() -> None:
+        prompt = inst.check(emit).metrics["ltx_download"]
+        assert inst.respond_prompt(prompt["request_id"], False)
+        inst.check(emit)
+
+    inst.start(emit)
+    decline()
+    declined = [e for e in evs if e[3] == "j1:ltx:declined"]
+    assert len(declined) == 1 and "ltx_model_missing" in declined[0][2]
+    inst.stop(timeout=0.5)
+    inst.start(emit)
+    decline()
+    assert len([e for e in evs if e[3] == "j1:ltx:declined"]) == 2
+    assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 2
+    inst.stop(timeout=0.5)
+
+
+def test_declined_download_settles_the_subtitle_jobs_and_fires_done(
+    tmp_path, monkeypatch
+):
+    from test_jasna_subs import _setup
+
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], ltx_1080p=True)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    prompt = inst.check(emit).metrics["ltx_download"]
+    assert inst.respond_prompt(prompt["request_id"], False)
+    inst.check(emit)
+    assert r.launcher.n == 0 and inst._failed == 2
+    for name in ("a.mp4", "b.mp4"):
+        assert inst._settled[name] == ("skipped", "restore_failed")
+        assert inst._tracker.record(name)["steps"]["restore"]["state"] == "failed"
+    assert len([e for e in r.evs if e[0] == "done"]) == 1
     inst.stop(timeout=0.5)
 
 

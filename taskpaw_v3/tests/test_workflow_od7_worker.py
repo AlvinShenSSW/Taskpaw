@@ -86,8 +86,9 @@ def test_r9_a_beat_without_asr_ready_and_one_with_it_are_both_accepted():
 
 
 def test_r9_the_worker_beat_is_accepted_by_the_pre_od7_controller(tmp_path):
-    """IR P2-1: a worker upgraded before its controller must show 版本不一致,
-    not 失联. The pre-OD7 `Heartbeat` required `asr_ready` under
+    """IR P2-1: retain the old controller's ability to read the heartbeat.
+    Its historical version gate is independent of the new compatibility policy.
+    The pre-OD7 `Heartbeat` required `asr_ready` under
     `extra="forbid"`; the new beat keeps sending `false`, the new controller
     ignores it."""
     host = remote_worker.WorkerHost(

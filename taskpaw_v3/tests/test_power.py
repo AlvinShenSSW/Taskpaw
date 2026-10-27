@@ -175,23 +175,36 @@ def fake_smi(monkeypatch, stdout, returncode=0):
 
 
 def test_gpu_sample_queries_power_and_sums_gpus(monkeypatch):
-    calls = fake_smi(monkeypatch, "50, 2048, 8192, 120.50\n70, 1024, 8192, 30.25\n")
+    calls = fake_smi(
+        monkeypatch, "50, 2048, 8192, 120.50, 41\n70, 1024, 8192, 30.25, 63\n"
+    )
     s = gs.gpu_sample()
     assert s == {
         "util_pct": 60.0,
         "mem_used_mb": 3072,
         "mem_total_mb": 16384,
         "power_w": 150.75,
+        "temp_c": 63.0,
     }
-    assert any("power.draw" in part for part in calls[0])
-    assert any("utilization.gpu" in part for part in calls[0])
+    assert calls[0][1] == (
+        "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,"
+        "temperature.gpu"
+    )
 
 
 def test_gpu_sample_na_power_keeps_the_rest(monkeypatch):
-    fake_smi(monkeypatch, "12, 500, 8151, [N/A]\n")
+    fake_smi(monkeypatch, "12, 500, 8151, [N/A], 40\n")
     s = gs.gpu_sample()
-    assert s is not None and s["power_w"] is None
+    assert s is not None and s["power_w"] is None and s["temp_c"] == 40.0
     assert (s["util_pct"], s["mem_used_mb"], s["mem_total_mb"]) == (12.0, 500, 8151)
+
+
+def test_gpu_sample_temperature_is_the_hottest_reported_gpu(monkeypatch):
+    fake_smi(monkeypatch, "10, 1, 2, 5, [N/A]\n20, 1, 2, 6, 52\n")
+    assert gs.gpu_sample()["temp_c"] == 52.0
+    gs._reset_for_tests()
+    fake_smi(monkeypatch, "10, 1, 2, 5, [N/A]\n20, 1, 2, 6, [N/A]\n")
+    assert gs.gpu_sample()["temp_c"] is None
 
 
 def test_gpu_sample_sums_only_reported_power(monkeypatch):
@@ -202,7 +215,7 @@ def test_gpu_sample_sums_only_reported_power(monkeypatch):
 def test_gpu_sample_old_three_column_output_has_no_power(monkeypatch):
     fake_smi(monkeypatch, "50, 2048, 8192\n")
     s = gs.gpu_sample()
-    assert s["util_pct"] == 50.0 and s["power_w"] is None
+    assert s["util_pct"] == 50.0 and s["power_w"] is None and s["temp_c"] is None
 
 
 @pytest.mark.parametrize(

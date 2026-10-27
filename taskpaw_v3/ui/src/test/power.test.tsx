@@ -41,7 +41,7 @@ describe("功耗 tab", () => {
     wrap(<PowerPage />);
     expect(await screen.findByRole("heading", { level: 1, name: "功耗" })).toBeInTheDocument();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);  // no slogan heading (decision 7)
-    expect(screen.getByText("整机实测请以智能插座为准；此处为估算，用于看分布和每片能耗。")).toBeInTheDocument();
+    expect(screen.getByText("功耗和能耗为估算；整机实测以智能插座为准。温度来自实际可读传感器，仅显示当前读数。")).toBeInTheDocument();
     const all = await screen.findByTestId("stat-all");
     // local 286 + GPU-02 172 + 翻译机 61; peers without power are not summed
     expect(all).toHaveTextContent("519W · 3 台");

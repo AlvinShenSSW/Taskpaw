@@ -1811,6 +1811,9 @@ class JasnaInstance(MonitorInstance):
         self._started = False
         # #263 AC4: the one console-window fallback and the one model alert
         self._ltx_model_alerted = False
+        # #331: the download was declined; the run's LTX films fail, one alert
+        self._ltx_declined = False
+        self._ltx_declined_alerted = False
         # #265: the GPU queried at Start and what it allows; the current launch
         self._gpus: Optional[list[tuple[float, int]]] = None
         self._ltx_fast_ok = True
@@ -1919,6 +1922,8 @@ class JasnaInstance(MonitorInstance):
         self._compiling = False
         self._idle_note = ""
         self._ltx_model_alerted = False
+        self._ltx_declined = False
+        self._ltx_declined_alerted = False
         self._gpus = None
         self._ltx_fast_ok = True
         self._ltx_canvas_ok = False
@@ -2413,7 +2418,15 @@ class JasnaInstance(MonitorInstance):
         with self._launch_lock:
             if self._stopping.is_set() or not self._started:
                 return False
-            return self._download.respond(request_id, approved)
+            if not self._download.respond(request_id, approved):
+                return False
+            if not approved:
+                # #331: no resume later — clear the request (no child yet) and
+                # let the next check() fail the LTX films and walk the queue.
+                self._download.stop(0)
+                self._ltx_declined = True
+                self._advance_requested = True
+            return True
 
     def _log_asr_stop(self, job: SubsJob, child) -> None:
         get_task_log().record(
@@ -2627,16 +2640,19 @@ class JasnaInstance(MonitorInstance):
                 fast = cfg.ltx_fast and self._ltx_fast_ok
                 missing = ltx_missing_files(self._exe_dir(), cfg.ltx_model, fast)
                 if missing:
-                    self._download.request(
-                        Path(cfg.jasna_exe_path).resolve().parent
-                        / "model_weights"
-                        / "ltx-restore",
-                        missing,
-                        _ltx_mode(
-                            cfg, fast, cfg.ltx_large_canvas and self._ltx_canvas_ok
-                        ),
-                    )
-                    self._alert_ltx_model(emit, missing)
+                    if self._ltx_declined:
+                        self._skip_ltx_declined(emit)
+                    else:
+                        self._download.request(
+                            Path(cfg.jasna_exe_path).resolve().parent
+                            / "model_weights"
+                            / "ltx-restore",
+                            missing,
+                            _ltx_mode(
+                                cfg, fast, cfg.ltx_large_canvas and self._ltx_canvas_ok
+                            ),
+                        )
+                        self._alert_ltx_model(emit, missing)
                     return False
             # Fence the previous reader before replacing its file or clearing
             # its output, even when this launch does not capture a new pipe.
@@ -2842,10 +2858,39 @@ class JasnaInstance(MonitorInstance):
             f"{self._cfg.name}: LTX model not downloaded",
             f"LTX model not downloaded: {', '.join(missing)} are not in Jasna's "
             "model_weights\\ltx-restore folder. Confirm Download and continue in "
-            "TaskPaw's local task panel. The film stays queued until the download "
-            "finishes; Jasna still requires its own LTX activation.",
+            "TaskPaw's local task panel. After Download the film stays queued until "
+            "the download finishes; after a decline this run's LTX films are skipped. "
+            "Jasna still requires its own LTX activation.",
             dedupe_key=f"{self.instance_id}:ltx:model",
         )
+
+    def _skip_ltx_declined(self, emit: EventEmitter) -> None:
+        """#331 (under `_launch_lock`): the download was declined — the next film
+        fails as `ltx_model_missing` and the dispatch loop walks on. A skip, not
+        a Jasna failure: the 3-strike count is untouched."""
+        name = self._pending.pop(0).name
+        self._failed += 1
+        self._mark_restore_failed(name)
+        get_task_log().record(
+            self.instance_id,
+            "restore.skipped",
+            task_type="jasna",
+            film=name,
+            data={"reason": "ltx_model_missing"},
+        )
+        if self._cfg.av_translate and name in self._jobs:
+            self._settle(name, "skipped", "restore_failed", emit)
+        if not self._ltx_declined_alerted:
+            self._ltx_declined_alerted = True
+            emit(
+                "alert",
+                f"{self._cfg.name}: LTX films skipped",
+                "LTX model download declined: this run's LTX films are skipped "
+                "(ltx_model_missing). Start the task again to be offered the "
+                "download.",
+                dedupe_key=f"{self.instance_id}:ltx:declined",
+            )
+        self._advance_requested = True
 
     # ── reader thread (capture mode) ───────────────────────────────────────
     def _reader_loop(
@@ -2913,7 +2958,7 @@ class JasnaInstance(MonitorInstance):
             resumed = not self._stopping.is_set() and self._download.tick()
         if resumed:
             self._advance_requested = True
-            self._dispatch(emit)
+        self._dispatch(emit)  # also the advance a decline requested (#331)
         # (2) launch error
         if self._launch_error is not None:
             return MonitorStatus(state="error", detail=self._launch_error)

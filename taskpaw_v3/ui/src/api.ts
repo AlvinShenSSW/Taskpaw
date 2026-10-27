@@ -178,6 +178,7 @@ export type DeviceRow = {
   gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
   disk: { free: number; staging_used: number; cap: number } | null;
   tiers_ready: string[]; agent_version: string | null; version_ok: boolean | null;  // OD7: no asr_ready
+  workflow_protocol?: number | null; required_protocol?: number;  // Absent on older backends.
   boot_reconciled: boolean; eligibility: string; eligible: boolean;
   probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
   restore_allowed: boolean; unresolved: number; can_retire: boolean;
@@ -212,7 +213,7 @@ export interface WorkerFilm {
 export interface WorkerTransfer { film: string; dir: "down" | "up"; done: number; total: number; rate: number }
 // The running stage; `step` is shaped like the board's running 修复 step (LtxProgress, 本片参数, 用时).
 export interface WorkerCurrent {
-  film_id: string; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
+  film_id: string; rev?: number; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
   progress: string; elapsed_s: number; uses_gpu: boolean; step: WorkflowStep; started_at: string;
   power?: LivePower | null; energy?: Record<string, unknown> | null;
 }
@@ -501,16 +502,24 @@ export interface PowerHistory {
 // rolled over); `energy_stale` when the peer is not answering now. `duplicate`: the same machine as the
 // earlier peer `duplicate_of` — listed, never summed.
 export interface PeerEnergy { today_wh: number | null; week_wh: number | null; month_wh: number | null }
+// #336: the machine's last sensor sample (LibreHardwareMonitor, else nvidia-smi GPU only), independent of
+// estimated watts. `sensors_age_s` beside it is seconds since the controller sampled / received it.
+export interface MachineSensors {
+  at: number | null; source: "lhm" | "nvidia-smi" | null; cpu_c: number | null; gpu_c: number | null;
+  fans: { name: string; rpm: number }[];
+}
 export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
   os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;
   energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
   // P2-4 R11: `workflow` = an enrolled GPU worker that joined automatically (工作机 · 自动加入)
   source?: "config" | "workflow";
+  sensors?: MachineSensors | null; sensors_age_s?: number | null;
 }
 export interface PowerView {
   // `energy`: this machine's retained today / week / month Wh, present while `power` is null (sampling off)
   power: LivePower | null; energy?: PeerEnergy | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];
+  sensors?: MachineSensors | null; sensors_age_s?: number | null;
 }
 export interface PowerPeerSetting { name: string; address: string }
 export interface PowerSettings {

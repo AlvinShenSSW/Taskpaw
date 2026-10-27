@@ -30,6 +30,8 @@ from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 from taskpaw_v3.packaging.backend_main import main as backend_main
 
+REREGISTER_HINT = "重新登记该 Agent（事件流已重新开始）"
+
 
 @pytest.mark.parametrize("body", [None, "", "{broken", "{}", '{"next_event_id":0}'])
 def test_unverified_counter_does_not_fallback(tmp_path, body):
@@ -508,8 +510,147 @@ def test_hub_uncertain_cursor_sends_zero_events(tmp_path, monkeypatch, change):
                 poller.fetch_events(store.get_server(sid), {"event_cursor": cursor})
                 == []
             )
-            assert requests == []
-            assert poller.snapshot_event_channels()[sid]["state"] == "paused"
+            channel = poller.snapshot_event_channels()[sid]
+            if change == "missing-ack":
+                # A lost ack entry is adopted at the Hub's floor (consumed 900).
+                assert [path for path, _ in requests] == ["/events"]
+                assert "ack=900" in requests[0][1]
+                assert channel["state"] == "ready"
+                assert store.read_acks()[sid] == 900
+            else:
+                assert requests == []
+                assert channel["state"] == "paused"
+                assert (
+                    channel["reason"]
+                    == {
+                        "stream": "state_identity_changed",
+                        "server": "state_identity_changed",
+                        "floor": "cursor_floor_regressed",
+                        "missing-binding": "cursor_store_invalid",
+                    }[change]
+                )
+            if change in ("stream", "server"):
+                assert channel["recovery_hint"] == REREGISTER_HINT
+    finally:
+        queue.close()
+        store.close()
+
+
+def _upgraded_hub(tmp_path, cursor, floor):
+    """A Hub whose event_cursors table was created by the upgrade migration."""
+    db = tmp_path / "hub.db"
+    store = HubStore(db)
+    sid = store.add_server("fixture", "127.0.0.1", 15680)
+    store.log_status(sid, True, json.dumps({"event_cursor": cursor}))
+    store.set_config("last_event_ids", json.dumps({str(sid): floor}))
+    store._conn.execute("DROP TABLE event_cursors")
+    store._conn.commit()
+    store.close()
+    store = HubStore(db)
+    assert store.get_event_cursor(sid)["state"] == "unverified"
+    return store, sid
+
+
+@pytest.mark.parametrize("next_id", [1001, 1])
+def test_unverified_reinitialised_agent_adopts_only_past_the_floor(tmp_path, next_id):
+    (tmp_path / "old").mkdir()
+    (tmp_path / "new").mkdir()
+    _, old_queue = trusted_queue(tmp_path / "old")
+    old_cursor = old_queue.cursor_snapshot()
+    old_queue.close()
+    store, sid = _upgraded_hub(tmp_path, old_cursor, 900)
+    config, queue = trusted_queue(tmp_path / "new", next_id)
+    try:
+        stream = queue.cursor_snapshot()["stream_id"]
+        assert store.get_event_cursor(sid)["identity"]["stream_id"] != stream
+        with actual_agent(config, queue) as (port, requests):
+            store.update_server(sid, port=port)
+            poller = Poller(
+                store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
+            )
+            poller.poll_once()
+            channel = poller.snapshot_event_channels()[sid]
+            binding = store.get_event_cursor(sid)
+            if next_id == 1001:
+                # The new stream's durable floor (1000) is past the Hub's 900.
+                assert channel["state"] == "ready"
+                assert [path for path, _ in requests] == ["/status", "/events"]
+                assert "ack=900" in requests[1][1]
+                assert binding["state"] == "bound"
+                assert binding["identity"]["stream_id"] == stream
+            else:
+                assert channel["reason"] == "state_identity_changed"
+                assert requests == [("/status", "")]
+                assert binding["state"] == "unverified"
+                assert store.read_acks() == {sid: 900}
+    finally:
+        queue.close()
+        store.close()
+
+
+@pytest.mark.parametrize("next_id", [1, 4])
+def test_identityless_unverified_row_adopts_only_past_the_floor(tmp_path, next_id):
+    config, queue = trusted_queue(tmp_path, next_id)
+    for n in range(3):
+        queue.add("fixture", f"offered {n}")
+    queue.payload(next_id - 1)  # offered, never acknowledged
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        sid = store.add_server("fixture", "127.0.0.1", 15680)
+        store._conn.execute(
+            "UPDATE event_cursors SET state='unverified', identity_json=NULL,"
+            " boot_id=NULL, resume_floor=NULL WHERE server_id=?",
+            (sid,),
+        )
+        store._conn.commit()
+        store.set_config("last_event_ids", json.dumps({str(sid): 2}))
+        assert store.get_event_cursor(sid)["identity"] is None
+        cursor = queue.cursor_snapshot()
+        assert cursor["offered_highwater"] >= 2
+        with actual_agent(config, queue) as (port, requests):
+            store.update_server(sid, port=port)
+            poller = Poller(
+                store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
+            )
+            poller.poll_once()
+            channel = poller.snapshot_event_channels()[sid]
+            binding = store.get_event_cursor(sid)
+            if next_id == 4:
+                # The agent's durable floor (3) is past the Hub's floor (2).
+                assert channel["state"] == "ready"
+                assert [path for path, _ in requests] == ["/status", "/events"]
+                assert "ack=2" in requests[1][1]
+                assert binding["state"] == "bound"
+            else:
+                # resume_floor 0 < 2: adopting would drop the offered 1-2.
+                assert channel["state"] == "paused"
+                assert channel["reason"] == "state_identity_changed"
+                assert requests == [("/status", "")]
+                assert binding["state"] == "unverified"
+                assert store.read_acks() == {sid: 2}
+    finally:
+        queue.close()
+        store.close()
+
+
+def test_unverified_floor_above_offered_highwater_is_not_adopted(tmp_path):
+    config, queue = trusted_queue(tmp_path)
+    store, sid = _upgraded_hub(tmp_path, queue.cursor_snapshot(), 900)
+    try:
+        before = store.get_event_cursor(sid)
+        with actual_agent(config, queue) as (port, requests):
+            store.update_server(sid, port=port)
+            poller = Poller(
+                store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
+            )
+            poller.poll_once()
+            assert requests == [("/status", "")]
+            assert (
+                poller.snapshot_event_channels()[sid]["reason"]
+                == "cursor_adoption_required"
+            )
+            assert store.get_event_cursor(sid) == before
+            assert store.read_acks() == {sid: 900}
     finally:
         queue.close()
         store.close()
@@ -688,7 +829,7 @@ def test_old_agent_current_status_continues_without_any_event_request(
     "raw",
     ['{"1":900,"1":0}', '{"1":true}', '{"1":"900"}', "[]", '{"01":900}', "{broken"],
 )
-def test_malformed_ack_store_pauses_without_repair(tmp_path, raw):
+def test_malformed_ack_store_is_repaired_with_a_fault_copy(tmp_path, raw):
     config, queue = trusted_queue(tmp_path)
     store = HubStore(tmp_path / "hub.db")
     try:
@@ -699,12 +840,13 @@ def test_malformed_ack_store_pauses_without_repair(tmp_path, raw):
                 store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
             )
             poller.poll_once()
-            assert requests == [("/status", "")]
-            assert store.get_config("last_event_ids") == raw
-            assert (
-                poller.snapshot_event_channels()[sid]["reason"]
-                == "cursor_store_invalid"
-            )
+            assert [path for path, _ in requests] == ["/status", "/events"]
+            assert sid in store.read_acks()
+            assert poller.snapshot_event_channels()[sid]["state"] == "ready"
+            poller.poll_once()
+            assert store._conn.execute(
+                "SELECT value FROM config WHERE key LIKE 'last_event_ids.fault-%'"
+            ).fetchall() == [(raw,)]
     finally:
         queue.close()
         store.close()

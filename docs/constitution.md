@@ -6,23 +6,19 @@ The AFK / review gates self-check against this file — a violation is a blocker
 
 ## 1. Scope discipline
 
-- **V2 is frozen.** `taskpaw.py`, `taskpaw_hub.py`, `macsubs.py` accept only
-  critical bug fixes until V3 ships (operator decision §9.6 of the V3 design).
-  No new features, no refactors-for-taste in V2.
-  - **Documented exception — issue #14 (event-delivery optimization).** The
-    operator explicitly chose to implement #14's clear-on-ack + Hub→OpenClaw
-    outbox + additive event fields on the **existing V2 code** (not the V3
-    monorepo), because #14 precedes the V3 backend (#15) in the dependency order
-    and §10 #1 scopes it as optimizing the *current* protocol implementation.
-    These changes are backward-compatible. V3 inherits them. This is the only
-    sanctioned V2 feature work; it does not reopen V2 for anything else.
+- **V2 was removed in 3.10.x; tag `v3.10.6` holds it.** The V2 agent, Hub and
+  MacSubs scripts are no longer in the repository.
+  - **History — issue #14 (event-delivery optimization).** #14's clear-on-ack +
+    Hub→OpenClaw outbox + additive event fields were implemented on the V2 code
+    before the V3 backend (#15) existed; they are backward-compatible and V3
+    inherits them.
 - **V3 is greenfield** and lives under `taskpaw_v3/` (a scaffolded monorepo). New
   capability goes there, per
   [docs/specs/2026-06-27-taskpaw-v3-design.md](specs/2026-06-27-taskpaw-v3-design.md).
 - **Never widen an operator-given scope.** In AFK mode, touch only the issues /
   files handed to you. Out-of-scope work → stop and report, don't do it.
 
-## 2. Security invariants (apply to V2 and V3)
+## 2. Security invariants
 
 - **No `shell=True`** with any user-influenced input. Use `shlex.split()` +
   `shell=False`.
@@ -46,7 +42,7 @@ The AFK / review gates self-check against this file — a violation is a blocker
   dedupes by `last_event_ids`. Do not break this wire shape — V3 only *adds*
   optional fields (`level`/`title`/`data`) and changes queue-trim timing
   (clear-on-ack), never the endpoint or required fields.
-- **Ports:** V2 agent `5678`, MacSubs `5679` (being retired), V3 agent `5680`.
+- **Ports:** V3 agent `5680` (V2 used `5678` and MacSubs `5679`; both removed).
   A new component must not silently collide; detect port-in-use and fail loudly.
 - **Timezone:** pick one authority (Hub local time) and convert on ingest; never
   compare timestamps from different machines lexically.

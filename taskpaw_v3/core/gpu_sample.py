@@ -1,15 +1,17 @@
-"""One shared nvidia-smi query for GPU %, VRAM and power (PWR-1 PW02, #287).
+"""One shared nvidia-smi query for GPU %, VRAM, power and temperature (PWR-1
+PW02, #287; temperature #336).
 
 `gpu_sample()` runs a single `nvidia-smi --query-gpu=utilization.gpu,
-memory.used,memory.total,power.draw` and caches the result for 4 s behind a
-lock, so the power sampler (every 5 s) and the GPU% / VRAM consumers
-(`host_metrics.read_gpu`, used by host_metrics, Jasna, avsubs and Lada) share
-one child process instead of each starting their own.
+memory.used,memory.total,power.draw,temperature.gpu` and caches the result for
+4 s behind a lock, so the power sampler (every 5 s), the sensor sampler's
+no-LHM fallback and the GPU% / VRAM consumers (`host_metrics.read_gpu`, used by
+host_metrics, Jasna, avsubs and Lada) share one child process instead of each
+starting their own.
 
-`power.draw` is parsed on its own: `[N/A]` / `[Not Supported]` gives a None
-power while utilisation and VRAM stay. Windows only (the V2 method, #21); on
-any other platform, without nvidia-smi or without an NVIDIA GPU the sample is
-None.
+`power.draw` and `temperature.gpu` are parsed on their own: `[N/A]` /
+`[Not Supported]` gives a None power or temperature while utilisation and VRAM
+stay. Windows only (the V2 method, #21); on any other platform, without
+nvidia-smi or without an NVIDIA GPU the sample is None.
 """
 
 from __future__ import annotations
@@ -21,9 +23,9 @@ import time
 from typing import Callable, Optional
 
 CACHE_SECONDS = 4.0
-QUERY = "utilization.gpu,memory.used,memory.total,power.draw"
+QUERY = "utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu"
 
-GpuSample = dict  # {util_pct, mem_used_mb, mem_total_mb, power_w (float | None)}
+GpuSample = dict  # {util_pct, mem_used_mb, mem_total_mb, power_w, temp_c (| None)}
 
 _lock = threading.Lock()
 _clock: Callable[[], float] = time.monotonic
@@ -39,10 +41,12 @@ def _number(text: str) -> Optional[float]:
 
 
 def parse(stdout: str) -> Optional[GpuSample]:
-    """Sum VRAM and power over the GPUs, average the utilisation."""
+    """Sum VRAM and power over the GPUs, average the utilisation, keep the
+    hottest temperature."""
     utils: list[float] = []
     used = total = 0.0
     powers: list[float] = []
+    temps: list[float] = []
     for line in stdout.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3:
@@ -53,6 +57,9 @@ def parse(stdout: str) -> Optional[GpuSample]:
         watts = _number(parts[3]) if len(parts) >= 4 else None
         if watts is not None:
             powers.append(watts)
+        celsius = _number(parts[4]) if len(parts) >= 5 else None
+        if celsius is not None:
+            temps.append(celsius)
     if not utils:
         return None
     return {
@@ -60,6 +67,7 @@ def parse(stdout: str) -> Optional[GpuSample]:
         "mem_used_mb": round(used),
         "mem_total_mb": round(total),
         "power_w": round(sum(powers), 2) if powers else None,
+        "temp_c": max(temps) if temps else None,
     }
 
 

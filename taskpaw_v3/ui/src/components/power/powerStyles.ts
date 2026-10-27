@@ -89,6 +89,32 @@ export const POWER_CSS = `
 .mw .m-today{grid-area:today;text-align:right}
 .mw .m-today strong{font:500 16px/1.5 var(--mono)}
 .mw .m-today strong small{font:10px var(--sans);color:var(--muted);margin-left:3px}
+.mw .m-sensors{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;border-top:1px solid #34485b;padding-top:10px;margin-top:2px;min-width:0;font-size:12px;color:#b2c3d5}
+.mw .m-sensors .sensor{display:inline-flex;align-items:baseline;gap:6px;white-space:nowrap}
+.mw .m-sensors .sensor b{font:500 15px/1.4 var(--mono);color:#eaf2fc;font-variant-numeric:tabular-nums}
+.mw .m-sensors .sensor b small{font:10px var(--sans);color:#b2c3d5;margin-left:2px}
+.mw .m-sensors .fans{display:inline-flex;align-items:baseline;gap:6px 10px;flex-wrap:wrap}
+.mw .m-sensors .fan{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap}
+.mw .m-sensors .fan b{font:500 13px/1.4 var(--mono);color:#eaf2fc;font-variant-numeric:tabular-nums}
+.mw .m-sensors .fan small{font-size:10px;color:var(--muted)}
+.mw .m-sensors .meta{font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap}
+.mw .m-sensors .sep{color:#34485b}
+.mw .m-sensors.stale .sensor b,.mw .m-sensors.stale .fan b,.mw .m-sensors.stale .meta{color:#f0c57a}
+.mw .m-sensors .unavailable{color:var(--muted)}
+.mw .m-sensors .unavailable b{color:#b2c3d5;font:500 12px var(--sans)}
+/* #345: the LHM install guide, expanded under the sensor line as a full-width grid item */
+.mw .guide-link{background:none;border:0;padding:0;color:var(--blue);font:12px var(--sans);cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+.mw .guide-link:hover{color:#93c5fd}
+.mw .m-guide{grid-column:1/-1;margin-top:6px;padding:12px 14px;border:1px solid #34485b;border-radius:8px;background:#0d1626;font-size:12px;color:#d8e5f6;min-width:0}
+.mw .m-guide p{margin:0 0 8px;line-height:1.6}
+.mw .m-guide p.lead{color:var(--text);font-weight:500}
+.mw .m-guide ol{margin:0 0 10px;padding-left:18px;line-height:1.7}
+.mw .m-guide .cmd{position:relative;margin:6px 0 10px}
+.mw .m-guide .cmd-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-bottom:4px}
+.mw .m-guide pre{margin:0;padding:10px 12px;background:#070d18;border:1px solid var(--line);border-radius:6px;font:11px/1.55 var(--mono);color:#cfe0f4;overflow-x:auto;white-space:pre}
+.mw .m-guide .copy{min-height:28px;padding:3px 10px;border:1px solid #34485b;border-radius:6px;background:transparent;color:#b2c3d5;font:11px var(--sans);cursor:pointer}
+.mw .m-guide .copy:hover{border-color:var(--blue);color:#b5d4ff}
+.mw .m-guide .note{font-size:11px;color:var(--muted);margin:0}
 .mw .section-note{font-size:10px;color:var(--muted);padding:12px 20px 16px;line-height:1.75}
 .mw .legend{display:flex;gap:6px;flex-wrap:wrap;padding:14px 20px 0}
 .mw .legend button{min-height:44px;display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid #33455d;border-radius:7px;background:transparent;color:#c3d0e0;font-size:11px;transition:background .16s,border-color .16s,opacity .16s}
@@ -170,6 +196,7 @@ export const POWER_CSS = `
   .mw .pw-two-col{grid-template-columns:1fr}.mw .param-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:900px){.mw .pw-page{padding:24px}.mw .machine{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"id today" "act act" "pow pow" "spark spark"}}
 @media(max-width:600px){.mw .stats.pw-stats{grid-template-columns:1fr 1fr}.mw .stats.pw-stats .pw-stat{display:block}.mw .energy-panel{padding:15px}.mw .energy-total{text-align:left}.mw .energy-tiers{gap:6px}.mw .energy-tiers div{padding:8px}.mw .energy-tiers strong{font-size:13px}.mw .pw-now .pw-bar{width:64px}
+  .mw .m-sensors .meta{margin-left:0;flex-basis:100%}
   .mw .pw-page{padding:22px 15px}.mw .pw-page .page-title .actions{width:100%}.mw .range{flex:1}.mw .range .filter-pill{flex:1;padding:7px 8px}
   .mw .pw-page .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mw .pw-page .stat{padding:14px}.mw .pw-page .stat strong{font-size:24px}.mw .pw-page .stat strong em{margin-left:5px;font-size:11px}
   .mw .pw-page .panel-head{padding:15px}.mw .pw-page .panel-head h2{font-size:15px}.mw .machine{padding:14px 15px;gap:8px 14px}.mw .legend{padding:12px 15px 0}.mw .chart-wrap{padding:6px 6px 2px 2px}.mw .chart-foot{padding:6px 15px 14px}.mw .uses{padding:4px 15px 8px}.mw .hist{padding:12px 15px}.mw .section-note{padding:12px 15px 14px}

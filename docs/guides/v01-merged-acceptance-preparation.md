@@ -22,9 +22,9 @@
 | R02 | [重定向拒绝](../../taskpaw_v3/core/http.py)；[HTTP 测试](../../taskpaw_v3/tests/test_http_redirects.py)的 `test_real_cross_port_redirect_never_requests_target`、`test_redirect_keeps_status_and_ack_until_direct_recovery`、`test_redirect_at_attempt_cap_has_one_safe_dead_letter_alert` | 假端点/TLS 不证明现场代理、LAN 或真实 OpenClaw 配置兼容 |
 | R03 | [迁移工具](../../taskpaw_v3/hub/server/outbox_migration.py)；[迁移测试](../../taskpaw_v3/tests/test_outbox_migration.py)的 `test_preview_is_readonly_apply_preserves_values_and_double_start`、`test_complete_backup_includes_committed_wal_and_restores_all_tables` | 临时 SQLite 不证明真实历史数据、目录保护或恢复后的通知效果 |
 | R05 | [Agent 状态](../../taskpaw_v3/agent/state.py)、[状态存储](../../taskpaw_v3/core/state.py)、[Hub poller](../../taskpaw_v3/hub/server/poller.py)；[游标测试](../../taskpaw_v3/tests/test_event_cursor.py)的 `test_unverified_counter_does_not_fallback`、`test_unoffered_ack_inside_current_range_retains_queue`、`test_actual_legacy_agent_status_only` | 模拟重启不证明现场历史完整、双方记录同时回滚可识别或事件正文持久重放 |
-| R15 | [扫描器](../../scripts/dependency_scan.py)、[工作流](../../.github/workflows/dependency-scan.yml)、[例外清单](../security/dependency-exceptions.json)；[扫描测试](../../tests/test_dependency_scan.py)的 `test_complete_multiversion_coverage_and_identity_mismatch`、`test_tool_error_and_malformed_reports_never_findings`、`test_expiry_is_exclusive_and_new_advisory_stays_actionable` | 某时刻的扫描不证明当前无新公告、最终安装包内容或产品不存在漏洞 |
+| R15 | [依赖安全决策](dependency-security.md)记录的定向修复；锁文件 `uv.lock`、`taskpaw_v3/ui/package-lock.json`、`taskpaw_v3/src-tauri/Cargo.lock`（专用扫描器已于 3.10.x 删除） | 某时刻的扫描不证明当前无新公告、最终安装包内容或产品不存在漏洞 |
 
-历史 [审计跟进索引](../audits/2026-10-02-audit-follow-up.md) 是其标注时间的快照，不在本页改写为当前 tracker。已有 [部署](deployment.md)、[控制契约](../specs/2026-10-01-local-control-auth-design.md)、[outbox 迁移契约](../specs/2026-10-02-outbox-timestamp-migration.md)、[游标恢复](event-cursor-recovery.md)、[依赖扫描](dependency-security.md)提供详细语义；引用操作指南不代表本页授权执行。
+历史 [审计跟进索引](../audits/2026-10-02-audit-follow-up.md) 是其标注时间的快照，不在本页改写为当前 tracker。已有 [部署](deployment.md)、[控制契约](../specs/2026-10-01-local-control-auth-design.md)、[outbox 迁移契约](../specs/2026-10-02-outbox-timestamp-migration.md)、[游标恢复](event-cursor-recovery.md)、[依赖安全决策](dependency-security.md)提供详细语义；引用操作指南不代表本页授权执行。
 
 ## 每个未来案例的共同前提
 
@@ -82,7 +82,7 @@
 
 1. 核对输入/锁/政策哈希、工具版本、报告/公告库 UTC 时间和精确 inventory/coverage；缺失、部分覆盖、工具/数据错误不是通过。
 2. 区分 exit0 的 clean 与 accepted_exceptions；逐项核对例外 ID、owner、适用范围和排他到期时间。exit1 是未豁免可操作发现，exit2 是扫描/配置/覆盖错误；错误或 yank 不能靠例外豁免。依赖新公告可能改变结论，旧报告不宣称“当前安全”。
-3. 分别记录最终 sidecar archive/TOC 与 UI 产物证据是否存在、对应源码/锁及散列。声明的依赖组不能证明最终包内容；尚无最终产物则记 pending。新的实时扫描按[现有独立流程](dependency-security.md)另行授权，安装包、原生依赖兼容和正式发布安全仍未验收。
+3. 分别记录最终 sidecar archive/TOC 与 UI 产物证据是否存在、对应源码/锁及散列。声明的依赖组不能证明最终包内容；尚无最终产物则记 pending。依赖决策见[依赖安全决策](dependency-security.md)；新的扫描需另行授权，安装包、原生依赖兼容和正式发布安全仍未验收。
 
 保留：脱敏 summary、coverage/例外结果和输入/报告/产物哈希，不发布原始敏感 stderr。缺证据即 pending，有错误/不匹配即 failed。清理仅本次保存的公开/脱敏报告副本；不自动升级、修锁、发通知或部署。
 

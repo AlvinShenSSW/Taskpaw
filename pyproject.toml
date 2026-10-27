@@ -51,8 +51,8 @@ dev = [
     "httpx>=0.27,<1.0",
 ]
 
-# This repo is a set of flat scripts (taskpaw.py / taskpaw_hub.py / macsubs.py),
-# not an installable package — tell uv not to try to build/install it.
+# The project is run from source and packaged by scripts/build.py, not installed
+# as a package — tell uv not to try to build/install it.
 [tool.uv]
 package = false
 
@@ -61,22 +61,19 @@ testpaths = ["tests", "taskpaw_v3/tests"]
 addopts = "-q"
 
 # ── Ruff (lint + format) — #141 ──────────────────────────────────────────────
-# V2 is frozen: the three flat V2 scripts are excluded so linting/formatting never
-# churns them. Ruff runs on the V3 monorepo, the shared test suite, and scripts/.
+# Ruff runs on the V3 monorepo, the shared test suite, and scripts/.
 # A pragmatic first gate: pyflakes (real bugs) + pycodestyle + import sorting.
 # Line length is owned by `ruff format`; E501 is ignored so intentional long
 # strings/URLs don't fail the gate. Richer rule sets (UP/B/…) can be added later.
 [tool.ruff]
 target-version = "py310"
 line-length = 88
-# V2 scripts are frozen — not part of the V3 codebase this gate targets.
-extend-exclude = ["taskpaw.py", "taskpaw_hub.py", "macsubs.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
-# ── mypy — #141 (scoped to taskpaw_v3 ONLY; V2 is frozen and never type-checked) ─
+# ── mypy — #141 (scoped to taskpaw_v3 ONLY) ─────────────────────────────────────
 # Source-level checking of the V3 monorepo. Tests/examples are excluded — the value
 # is in the supervisor/lifecycle/hub code. A pragmatic first gate (not --strict).
 [tool.mypy]
@@ -88,8 +85,7 @@ warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
 # Coverage (#144) — measurement only, NO hard threshold yet.
-# Scoped to the V3 monorepo: the frozen V2 scripts (taskpaw.py / taskpaw_hub.py /
-# macsubs.py) are deliberately out of `source` so coverage never pressures V2 churn.
+# Scoped to the V3 monorepo.
 # CI opts in with `pytest --cov` (see .github/workflows/ci.yml); a bare
 # `uv run pytest` stays fast and uninstrumented.
 [tool.coverage.run]

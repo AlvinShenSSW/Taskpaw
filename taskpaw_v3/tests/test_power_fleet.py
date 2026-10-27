@@ -463,9 +463,12 @@ def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
         power={"peers": [GPU02]},
     )
     seen: list = []
+    entered, release = threading.Event(), threading.Event()
 
     def fake_fetch(url, token, timeout=2.0, opener=None):
         seen.append((url, token))
+        entered.set()
+        assert release.wait(5)
         raise PeerError("unreachable")
 
     monkeypatch.setattr(power_fleet, "fetch_json", fake_fetch)
@@ -474,13 +477,19 @@ def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
         fleet_ = power_fleet.get_fleet()
         assert fleet_ is not None
         assert fleet_._own() == ("s", "HOME-PC")  # IR06: knows this agent
+        assert entered.wait(3)  # the real background loop started its first read
         fleet_.refresh_once()
+        # refresh_once does not join a read already owned by the background loop.
+        assert fleet_.snapshot()[0]["state"] == "pending"
+        release.set()
+        assert wait_until(lambda: fleet_.snapshot()[0]["state"] == "unreachable")
         view = kwargs["control"]["power_view"]("7d")
         assert view["machine"]["name"] == "HOME-PC"
         (row,) = view["peers"]
         assert row["name"] == "GPU-02" and row["state"] == "unreachable"
         assert seen and all(token == TOKEN for _, token in seen)
     finally:
+        release.set()
         shutdown.shutdown()
     assert power_fleet.get_fleet() is None
 
@@ -1443,3 +1452,86 @@ def test_cluster_today_counts_this_machines_retained_energy_with_sampling_off():
     assert value["machines"] == 1 and value["w"] == 172.0
     assert value["today_wh"] == pytest.approx(4550.0 + 1920.0)
     assert "today_partial" not in value
+
+
+# ── #336: each machine's sensors travel as received, aged by this clock ─────
+SENSORS = {
+    "at": 1_800_000_000.0,
+    "source": "lhm",
+    "cpu_c": 68.0,
+    "gpu_c": 40.0,
+    "fans": [{"name": "CPU Fan", "rpm": 1218}],
+}
+
+
+@pytest.mark.parametrize("power_answer", [None, LIVE])
+def test_a_peers_sensors_pass_through_and_age_on_this_clock(power_answer):
+    f, fetch, clock = fleet(
+        [GPU02],
+        {"/status": {"power": power_answer, "sensors": SENSORS}, "range=": "not_found"},
+    )
+    try:
+        f.refresh_once()
+        clock.now += 4
+        (row,) = f.snapshot()
+        assert row["sensors"] == SENSORS
+        assert row["sensors_age_s"] == 4
+        # a peer that stops answering keeps its last reading, which ages out
+        fetch.answers["/status"] = "timeout"
+        f.refresh_once()
+        clock.now += 30
+        (row,) = f.snapshot()
+        assert row["sensors"] == SENSORS
+        assert row["sensors_age_s"] == 34
+    finally:
+        f.stop()
+
+
+def test_an_old_agent_without_sensors_has_none():
+    f, _fetch, _clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": HISTORY})
+    try:
+        f.refresh_once()
+        (row,) = f.snapshot()
+        assert row["sensors"] is None
+        assert "temperatures" not in row
+        assert row["power"]["w"] == LIVE["w"]
+    finally:
+        f.stop()
+
+
+def test_a_peer_never_answered_has_no_sensor_age():
+    f, _fetch, _clock = fleet([GPU02], {"/status": "unreachable"})
+    try:
+        f.refresh_once()
+        (row,) = f.snapshot()
+        assert row["sensors"] is None and row["sensors_age_s"] is None
+    finally:
+        f.stop()
+
+
+def test_self_and_duplicate_rows_keep_their_own_sensors():
+    status = {"machine": "GPU-02", "server_id": "g2", "power": LIVE, "sensors": SENSORS}
+    alias = {"name": "GPU-02 (wifi)", "address": "192.168.1.21"}
+    f, _fetch, _clock = wall_fleet(
+        [GPU02, alias], {"/status": status, "range=": HISTORY}, Wall()
+    )
+    try:
+        f.refresh_once()
+        first, second = f.snapshot()
+        assert second["state"] == "duplicate"
+        assert first["sensors"] == second["sensors"] == SENSORS
+    finally:
+        f.stop()
+    me = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02)],
+        lambda: TOKEN,
+        fetch=Peers({"/status": {**status, "server_id": "s"}}),
+        clock=Clock(),
+        own=lambda: ("s", "HOME-PC"),
+    )
+    try:
+        me.refresh_once()
+        (row,) = me.snapshot()
+        assert row["state"] == "self" and row["sensors"] == SENSORS
+    finally:
+        me.stop()

@@ -523,3 +523,47 @@ def test_summary_expires_when_observer_stalls(observer, monkeypatch):
     assert sink.snapshot() is not None
     sink._sampled -= events.POLL_SECONDS * 4
     assert sink.snapshot() is None
+
+
+def test_observe_prunes_markers_of_films_no_longer_walked(observer, monkeypatch, later):
+    sink, queue = observer
+    live = film(planned=False)
+    old = board_film({s: (0, 1) for s in board.STAGE_ORDER}).model_copy(
+        update={"input_revision": 1}
+    )
+    removed = str(uuid4())
+    for film_id in (live.film_id, old.film_id, removed):
+        assert sink.emit(film_id, 1, "planning", "待安排")
+    host, _ = host_for(monkeypatch, [live, old])
+    sink.observe(host)
+    seen = json.loads(sink.path.read_text(encoding="utf-8"))["seen"]
+    assert {json.loads(key)[0] for key in seen} == {live.film_id}
+    writes = []
+    original = events.atomic_json
+    monkeypatch.setattr(
+        events, "atomic_json", lambda *a: writes.append(a) or original(*a)
+    )
+    sink.observe(host)
+    assert writes == []
+    assert not events.WorkflowEvents(queue, sink.path).emit(
+        live.film_id, 1, "planning", "待安排"
+    )
+
+
+def test_failed_stopped_or_unloaded_passes_prune_nothing(observer, monkeypatch):
+    sink, _queue = observer
+    assert sink.emit("gone", 1, "planning", "待安排")
+    before = sink.path.read_text(encoding="utf-8")
+    host, _ = host_for(monkeypatch, [])
+    host.state = "stopped"
+    sink.observe(host)
+    host.state = "running"
+    host.runtime.store.film_board = lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError()
+    )
+    sink.observe(host)
+    assert sink.path.read_text(encoding="utf-8") == before
+    corrupt = events.WorkflowEvents(EventQueue("windows"), sink.path)
+    sink.path.write_text("{broken", encoding="utf-8")
+    corrupt.observe(host_for(monkeypatch, [])[0])
+    assert sink.path.read_text(encoding="utf-8") == "{broken"
