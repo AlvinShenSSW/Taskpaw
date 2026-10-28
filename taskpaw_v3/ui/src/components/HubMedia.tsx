@@ -42,6 +42,7 @@ export function MediaTaskLine({ task, machine }: { task: MediaTask; machine?: st
         {task.stage && <Chip size="small" variant="outlined"
           label={task.stage === "fetch" ? t("hub.media.fetch")  // a machine's prefetch (#351 currents)
             : t(`media.stage.${task.stage}`, { defaultValue: task.stage })} />}
+        {ltx?.mode === "speed_test" && <Chip size="small" color="info" variant="outlined" label={t("jasna.speedTest")} />}
         {stage && <Typography variant="caption" color="text.secondary" sx={DATA}>
           {stage}{known ? ` · ${t(`jasna.${known}`)}` : ""}
         </Typography>}
@@ -56,7 +57,8 @@ export function MediaTaskLine({ task, machine }: { task: MediaTask; machine?: st
       {facts.length > 0 && <Typography variant="caption" color="text.secondary" sx={{ ...DATA, display: "block", mt: 0.5 }}>
         {facts.join(" · ")}
       </Typography>}
-      {task.progress && !ltx?.run_eta && <Typography variant="caption" color="text.secondary"
+      {/* always kept: it names the volume (第 1/2 卷) the structured fields lack */}
+      {task.progress && <Typography variant="caption" color="text.secondary"
         sx={{ display: "block", mt: 0.5, overflowWrap: "anywhere" }}>{task.progress}</Typography>}
     </Box>
   );

@@ -299,7 +299,7 @@ const en = {
     media: {
       fetch: "Download", title: "Media processing", idle: "Idle (no running task)", noTasks: "no running task",
       ltxStage: "LTX {{index}}/{{total}} {{name}}",
-      stageElapsed: "stage {{time}}", stageEta: "stage left {{time}}", runEta: "run left {{time}}",
+      stageElapsed: "stage {{time}}", stageEta: "stage left {{time}}", runEta: "current LTX run left {{time}}",
       node: { online: "Online", lost: "Lost", waiting: "Waiting for heartbeat" },
       heartbeat: "heartbeat {{s}}s ago", paused: "Paused",
       gpu: "GPU {{util}}%", vram: "VRAM {{used}}/{{total}}GB",
@@ -781,7 +781,7 @@ const zh: typeof en = {
     media: {
       fetch: "下载", title: "媒体处理", idle: "空闲（无运行任务）", noTasks: "无运行任务",
       ltxStage: "LTX {{index}}/{{total}} {{name}}",
-      stageElapsed: "本阶段已用 {{time}}", stageEta: "本阶段剩余 {{time}}", runEta: "整片剩余 {{time}}",
+      stageElapsed: "本阶段已用 {{time}}", stageEta: "本阶段剩余 {{time}}", runEta: "本轮 LTX 剩余 {{time}}",
       node: { online: "在线", lost: "失联", waiting: "等待心跳" },
       heartbeat: "心跳 {{s}}s 前", paused: "已暂停",
       gpu: "GPU {{util}}%", vram: "显存 {{used}}/{{total}}GB",

@@ -164,7 +164,7 @@ describe("HubDashboard 机群 media (#359)", () => {
     expect(media.getByText("FILM-107")).toBeInTheDocument();
     expect(media.getByText(/LTX 2\/4 encode/)).toBeInTheDocument();
     expect(media.getByText("52%")).toBeInTheDocument();
-    expect(media.getByText(/156\/300 帧 · 5.62 frame\/s · 本阶段已用 00:27 · 本阶段剩余 00:25 · 整片剩余 12:12/)).toBeInTheDocument();
+    expect(media.getByText(/156\/300 帧 · 5.62 frame\/s · 本阶段已用 00:27 · 本阶段剩余 00:25 · 本轮 LTX 剩余 12:12/)).toBeInTheDocument();
     expect(media.getByText(/媒体节点：在线 · GPU 98% · 显存 19.6\/24.0GB · 352W/)).toBeInTheDocument();
     expect(media.getByRole("progressbar", { name: /LTX 2\/4 encode/ })).toHaveAttribute("aria-valuenow", "52");
     // the disabled legacy Jasna monitor is explained, the folder monitor is not
@@ -187,6 +187,21 @@ describe("HubDashboard 机群 media (#359)", () => {
     expect(within(nodes[1]).getByText("修复 · 阶段 4/4 compose · 7% · 剩余 1:32:49")).toBeInTheDocument();
     // a lost node: no stale GPU sample
     expect(within(nodes[2]).getByText("失联 · 心跳 95s 前")).toBeInTheDocument();
+  });
+
+  it("keeps the volume in the progress text and marks an LTX speed test (Codex)", async () => {
+    const flow = workflow({ currents: [
+      { film: "FILM-107", stage: "restore", progress: "修复 第 1/2 卷 · 阶段 2/4 encode · 52% · 剩余 12:12", ltx: LTX,
+        machine: "Blacksilverpig" },
+      { film: "FILM-027", stage: "restore", ltx: { ...LTX, mode: "speed_test" }, machine: "Bushpig" }],
+    workers: [node("Blacksilverpig"), node("Bushpig", "online", { current: { film: "FILM-027", stage: "restore",
+      phase: "running", ltx: { ...LTX, mode: "speed_test" } } })] });
+    await show(fleet(flow));
+    const silver = within(within(card("BlackSilverPig")).getByTestId("hub-machine-media"));
+    expect(silver.getByText("修复 第 1/2 卷 · 阶段 2/4 encode · 52% · 剩余 12:12")).toBeInTheDocument();
+    expect(silver.queryByText("LTX 测速")).not.toBeInTheDocument();
+    const bush = within(card("BlackGoldPig")).getAllByTestId("hub-media-node")[1];
+    expect(within(bush).getByText("LTX 测速")).toBeInTheDocument();
   });
 
   it("a lost node's own row says so instead of idle", async () => {
