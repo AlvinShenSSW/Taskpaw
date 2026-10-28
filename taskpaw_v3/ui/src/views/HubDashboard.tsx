@@ -16,6 +16,11 @@ import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 import { ServiceIcon } from "../components/ServiceIcon";
 import { hubFilmKind } from "./hubDashboard.helpers";
+import {
+  LEGACY_MEDIA_MONITORS, isMediaMachine, machineMedia, mediaIndex, mediaSource, selfReport,
+  type MachineMedia, type MediaSource,
+} from "./hubMedia.helpers";
+import { MachineMediaBlock } from "../components/HubMedia";
 import { requestFailed } from "../components/requestEvidence";
 import { hubServerHealth, useHubResponseAge, type HubHealth } from "../hubHealth";
 import { HubSampleEvidence, HubNotificationEvidence } from "../components/HubHealth";
@@ -91,6 +96,9 @@ export function HubDashboard() {
   // when the fleet actually changes, not on every render (react-hooks/exhaustive-deps).
   const servers = useMemo(() => data?.servers ?? [], [data]);
   const self = data?.self ?? {};
+  // #359: the controller's media-center summary, and each machine's share of it
+  const media = useMemo(() => mediaSource(servers, current), [servers, current]);
+  const mediaByMachine = useMemo(() => mediaIndex(media), [media]);
 
   // Reset the events server filter if the selected server is removed, so the
   // Select can't hold a stale id that yields an empty feed (Kimi #133).
@@ -181,7 +189,8 @@ export function HubDashboard() {
           </Stack>
 
           <Stack spacing={1.5}>
-            {servers.map((s) => <MachineRow key={s.id} server={s} current={current} elapsed={elapsed} />)}
+            {servers.map((s) => <MachineRow key={s.id} server={s} current={current} elapsed={elapsed}
+              media={machineMedia(mediaByMachine, s)} source={media?.server.id === s.id ? media : undefined} />)}
             {servers.length === 0 && (
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
@@ -244,7 +253,9 @@ function HealthCount({ health, label, n }: { health: HubHealth; label: string; n
 // with its monitors + full metric gauges rendered FLUSH directly beneath — no
 // click-to-expand, no indent. Offline machines show the header only. Management and
 // the events feed live on their own tabs (#132/#133).
-function MachineRow({ server: s, current, elapsed }: { server: HubServer; current: boolean; elapsed: number }) {
+function MachineRow({ server: s, current, elapsed, media, source }: {
+  server: HubServer; current: boolean; elapsed: number; media: MachineMedia | null; source?: MediaSource;
+}) {
   const { t, i18n } = useTranslation();
   const health = hubServerHealth(s, current);
   const online = health === "ok" || health === "degraded";
@@ -255,6 +266,8 @@ function MachineRow({ server: s, current, elapsed }: { server: HubServer; curren
   const version = typeof s.snapshot?.version === "string" && s.snapshot.version ? s.snapshot.version : undefined;
   // The dev_activity monitor's `ai` block, surfaced as a header badge (#154) so the
   // fleet view shows at a glance which machines are actively running AI.
+  const own = online && !media ? selfReport(s) : null;
+  const mediaMachine = online && isMediaMachine(s, media);
   const aiMon = online
     ? Object.values(monitors).find((mm) => isAiMetrics(mm.metrics))
     : undefined;
@@ -290,6 +303,8 @@ function MachineRow({ server: s, current, elapsed }: { server: HubServer; curren
         </Stack>
 
         <HubSampleEvidence server={s} elapsed={elapsed} current={current} />
+        {/* #359: this machine's media-center work, from the controller's summary. */}
+        {online && <MachineMediaBlock media={media} self={own} source={source} />}
         {/* Monitors flush beneath — no indent, thin dividers between (online only). */}
         {online && monitorNames.length > 0 && (
           <Stack sx={{ mt: 1.5 }} divider={<Divider flexItem />} spacing={1}>
@@ -310,6 +325,12 @@ function MachineRow({ server: s, current, elapsed }: { server: HubServer; curren
                         sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
                     )}
                   </Stack>
+                  {/* #359: media work does not run through the legacy monitors */}
+                  {mediaMachine && m.enabled === false && typeId && LEGACY_MEDIA_MONITORS.has(typeId) && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                      {t("hub.media.legacy")}
+                    </Typography>
+                  )}
                   {/* Full metric gauges (CPU/GPU/VRAM/queue/fps), flush (no indent). */}
                   <MonitorMetrics metrics={m.metrics} taskType={typeId}
                     taskName={filmKind ? name : undefined}

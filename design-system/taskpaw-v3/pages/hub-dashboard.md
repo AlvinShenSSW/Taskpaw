@@ -62,6 +62,18 @@ Settings **and** Manage stay reachable even when the Hub itself is unreachable
     remain header-only and unmount film readers; no offline compact-list exception.
   - Version, warning, task/type and detail text wrap at 375 px. Status feedback
     is textual, never color-only; film controls retain visible keyboard focus.
+  - **Media work per machine (#359):** an online row whose machine takes part in
+    media work shows a flush 媒体处理 block from the controller's current
+    `/status.workflow` summary: the machine's running task (film · stage, the
+    LTX stage x/4 + percent bar, frames, rate, stage elapsed/ETA, the current
+    LTX run's ETA, an LTX 测速 chip for a speed test, and always the progress
+    text, which names the volume), and its node line (在线/失联/等待心跳, GPU, VRAM, power,
+    prefetch, transfers; GPU only while online). The controller's row adds
+    dispatch, group counts and every GPU node with its current task, including
+    nodes the Hub does not poll. A stale/offline/expired source shows its
+    reason and no live claims; a worker then shows its own self-report. A
+    disabled legacy Lada/Jasna/Translate monitor on a media machine carries the
+    caption 旧版独立监控未使用 · 媒体任务见「媒体处理」.
   - **No management controls and no events feed on this page** — the dashboard is
     purely for observing. (Both moved to their own tabs; see below.)
 - **管理 (Manage):** a list of registered agents, each row with an enable toggle,

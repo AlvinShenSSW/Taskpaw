@@ -78,6 +78,10 @@ def test_workers_report_heartbeat_gpu_current_and_transfers(world, observer):
                     "stage_name": "encode",
                     "percent": 21.0,
                     "mode": "restore",
+                    # #359: tqdm tokens reach the Hub, the raw line does not
+                    "percent_text": "21",
+                    "run_eta": "6:33:54",
+                    "raw_line": "LTX 2/4 encode: 21%",
                 }
             },
         },
@@ -113,6 +117,8 @@ def test_workers_report_heartbeat_gpu_current_and_transfers(world, observer):
             "stage_name": "encode",
             "percent": 21.0,
             "mode": "restore",
+            "percent_text": "21",
+            "run_eta": "6:33:54",
         },
     }
     assert worker["staged"] == 1
