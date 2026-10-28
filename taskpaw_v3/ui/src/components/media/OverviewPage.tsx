@@ -3,12 +3,15 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ComputerIcon from "@mui/icons-material/Computer";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import FactCheckIcon from "@mui/icons-material/FactCheck";
 import PauseIcon from "@mui/icons-material/Pause";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
 import { api, type ClusterPower } from "../../api";
 import { Bolt, Est, SplitBar, SplitLegend } from "../power/PowerParts";
 import { fmtKwhShort, fmtW, splitOf } from "../power/powerModel";
@@ -32,6 +35,8 @@ export function OverviewPage() {
   const ws = useWorkspace();
   const { data } = ws;
   const qc = useQueryClient();
+  const [activeOpen, setActiveOpen] = useState(false);
+  const [waitingOpen, setWaitingOpen] = useState(false);
   const devices = useQuery({ queryKey: DEVICES_KEY, queryFn: api.workflowDevices, refetchInterval: 5000, enabled: !ws.readOnly });
   const workers = !ws.readOnly && devices.data?.remote_workers
     ? devices.data.workers.filter((w) => w.admission_state !== "revoked" && w.enrollment_state !== "pending_pairing" && w.enrollment_state !== "retired")
@@ -147,11 +152,11 @@ export function OverviewPage() {
               <button type="button" className="link-btn" onClick={() => ws.navigate("queue")}>全部队列<Icon of={ArrowForwardIcon} /></button>
             </div>
             <div className="film-list">
-              {data.active.slice(0, ACTIVE_ROWS).map((item) => <FilmRowView key={item.id} item={item} />)}
+              {(activeOpen ? data.active : data.active.slice(0, ACTIVE_ROWS)).map((item) => <FilmRowView key={item.id} item={item} />)}
               {data.active.length === 0 && <div className="empty"><p>当前没有正在处理的影片</p></div>}
             </div>
             {data.active.length > ACTIVE_ROWS && (
-              <div className="queue-summary"><span>另有 {data.active.length - ACTIVE_ROWS} 部正在处理</span></div>
+              <FoldToggle open={activeOpen} onToggle={() => setActiveOpen(!activeOpen)}>另有 {data.active.length - ACTIVE_ROWS} 部正在处理</FoldToggle>
             )}
           </section>
           {waitingRows.length > 0 && (
@@ -161,10 +166,10 @@ export function OverviewPage() {
                 <button type="button" className="link-btn" onClick={() => ws.navigate("queue", { stage: "inbox" })}>全部<Icon of={ArrowForwardIcon} /></button>
               </div>
               <div className="film-list">
-                {waitingRows.slice(0, 4).map((item) => <FilmRowView key={item.id} item={item} />)}
+                {(waitingOpen ? waitingRows : waitingRows.slice(0, 4)).map((item) => <FilmRowView key={item.id} item={item} />)}
               </div>
               {waitingRows.length > 4 && (
-                <div className="queue-summary"><span>另有 {waitingRows.length - 4} 部等待</span></div>
+                <FoldToggle open={waitingOpen} onToggle={() => setWaitingOpen(!waitingOpen)}>另有 {waitingRows.length - 4} 部等待</FoldToggle>
               )}
             </section>
           )}
@@ -223,6 +228,15 @@ export function OverviewPage() {
         </div>
       </div>
     </>
+  );
+}
+
+// #353: the folded-rows line opens the rest of the list and closes it again.
+function FoldToggle({ open, onToggle, children }: { open: boolean; onToggle: () => void; children: ReactNode }) {
+  return (
+    <button type="button" className="queue-summary" aria-expanded={open} onClick={onToggle}>
+      <span>{open ? "收起" : children}</span><Icon of={open ? ExpandLessIcon : ExpandMoreIcon} />
+    </button>
   );
 }
 

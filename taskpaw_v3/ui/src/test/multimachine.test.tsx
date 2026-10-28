@@ -14,7 +14,7 @@ import { PowerPage } from "../components/power/PowerPage";
 import { WorkflowSettingsSection } from "../components/WorkflowSettings";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
-import { detail, FILMS_RESPONSE, PLANS, row, steps } from "./fixtures/mediaWorkspace";
+import { counts, detail, FILMS_RESPONSE, PLANS, row, steps } from "./fixtures/mediaWorkspace";
 import {
   actions, FINISH, FINISH_TEXT, lostDetail, NOW, reassignDetail, REMOTE_DEVICES, REMOTE_FILMS, REMOTE_PLANS, REMOTE_ROWS, settingsState,
   settingsView, STOP, W,
@@ -228,6 +228,24 @@ describe("board: machine column, routing reasons and 设备失联 (R1–R3)", ()
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
     expect(await within(drawer).findByTestId("device-line")).toHaveTextContent("5060 Ti-3");
     for (const s of SLOGANS) expect(document.body.textContent).not.toContain(s);
+  });
+
+  it("概览's 另有 N 部等待 expands the folded waiting films and collapses them again (#353)", async () => {
+    const extra = ["a", "b", "c"].map((k) => row({ film_id: `far-${k}`, title: `远岸来信 ${k}`, stage: "restore", status: "pending",
+      note: "主控磁盘空间不足", pin: { worker_id: null, name: "自动", version: 1 }, actions: actions({ can_reassign: true }),
+      steps: steps("restore", "waiting", { note: "主控磁盘空间不足" }) }));
+    const films = [...REMOTE_ROWS, ...extra];
+    mockApi({ ...REMOTE_FILMS, films, counts: counts(films, []) });
+    wrap(<MediaWorkspace />);
+    const waiting = await screen.findByRole("region", { name: "等待 · 5" });
+    expect(waiting.querySelectorAll("article.film-row")).toHaveLength(4);
+    const toggle = within(waiting).getByRole("button", { name: "另有 1 部等待" });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(waiting.querySelectorAll("article.film-row")).toHaveLength(5);
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(waiting.querySelectorAll("article.film-row")).toHaveLength(4);
   });
 
   it("影片队列 shows each film's machine; 异常 lists 设备失联 with 处理", async () => {

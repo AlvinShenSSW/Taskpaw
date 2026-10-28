@@ -129,7 +129,8 @@ export const MEDIA_CSS = `
 .mw .film-list{display:flex;flex-direction:column}
 .mw .film-row{padding:17px 20px;border-bottom:1px solid var(--line);display:flex;gap:15px;align-items:center;min-width:0}
 .mw .film-row:last-child{border-bottom:0}
-.mw .queue-summary{padding:14px 20px;display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px;border-top:1px solid var(--line)}
+.mw .queue-summary{width:100%;min-height:44px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;color:var(--muted);font-size:11px;text-align:left;background:none;border:0;border-top:1px solid var(--line)}
+.mw .queue-summary:hover{color:var(--text)}
 .mw .steps-list{display:flex;gap:8px;flex-wrap:wrap}
 .mw .step{border:1px solid #33465f;padding:7px 10px;border-radius:6px;font-size:10px;color:var(--muted)}
 .mw .review-peek{padding:18px 20px;border-bottom:1px solid var(--line)}

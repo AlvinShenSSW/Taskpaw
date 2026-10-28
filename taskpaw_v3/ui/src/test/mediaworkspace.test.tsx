@@ -328,6 +328,25 @@ describe("概览", () => {
     expect(await within(region).findByText("另有 1 部正在处理")).toBeInTheDocument();
     expect(region.querySelectorAll("article.film-row")).toHaveLength(5);
   });
+
+  it("expands the folded active films from 另有 N 部正在处理 and collapses them again (#353)", async () => {
+    mockApi();
+    const films = [...FILMS,
+      row({ film_id: "abf-501", title: "远山来信", stage: "return", status: "running", steps: steps("return") }),
+      row({ film_id: "abf-502", title: "潮汐之间", stage: "scrape", status: "running", steps: steps("scrape") })];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    wrap(<MediaWorkspace />);
+    const region = await screen.findByRole("region", { name: "正在处理" });
+    const toggle = await within(region).findByRole("button", { name: "另有 1 部正在处理" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveTextContent("收起");
+    expect(region.querySelectorAll("article.film-row")).toHaveLength(6);
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(region.querySelectorAll("article.film-row")).toHaveLength(5);
+  });
 });
 
 describe("待处理", () => {
