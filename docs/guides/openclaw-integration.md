@@ -60,7 +60,39 @@ for r in rows:
           "reason:", reason)
     if not current:
         continue  # retained JSON is last-known data, not current metrics
-    data = json.loads(r["status_json"] or "{}")   # {machine, os, server_id, monitors}
+    data = json.loads(r["status_json"] or "{}")
+    # The media center (including its Jasna fleet) is separate from legacy monitors.
+    # Empty monitors does NOT mean that no media work is running.
+    if "workflow" in data:
+        print("controller:", data.get("machine"), "version:", data.get("version"))
+        workflow = data["workflow"]
+        source_age = num(workflow, "sample_age_seconds") if isinstance(workflow, dict) else None
+        if not isinstance(workflow, dict) or not workflow:
+            print("media: unavailable; not an empty queue")
+        elif "sample_age_seconds" in workflow and (source_age is None or not 0 <= source_age <= 15):
+            print("media: source sample stale/invalid; not current work")
+        else:
+            print("media age_seconds:", age + source_age if source_age is not None else "source age unknown",
+                  "source sampled_at (diagnostic):", workflow.get("sampled_at"))
+            print("dispatch:", workflow.get("dispatch", "not reported by this Agent"))
+            print("groups:", workflow.get("counts", "unknown"))  # active includes waiting films
+            currents = workflow.get("currents")
+            if not isinstance(currents, list) or not currents:
+                currents = [workflow["current"]] if isinstance(workflow.get("current"), dict) else []
+            for task in currents[:16]:
+                if isinstance(task, dict):
+                    print("current task:", task)
+            films = workflow.get("films")
+            if isinstance(films, list):
+                for film in films[:32]:
+                    if isinstance(film, dict):
+                        print("unfinished film:", film)
+            else:
+                print("queue detail: not reported by this Agent")
+            print("current machines total/omitted:", workflow.get("currents_total", "unknown"),
+                  workflow.get("currents_more", "unknown"))
+            print("unfinished films total/omitted:", workflow.get("films_total", "unknown"),
+                  workflow.get("films_more", "unknown"))
     for name, mon in data.get("monitors", {}).items():
         met, tid, state = mon.get("metrics") or {}, mon.get("type_id"), mon.get("state")
 
@@ -129,6 +161,57 @@ lines. Additive indented `Data`/`Upstream` lines show age, last success and reas
 last success and last failure. A file cannot update after the Hub exits: readers
 must reject an old `Last updated` and recompute age from `last success`. Do not use
 the age printed in a stale file as a live clock.
+
+## Media center and controller synchronization
+
+The media center's Jasna cluster queue lives in top-level `workflow`, not a
+manually added `monitors.*.type_id == "jasna"` monitor. Register the **controller
+Agent** in the Mac Hub with its actual configured LAN address, port and polling
+Bearer token. An installed GUI, an open `/ping`, or a worker appearing online
+does not establish that the controller's protected `/status` is being sampled.
+Use the controller's configured port: upgraded installations can retain 5678;
+the V3 default 5680 is not a reason to change a running controller.
+
+The observer reads the same existing board, routes and fresh worker heartbeats
+as the controller. Hub sampling retains the entire `workflow` JSON in
+`upstream_status` and successful `status_log` rows without another request. The
+GUI's on-demand `/workflow/films` proxy is a different interface; opening that
+page is not required for background synchronization. Read the controller once,
+not every worker's summary as another copy of the same queue.
+
+| Field | Meaning and limits |
+| --- | --- |
+| Outer `machine`, `version` | Actual sampled controller identity/build; Hub registration name can differ. Builds may differ across machines. |
+| `workflow.dispatch` | Local dispatcher state, `paused` and reason. Pausing new work does not mean existing remote work has stopped; local `idle` does not mean the fleet is idle. |
+| `workflow.currents` | One current task per machine, up to 16, including existing progress/LTX details. A running stage takes precedence over that machine's prefetch. `current` is retained for old readers. |
+| `workflow.currents_total`, `currents_more` | Total machines represented before the cap and number omitted. Older Agents may provide only four entries without totals. |
+| `workflow.films` | Up to 32 unfinished board rows, in board order, not a global scheduling order. Includes planning, queued/active, attention, confirmation and archiving. Finished films are omitted. |
+| Row `film_id`, `name`, `group`, `stage`, `status`, `note` | Identity and board evidence. `active` includes waiting work; a stored `running` stage on a lost device is not proof of current execution. Read group/note/liveness together. |
+| Row `machine`, `route_position`, `route_live` | Assignment where known. JSON positions are zero-based within that machine's routes; Markdown shows one-based. Missing assignment is unknown, not automatically the controller. |
+| `workflow.films_total`, `films_more` | Unfinished total before truncation and number omitted. A short preview is not the full queue. |
+| `workflow.sampled_at`, `sample_age_seconds` | Source UTC observation time for diagnosis and source-measured age at Agent read. New source summaries expire after 15 seconds without a successful observation. |
+
+Queue/source-age/dispatcher fields require the controller Agent with this
+additive summary support; the expanded Markdown display requires the updated
+Hub. Upgrading the Mac package alone cannot create missing controller fields.
+Mixed versions retain the old counts/current/currents/completed_at behavior;
+missing new fields mean **not reported**, not zero or idle. No equal-version
+rule or automatic interruption of active jobs applies.
+
+Apply the outer Hub freshness guard first. For new summaries reject invalid or
+expired source age as well; display data age as source age plus elapsed time
+since the Hub's successful sample. Do not subtract the controller's UTC timestamp
+from the Hub clock. The Hub freshness allowance still follows its configured
+poll interval; do not apply the source's 15-second observation deadline to time
+spent in the normal 60-second Hub poll interval. Missing source age in an old
+summary stays unknown. Null/empty workflow means unavailable, not an empty queue.
+The Markdown media section follows these distinctions and prints omission totals.
+
+Status synchronization adds no new progress notifications. Existing workflow
+attention/completion events still use the Agent event queue and Hub outbox.
+OpenClaw may read Hub files or its authenticated `GET /status`; it must never
+poll or acknowledge Agent `/events`. The Mac Hub remains that queue's sole
+consumer. Mac monitoring cannot dispatch work, approve, archive or clean files.
 
 ## Local health and notification delivery
 

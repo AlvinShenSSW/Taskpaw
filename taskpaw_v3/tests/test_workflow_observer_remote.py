@@ -3,7 +3,8 @@
 A film on a 失联 worker raises one `workflow.film.device_lost:<worker>` warn
 (per film, revision and worker); the 待处理 notice reads 「· 自动」; the
 summary names the machine of each running film (`currents`, at most four),
-and the Hub's status.md prints it. The network app stays GET-only."""
+and the Hub's status.md prints it. #351 raises the display cap to sixteen with
+explicit omissions. The network app stays GET-only."""
 
 from __future__ import annotations
 
@@ -154,7 +155,8 @@ def test_the_summary_names_each_running_films_machine(world, sink):  # noqa: F81
     observer.observe(host)
     summary = observer.snapshot()
     currents = summary["currents"]
-    assert len(currents) == 4  # bounded
+    assert len(currents) == 6  # #351: the controller plus all five GPU workers
+    assert summary["currents_total"] == 6 and summary["currents_more"] == 0
     assert currents[0] == {
         "film": "ABF-394",
         "stage": "translate",
@@ -176,7 +178,7 @@ def test_the_summary_names_each_running_films_machine(world, sink):  # noqa: F81
         "2026-10-23 12:00:00",
     )
     assert "- ABF-394 翻译 · 本机" in text
-    assert text.count("· 5060 Ti-") == 3
+    assert sum(line.startswith("- movie 修复 ·") for line in text.splitlines()) == 5
 
 
 def test_one_current_per_machine_prefetch_never_displaces_another(world, sink):  # noqa: F811
@@ -200,7 +202,9 @@ def test_one_current_per_machine_prefetch_never_displaces_another(world, sink): 
         ]
         online(world, remote, current=current, transfers=transfers)
     observer.observe(Host(rt, world.fleet))
-    currents = observer.snapshot()["currents"]
+    summary = observer.snapshot()
+    currents = summary["currents"]
+    assert summary["currents_total"] == 3 and summary["currents_more"] == 0
     assert sorted(c["machine"] for c in currents) == [r.name for r in remotes]
     assert all(c["stage"] == "restore" for c in currents)
 
