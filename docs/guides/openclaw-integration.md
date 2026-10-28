@@ -91,6 +91,9 @@ for r in rows:
                 print("queue detail: not reported by this Agent")
             print("current machines total/omitted:", workflow.get("currents_total", "unknown"),
                   workflow.get("currents_more", "unknown"))
+            for worker in (workflow.get("workers") or [])[:16]:
+                if isinstance(worker, dict):  # 3.11.2+: each GPU worker's heartbeat
+                    print("gpu worker:", worker)
             print("unfinished films total/omitted:", workflow.get("films_total", "unknown"),
                   workflow.get("films_more", "unknown"))
     for name, mon in data.get("monitors", {}).items():
@@ -190,6 +193,8 @@ not every worker's summary as another copy of the same queue.
 | Row `machine`, `route_position`, `route_live` | Assignment where known. JSON positions are zero-based within that machine's routes; Markdown shows one-based. Missing assignment is unknown, not automatically the controller. |
 | `workflow.films_total`, `films_more` | Unfinished total before truncation and number omitted. A short preview is not the full queue. |
 | `workflow.sampled_at`, `sample_age_seconds` | Source UTC observation time for diagnosis and source-measured age at Agent read. New source summaries expire after 15 seconds without a successful observation. |
+| `workflow.workers` (since 3.11.2, #355) | Remote mode only: up to 16 registered GPU workers in name order (the controller, retired and revoked workers excluded). Each row: `name`, `state` (`online` / `lost` / `waiting`, on the controller's clock), `heartbeat_age_s`, `paused`, `admission`, `gpu` (`name`, `util`, `used_mib`, `vram_mib`, `power_w`, `hold`), `current` (`film`, `stage`, `phase`, `progress`, `ltx`) or null, `staged` (prefetched films) and `transfers` (`film`, `dir`, `percent`, `rate` bytes/s). A worker that is not a Hub server still appears here. A `lost` worker's `gpu` is its last heartbeat, not a current reading. |
+| `workflow.workers_total`, `workers_more` | Workers before the cap and number omitted. Absent in single-machine mode and from older controllers: not reported, not "no workers". |
 
 Queue/source-age/dispatcher fields require the controller Agent with this
 additive summary support; the expanded Markdown display requires the updated
@@ -488,6 +493,40 @@ engine without progress; translation reads `翻译 P% · 约剩 N 分 · <model>
 reads `等待 GPU（<holder>）`, or `等待 GPU` when the GPU is free and reserved for this
 task. Minutes are whole minutes and never 0 (remaining rounded up, elapsed rounded
 down). A queued, pending or finished focus step adds nothing.
+
+### Media work under each machine (since 3.11.2, #355)
+
+When a current controller summary is available, each machine's section also shows
+the media center's work there, matched by machine name (case-insensitive; the
+controller's `本机` is its own section). The work is a monitor-style line in the
+running-monitor shape, so readers that parse `- <monitor>: <state>` see the machine
+busy; node details are indented:
+
+```
+## BlackGoldPig: ONLINE
+- BlackGoldPig-host: CPU 98% | RAM 19.3/31.7GB | GPU 74% | VRAM 3.6/8.0GB
+- Jasna: disabled（旧版独立监控未使用；媒体任务见「媒体处理」）
+- 媒体处理中心: running | FILM-831 | 识别 · 识别日语：Generating scene 365/377 · 已用 0:12:44
+  媒体主控: 调度 idle · 详见「媒体处理」
+## BlackSilverPig: ONLINE
+- 媒体处理中心: running | FILM-107 | 修复 · LTX 2/4 encode 21% · 剩余 6:33:54 · 已用 0:52:08
+  媒体节点: 在线 · GPU 98% · 显存 19.6/24.0GB · 352W · 已预取 1 部
+## Bushpig: ONLINE
+- 媒体处理中心: idle（无运行任务）
+## DarkbluePig: OFFLINE (last seen 09:15:30)
+  媒体处理中心: lost（失联 · 心跳 95s 前）
+```
+
+`idle（无运行任务）` / `lost（…）` / `waiting（…）` come from the controller's worker
+heartbeat (3.11.2+ controllers). Under an `OFFLINE` section the controller's view
+is indented, so that section still has no monitor lines. A machine that reports
+only its own worker state renders `- 媒体处理中心: <state>（本机自报 · …）`. A stale,
+offline or unavailable controller puts no media line under any machine. On a
+machine that takes part in media work, a stopped legacy `lada` / `jasna` /
+`avsubs` monitor reads `disabled（旧版独立监控未使用；媒体任务见「媒体处理」）`:
+media-center work does not run through those monitors. The `## 媒体处理` section
+adds `GPU 节点 shown/total` with one line per worker, and LTX progress keeps the
+controller's `剩余 h:mm:ss`.
 
 A monitor renders as `- <name>: disabled` only when it is genuinely not running (a
 configured-but-unstarted stub). All names/values are sanitized (control chars → space,
