@@ -144,7 +144,8 @@ export function mediaSource(servers: HubServer[], responseCurrent: boolean): Med
   const candidates = servers.filter(s => obj(s.snapshot) && Object.hasOwn(s.snapshot, "workflow"));
   const evaluated = candidates.map(s => evaluate(s, responseCurrent));
   return evaluated.find(e => !e.unavailable)
-    ?? evaluated.find(e => !obj((e.server.snapshot as unknown as Obj).workflow_worker))
+    // presence, not value: a worker whose host has not started reports `workflow_worker: null`
+    ?? evaluated.find(e => !Object.hasOwn(e.server.snapshot as unknown as Obj, "workflow_worker"))
     ?? null;
 }
 
@@ -194,9 +195,12 @@ export function machineMedia(index: Map<string, MachineMedia>, server: HubServer
           worker: found.worker ?? entry.worker }
       : entry;
   }
-  if (found && !found.tasks.length && found.worker?.state === "online" && found.worker.current) {
-    // the bounded currents may leave a machine out; its heartbeat still knows.
-    // A lost node's last heartbeat is not live work.
+  if (found?.worker && found.worker.state !== "online") {
+    // a lost/waiting node's last heartbeat is not live work, even if the same
+    // sample's `currents` still listed it (sampled just before the timeout)
+    found = { ...found, tasks: [] };
+  } else if (found && !found.tasks.length && found.worker?.current) {
+    // the bounded currents may leave a machine out; its heartbeat still knows
     found = { ...found, tasks: [found.worker.current] };
   }
   return found;

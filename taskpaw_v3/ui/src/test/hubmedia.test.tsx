@@ -109,6 +109,10 @@ describe("hubMedia helpers", () => {
     // the stale controller explains; a worker alone is no source at all
     expect(mediaSource(fleet(workflow(), { online: false }).slice(0, 2).reverse(), true)?.server.name).toBe("BlackGoldPig");
     expect(mediaSource([servers[1]], true)).toBeNull();
+    // Codex r2: a worker whose host has not started reports both keys as null
+    const starting = server(7, "Starting", { machine: "Starting", monitors: {}, workflow: null, workflow_worker: null });
+    const expired = fleet(workflow({ sample_age_seconds: 40 }))[0];
+    expect(mediaSource([starting, expired], true)).toMatchObject({ server: { name: "BlackGoldPig" }, unavailable: { code: "expired" } });
   });
 
   it("a lost node's retained heartbeat is not live work (review P1-2)", () => {
@@ -118,6 +122,9 @@ describe("hubMedia helpers", () => {
     const silver = machineMedia(mediaIndex(mediaSource(servers, true)), servers[1]);
     expect(silver?.tasks).toEqual([]);
     expect(silver?.worker?.state).toBe("lost");
+    // Codex r2: also when the same sample's currents still list it
+    const listed = fleet(workflow({ workers: [node("Blacksilverpig", "lost", { heartbeat_age_s: 61 })] }));
+    expect(machineMedia(mediaIndex(mediaSource(listed, true)), listed[1])?.tasks).toEqual([]);
   });
 
   it("drops out-of-range GPU samples and transfer percents", () => {
