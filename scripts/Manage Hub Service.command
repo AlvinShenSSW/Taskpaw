@@ -24,7 +24,7 @@ case "$action" in
     *) echo 'Unknown action.'; exit 1 ;;
 esac
 # #357: as Install Hub.command, so the backend is not blocked again
-if ! xattr -dr com.apple.quarantine "$app"; then
+if ! xattr -drs com.apple.quarantine "$app"; then
     echo "Could not clear the quarantine of $app; macOS may ask in System Settings → Privacy & Security." >&2
 fi
 exec "$backend" hub-service "$action"

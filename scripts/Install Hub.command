@@ -27,7 +27,7 @@ fi
 # #357: the ad-hoc package is not notarized. Clearing the quarantine of this
 # installed app only (after the operator approved this command) keeps macOS from
 # asking again for its backend and window.
-if ! xattr -dr com.apple.quarantine "$app"; then
+if ! xattr -drs com.apple.quarantine "$app"; then
     printf '未能清除 %s 的隔离标记；macOS 可能仍会要求在「系统设置 → 隐私与安全性」中点「仍要打开」。\n' "$app" >&2
 fi
 

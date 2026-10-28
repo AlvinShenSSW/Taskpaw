@@ -18,4 +18,5 @@ TaskPaw Hub 完整安装包（监控界面＋独立后台服务）
 后台程序与监控界面不会再次被拦截。清除失败时终端会提示，届时按同样方法放行即可。
 
 不想放行也可以（一次都不弹）：拖入 App 后，打开「终端」粘贴下面一行并回车：
-xattr -dr com.apple.quarantine "/Applications/TaskPaw Hub.app" && "/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install && open "/Applications/TaskPaw Hub.app"
+xattr -drs com.apple.quarantine "/Applications/TaskPaw Hub.app" && "/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install && open "/Applications/TaskPaw Hub.app"
+若 App 装在 ~/Applications，请把上面三处 "/Applications/ 换成 "$HOME/Applications/。

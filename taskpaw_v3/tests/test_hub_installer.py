@@ -111,7 +111,7 @@ exit "$TEST_INSTALL_EXIT"
     def expected(app):
         return [
             "xattr",
-            "arg:-dr",
+            "arg:-drs",
             "arg:com.apple.quarantine",
             f"arg:{app}",
             f"backend:{app}/Contents/MacOS/taskpaw-backend",
@@ -195,11 +195,15 @@ def test_open_waits_for_backend_to_complete(installer):
     )
     try:
         deadline = time.monotonic() + 3
-        while not installer.calls() and time.monotonic() < deadline:
+
+        def backend_started():
+            return any(call.startswith("backend:") for call in installer.calls())
+
+        while not backend_started() and time.monotonic() < deadline:
             if process.poll() is not None:
                 break
             time.sleep(0.01)
-        assert installer.calls(), "installer never invoked the backend"
+        assert backend_started(), "installer never invoked the backend"
         assert process.poll() is None, "installer did not wait for the backend"
         assert "open" not in installer.calls()
     finally:
@@ -241,7 +245,7 @@ def test_quarantine_is_cleared_on_the_exact_app_before_any_launch(installer):
     calls = installer.calls()
     assert calls[:4] == [
         "xattr",
-        "arg:-dr",
+        "arg:-drs",
         "arg:com.apple.quarantine",
         f"arg:{installer.system_apps}/TaskPaw Hub.app",
     ]

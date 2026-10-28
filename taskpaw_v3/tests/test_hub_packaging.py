@@ -69,7 +69,7 @@ def test_hub_manager_is_explicit_and_does_not_eval_arguments(tmp_path):
     assert 'backend="$app/Contents/MacOS/taskpaw-backend"' in text
     assert "install" in text and "uninstall" in text
     # #357: the installed app's quarantine is cleared before the backend runs
-    clear = text.index('xattr -dr com.apple.quarantine "$app"')
+    clear = text.index('xattr -drs com.apple.quarantine "$app"')
     assert clear < text.index('exec "$backend" hub-service "$action"')
 
 
