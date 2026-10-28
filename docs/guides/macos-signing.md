@@ -203,4 +203,9 @@ launch of the copied Hub runtime. For ad-hoc downloads, expect an
 unidentified-developer warning. If the operator
 trusts the artifact, follow Apple's current
 [Privacy & Security / Open Anyway guidance](https://support.apple.com/102445).
-Do not remove quarantine or disable Gatekeeper to manufacture acceptance.
+Since #357 the ad-hoc Hub's `Install Hub.command` and `Manage Hub Service.command`,
+once the operator has approved the command itself, clear `com.apple.quarantine`
+from the one installed `TaskPaw Hub.app` before running its backend, so macOS asks
+once rather than for the command, the backend and the window. That is an operator
+convenience for a trusted ad-hoc artifact, not Gatekeeper acceptance: never remove
+quarantine or disable Gatekeeper to manufacture formal-build acceptance evidence.

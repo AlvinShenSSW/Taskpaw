@@ -12,5 +12,10 @@ TaskPaw Hub 完整安装包（监控界面＋独立后台服务）
 停止或卸载服务会保留配置与历史数据。卸载 App 本身不等于卸载后台服务。
 日志位于 ~/Library/Application Support/TaskPaw/HubService/hub.log。
 
-ad-hoc 签名包尚未经 Apple 公证。其他 Mac 的 Gatekeeper 放行、实际窗口打开及重新登录行为仍需现场验证。
-若 macOS 拒绝运行，请保留系统提示；安装入口不会自动移除隔离属性、放宽权限或绕过系统保护。
+本安装包为 ad-hoc 签名，尚未经 Apple 公证，因此第一次双击 Install Hub.command 时 macOS 会拦截：
+请打开「系统设置 → 隐私与安全性」，在下方点「仍要打开」，只需这一次。
+放行后，安装入口会清除已安装的 TaskPaw Hub.app 的隔离标记（仅此一个 App，不改系统设置），
+后台程序与监控界面不会再次被拦截。清除失败时终端会提示，届时按同样方法放行即可。
+
+不想放行也可以（一次都不弹）：拖入 App 后，打开「终端」粘贴下面一行并回车：
+xattr -dr com.apple.quarantine "/Applications/TaskPaw Hub.app" && "/Applications/TaskPaw Hub.app/Contents/MacOS/taskpaw-backend" hub-service install && open "/Applications/TaskPaw Hub.app"
