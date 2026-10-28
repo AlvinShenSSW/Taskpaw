@@ -235,6 +235,14 @@ class WorkflowEvents:
                     sampled_wall, timezone.utc
                 ).isoformat(),
             }
+            fleet = getattr(host, "fleet", None)
+            if fleet is not None:  # #355: each GPU worker's own heartbeat
+                workers, workers_total = _workers(rt, fleet, rows)
+                summary.update(
+                    workers=workers,
+                    workers_total=workers_total,
+                    workers_more=workers_total - len(workers),
+                )
             with self._summary_lock:
                 if not self._stop.is_set():
                     self._summary = summary
@@ -382,6 +390,75 @@ def _currents(
         key=lambda entry: (entry[0], entry[1]),
     )
     return [item for _local, _machine, item in found[:MAX_CURRENTS]], len(found)
+
+
+def _workers(
+    rt: LocalRuntime, fleet: Any, rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], int]:
+    """#355: bounded remote workers in name order, each with its controller-
+    clock heartbeat state, GPU, running stage, staged count and transfers.
+    The controller and retired or revoked workers are left out; no ids,
+    addresses, attempts or actions."""
+    names = {row["film_id"]: row["name"] for row in rows}
+    now = rt.clock.now()
+    controller = rt.identity.worker_id
+    found: list[dict[str, Any]] = []
+    total = 0
+    for worker in rt.store.list_workers(rt.operator):
+        if (
+            worker.worker_id == controller
+            or worker.enrollment_state == "retired"
+            or worker.admission_state == "revoked"
+        ):
+            continue
+        total += 1
+        if len(found) == MAX_CURRENTS:
+            continue
+        entry = fleet.entry(worker.worker_id)
+        beat = entry.beat if entry is not None else None
+        item: dict[str, Any] = {
+            "name": _text(worker.name),
+            "state": fleet.state(worker.worker_id, now),
+            "heartbeat_age_s": max(0, round((now - entry.last_seen).total_seconds()))
+            if entry is not None
+            else None,
+            "paused": beat.paused if beat is not None else None,
+            "admission": worker.admission_state,
+            "gpu": None,
+            "current": None,
+            "staged": len(beat.staged) if beat is not None else None,
+            "transfers": [],
+        }
+        if beat is not None:
+            gpu = beat.gpu
+            item["gpu"] = {
+                "name": _text(gpu.name),
+                "util": gpu.util,
+                "used_mib": gpu.used_mib,
+                "vram_mib": gpu.vram_mib,
+                "power_w": gpu.power_w,
+                "hold": gpu.hold,
+            }
+            if (current := beat.current) is not None:
+                ltx = _current({"ltx": current.ltx}) or {}
+                item["current"] = {
+                    "film": _text(names.get(current.film_id)) or "",
+                    "stage": current.stage,
+                    "phase": current.phase,
+                    "progress": _text(current.progress),
+                    **ltx,
+                }
+            item["transfers"] = [
+                {
+                    "film": _text(names.get(t.film)) or "",
+                    "dir": t.dir,
+                    "percent": round(100 * t.done / t.total) if t.total else None,
+                    "rate": t.rate,
+                }
+                for t in beat.transfers
+            ]
+        found.append(item)
+    return found, total
 
 
 def _text(value: Any) -> str | None:

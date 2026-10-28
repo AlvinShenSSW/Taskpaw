@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -250,11 +251,18 @@ def _status_text(snap: Any) -> str:
     return " | ".join(parts) if parts else _inline(str(state))
 
 
-def _monitor_lines(status_json: Optional[str]) -> list[str]:
+# #355: the legacy standalone media monitors; the media center does not run
+# through them, so on a media machine their `disabled` is not "Jasna is off".
+_LEGACY_MEDIA = ("lada", "jasna", "avsubs")
+_LEGACY_NOTE = "disabled（旧版独立监控未使用；媒体任务见「媒体处理」）"
+
+
+def _monitor_lines(status_json: Optional[str], *, media: bool = False) -> list[str]:
     """`- name: <status>` lines from an agent /status payload, where <status> is the
     metric-rich V2-format string (see _status_text). Tolerates the V3 dict shape
     (name → {state, metrics}) AND the V2 list shape ([{name, status, enabled}]) so
-    status.md is correct for both agent versions (#38 review)."""
+    status.md is correct for both agent versions (#38 review). `media`: the
+    machine takes part in media-center work (#355)."""
     if not status_json:
         return []
     try:
@@ -283,7 +291,10 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
                 "none",
             )
             if s.get("enabled") is False and not_running and not s.get("metrics"):
-                lines.append(f"- {_inline(str(name))}: disabled")
+                legacy = media and s.get("type_id") in _LEGACY_MEDIA
+                lines.append(
+                    f"- {_inline(str(name))}: {_LEGACY_NOTE if legacy else 'disabled'}"
+                )
             else:
                 lines.append(f"- {_inline(str(name))}: {_status_text(snap)}")
     elif isinstance(monitors, list):
@@ -324,12 +335,23 @@ def _workflow_time(value: Any) -> datetime | None:
         return None
 
 
+# Jasna prints h:mm:ss or mm:ss (`run 09:54 left`), passed on as `剩余 …`
+_ETA = re.compile(r"剩余 ((?:\d+:)?\d{1,2}:\d{2})")
+
+
 def _workflow_progress(current: Any, now: datetime) -> str:
+    name, parts = _workflow_detail(current, now)
+    return " · ".join([f"{name} {parts[0]}", *parts[1:]]) if name else ""
+
+
+def _workflow_detail(current: Any, now: datetime) -> tuple[str, list[str]]:
+    """A current's film and its parts: stage label first, then LTX / progress,
+    the source's remaining time (#355) and the elapsed time."""
     if not isinstance(current, dict):
-        return ""
+        return "", []
     name = _inline(str(current.get("film") or ""))
     if not name:
-        return ""
+        return "", []
     labels = {
         "restore": "修复",
         "asr": "识别",
@@ -340,7 +362,7 @@ def _workflow_progress(current: Any, now: datetime) -> str:
     }
     stage = current.get("stage")
     label = labels.get(stage, "处理中") if isinstance(stage, str) else "处理中"
-    parts = [f"{name} {label}"]
+    parts = [label]
     ltx = current.get("ltx")
     if isinstance(ltx, dict):
         index: Any = ltx.get("stage_index")
@@ -352,6 +374,9 @@ def _workflow_progress(current: Any, now: datetime) -> str:
             if _is_num(percent) and 0 <= percent <= 100:
                 text += f" {percent:.0f}%"
             parts.append(text)
+            progress = current.get("progress")
+            if isinstance(progress, str) and (eta := _ETA.search(progress)):
+                parts.append(f"剩余 {eta.group(1)}")
     elif isinstance(current.get("progress"), str) and current["progress"]:
         parts.append(_inline(current["progress"]))
     start = _workflow_time(current.get("started_at"))
@@ -360,7 +385,7 @@ def _workflow_progress(current: Any, now: datetime) -> str:
         parts.append(
             f"已用 {seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
         )
-    return " · ".join(parts)
+    return name, parts
 
 
 def _media_text(value: Any, cap: int = 400) -> str:
@@ -441,46 +466,125 @@ def _workflow_film_lines(workflow: dict) -> list[str]:
     ]
 
 
+def _status_data(status: dict[str, Any]) -> dict[str, Any]:
+    try:
+        data = json.loads(status.get("status_json") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _point(now: str) -> datetime:
+    try:
+        return datetime.strptime(now, "%Y-%m-%d %H:%M:%S").astimezone()
+    except ValueError:
+        return datetime.now().astimezone()
+
+
+def _workflow_unavailable(status: dict[str, Any], workflow: Any) -> str | None:
+    """Why a controller's media summary is not current, else None."""
+    health = status.get("status_health")
+    health = health if isinstance(health, dict) else {}
+    if not status.get("reachable"):
+        return "离线"
+    if health.get("state", "ok") != "ok":
+        return f"暂不可用（Hub数据 {_media_text(health.get('state'))}）"
+    if not isinstance(workflow, dict) or not _workflow_available(workflow):
+        return "暂不可用"
+    age: Any = workflow.get("sample_age_seconds")
+    if "sample_age_seconds" in workflow and (not _is_num(age) or not 0 <= age <= 15):
+        return "暂不可用（源采样已过期或年龄无效）"
+    return None
+
+
+def _dispatch_text(workflow: dict) -> str:
+    dispatch = workflow.get("dispatch")
+    if not isinstance(dispatch, dict) or not _media_text(dispatch.get("state")):
+        return "调度状态未知"
+    parts = ["调度"]
+    if dispatch.get("paused") is True:
+        parts.append("已暂停")
+    parts.append(_media_text(dispatch["state"]))
+    if reason := _media_text(dispatch.get("reason")):
+        parts.append(reason)
+    return " ".join(parts[:2]) + "".join(f" · {p}" for p in parts[2:])
+
+
+_NODE_STATES = {"online": "在线", "lost": "失联", "waiting": "等待心跳"}
+
+
+def _worker_text(row: dict) -> str:
+    """#355: one GPU worker's heartbeat as the controller saw it. A worker that
+    is not online shows no GPU sample: its last one is not current."""
+    state = row.get("state")
+    online = state == "online"
+    parts = [
+        _NODE_STATES.get(state, "状态未知") if isinstance(state, str) else "状态未知"
+    ]
+    age: Any = row.get("heartbeat_age_s")
+    if not online and _is_num(age) and age >= 0:
+        parts.append(f"心跳 {int(age)}s 前")
+    if row.get("paused") is True:
+        parts.append("已暂停")
+    admission: Any = row.get("admission")
+    if admission in ("disabled", "draining"):
+        parts.append("未启用" if admission == "disabled" else "排空中")
+    gpu = row.get("gpu")
+    if online and isinstance(gpu, dict):
+        util: Any = gpu.get("util")
+        used: Any = gpu.get("used_mib")
+        total: Any = gpu.get("vram_mib")
+        power: Any = gpu.get("power_w")
+        if _is_num(util) and 0 <= util <= 100:
+            parts.append(f"GPU {util:.0f}%")
+        if _is_num(used) and _is_num(total) and total > 0 and 0 <= used:
+            parts.append(f"显存 {used / 1024:.1f}/{total / 1024:.1f}GB")
+        if _is_num(power) and power >= 0:
+            parts.append(f"{power:.0f}W")
+    if online:
+        staged: Any = row.get("staged")
+        if _is_num(staged) and staged > 0:
+            parts.append(f"已预取 {int(staged)} 部")
+        transfers = row.get("transfers")
+        for item in transfers[:8] if isinstance(transfers, list) else []:
+            if not isinstance(item, dict) or not (
+                film := _media_text(item.get("film"))
+            ):
+                continue
+            label = "下载" if item.get("dir") == "down" else "回传"
+            percent: Any = item.get("percent")
+            parts.append(
+                f"{label} {film}"
+                + (
+                    f" {int(percent)}%"
+                    if _is_num(percent) and 0 <= percent <= 100
+                    else ""
+                )
+            )
+    return " · ".join(parts)
+
+
 def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
     sources = []
     for status in statuses:
-        try:
-            data = json.loads(status.get("status_json") or "{}")
-        except (TypeError, ValueError):
-            continue
+        data = _status_data(status)
         # Ordinary/older Agents need not host a media controller. An absent
         # workflow key is not a failed media service; preserve their old output.
-        if isinstance(data, dict) and "workflow" in data:
+        if "workflow" in data:
             sources.append((status, data))
     if not sources:
         return []
-    try:
-        point = datetime.strptime(now, "%Y-%m-%d %H:%M:%S").astimezone()
-    except ValueError:
-        point = datetime.now().astimezone()
+    point = _point(now)
     lines = ["## 媒体处理"]
     for status, data in sources:
         name = _inline(str(status.get("name", "unknown")))
-        workflow = data.get("workflow")
+        workflow: Any = data.get("workflow")
         health = status.get("status_health")
         health = health if isinstance(health, dict) else {}
-        if not status.get("reachable"):
-            lines.append(f"- {name}: 离线")
-            continue
-        if health.get("state", "ok") != "ok":
-            lines.append(
-                f"- {name}: 暂不可用（Hub数据 {_media_text(health.get('state'))}）"
-            )
-            continue
-        if not isinstance(workflow, dict) or not _workflow_available(workflow):
-            lines.append(f"- {name}: 暂不可用")
+        if reason := _workflow_unavailable(status, workflow):
+            lines.append(f"- {name}: {reason}")
             continue
         age: Any = workflow.get("sample_age_seconds")
-        if "sample_age_seconds" in workflow and (
-            not _is_num(age) or not 0 <= age <= 15
-        ):
-            lines.append(f"- {name}: 暂不可用（源采样已过期或年龄无效）")
-            continue
         source = _media_text(data.get("machine")) or name
         version = _media_text(data.get("version")) or "未知"
         lines.append(f"- {name}: 来源 {source} · Agent {version}")
@@ -495,19 +599,7 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
         lines.append("  " + age_text)
         if sampled := _media_text(workflow.get("sampled_at")):
             lines.append(f"  源采样时间 {sampled}（仅诊断）")
-        dispatch = workflow.get("dispatch")
-        if isinstance(dispatch, dict) and _media_text(dispatch.get("state")):
-            parts = ["调度"]
-            if dispatch.get("paused") is True:
-                parts.append("已暂停")
-            parts.append(_media_text(dispatch["state"]))
-            if reason := _media_text(dispatch.get("reason")):
-                parts.append(reason)
-            lines.append(
-                "  " + " ".join(parts[:2]) + "".join(f" · {p}" for p in parts[2:])
-            )
-        else:
-            lines.append("  调度状态未知")
+        lines.append("  " + _dispatch_text(workflow))
         counts: Any = workflow.get("counts")
 
         def count(*keys: str) -> str:
@@ -564,7 +656,139 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
             progress = _workflow_progress(workflow.get("current"), point)
             if progress:
                 lines.append(f"- {progress}")
+        workers = workflow.get("workers")
+        if isinstance(workers, list):  # #355: each GPU worker's heartbeat
+            rows = [
+                (worker_name, row)
+                for row in workers[:16]
+                if isinstance(row, dict)
+                and (worker_name := _inline(str(row.get("name") or ""), 64))
+            ]
+            lines.append(
+                "  " + _media_preview("GPU 节点", workflow, "workers", len(rows), "台")
+            )
+            lines.extend(f"  - {n}: {_worker_text(row)}" for n, row in rows)
     return [*lines, ""]
+
+
+def _machine_keys(status: dict[str, Any], data: dict[str, Any]) -> set[str]:
+    names = (status.get("name"), data.get("machine"))
+    return {
+        key
+        for value in names
+        if isinstance(value, str) and (key := _inline(value, 64).casefold())
+    }
+
+
+def _media_index(statuses: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """#355: current controller summaries by machine (case-insensitive name):
+    the controller's own summary, each machine's running work and each GPU
+    worker's heartbeat. Only a current source is indexed, so a stale or offline
+    controller never puts a live claim under a machine."""
+    index: dict[str, dict[str, Any]] = {}
+
+    def slot(key: str) -> dict[str, Any]:
+        return index.setdefault(key, {"controller": None, "tasks": [], "worker": None})
+
+    for status in statuses:
+        data = _status_data(status)
+        workflow: Any = data.get("workflow")
+        if "workflow" not in data or _workflow_unavailable(status, workflow):
+            continue
+        own = _machine_keys(status, data)
+        for key in own:
+            slot(key)["controller"] = slot(key)["controller"] or workflow
+        currents = workflow.get("currents")
+        if not isinstance(currents, list):
+            currents = (
+                [dict(workflow["current"], machine="本机")]
+                if isinstance(workflow.get("current"), dict)
+                else []
+            )
+        for item in currents[:16]:
+            if not isinstance(item, dict):
+                continue
+            machine = _inline(str(item.get("machine") or ""), 64)
+            keys = own if machine in ("", "本机") else {machine.casefold()}
+            for key in keys:
+                slot(key)["tasks"].append(item)
+        workers = workflow.get("workers")
+        for row in workers[:16] if isinstance(workers, list) else []:
+            if isinstance(row, dict) and (
+                name := _inline(str(row.get("name") or ""), 64)
+            ):
+                entry = slot(name.casefold())
+                entry["worker"] = entry["worker"] or row
+    return index
+
+
+def _machine_media(
+    status: dict[str, Any],
+    data: dict[str, Any],
+    index: dict[str, dict[str, Any]],
+    point: datetime,
+) -> tuple[list[str], list[str]]:
+    """#355: (monitor-style lines, indented detail lines) for one machine.
+
+    The OpenClaw readers parse `- <monitor>: <state>`, so the work itself is a
+    monitor line in the running-monitor shape `running | <film> | <progress>`."""
+    keys = _machine_keys(status, data)
+    controller = next((index[k]["controller"] for k in keys if k in index), None)
+    worker = next(
+        (index[k]["worker"] for k in keys if k in index and index[k]["worker"]), None
+    )
+    tasks = [item for k in sorted(keys) if k in index for item in index[k]["tasks"]]
+    lines, details = [], []
+    if controller is not None:
+        details.append(f"  媒体主控: {_dispatch_text(controller)} · 详见「媒体处理」")
+    if worker is not None:
+        details.append(f"  媒体节点: {_worker_text(worker)}")
+    seen = set()
+    for item in tasks:
+        name, parts = _workflow_detail(item, point)
+        if name and id(item) not in seen:
+            seen.add(id(item))
+            lines.append(f"- 媒体处理中心: running | {name} | {' · '.join(parts)}")
+    if not lines and worker is not None:
+        state = worker.get("state")
+        # the currents preview is bounded: a worker left out of it still
+        # reports its own running stage, so idle needs a null `current`
+        name, parts = _workflow_detail(worker.get("current"), point)
+        if state == "online" and name:
+            lines.append(f"- 媒体处理中心: running | {name} | {' · '.join(parts)}")
+        elif state == "online":
+            lines.append("- 媒体处理中心: idle（无运行任务）")
+        elif state in ("lost", "waiting"):
+            lines.append(f"- 媒体处理中心: {state}（{_worker_text(worker)}）")
+    own = data.get("workflow_worker")
+    if not lines and isinstance(own, dict) and status.get("reachable"):
+        lines.append(f"- 媒体处理中心: {_self_report(own)}")
+    return lines, details
+
+
+_STAGES = {"restore": "修复", "asr": "识别", "fetch": "下载"}
+
+
+def _self_report(own: dict) -> str:
+    """A worker's own `/status.workflow_worker` when no current controller
+    summary names it (#355): state, controller link, pause and its stage.
+    `running` is the worker service's state, so a running service with no
+    stage and not busy reads `idle`."""
+    state = _media_text(own.get("state")) or "unknown"
+    current = own.get("current")
+    working = isinstance(current, dict) or own.get("busy") is True
+    if state == "running" and not working:
+        state = "idle"
+    parts = ["本机自报", "已连接主控" if own.get("connected") is True else "未连接主控"]
+    if own.get("paused") is True:
+        parts.append("已暂停")
+    if isinstance(current, dict) and isinstance(current.get("stage"), str):
+        stage = _STAGES.get(current["stage"], _media_text(current["stage"], 32))
+        phase = _media_text(current.get("phase"), 32)
+        parts.append(f"{stage} {phase}".rstrip())
+    elif own.get("busy") is not True:
+        parts.append("无运行任务")
+    return f"{state}（{' · '.join(parts)}）"
 
 
 def render_status_md(
@@ -601,11 +825,24 @@ def render_status_md(
                 "",
             ]
         )
+    index = _media_index(statuses)
+    point = _point(now)
     for s in statuses:
         name = _inline(str(s.get("name", "unknown")))  # sanitized: no line injection
+        data = _status_data(s)
+        media, details = _machine_media(s, data, index, point)
         if s.get("reachable"):
             lines.append(f"## {name}: ONLINE")
-            lines.extend(_monitor_lines(s.get("status_json")))
+            lines.extend(
+                _monitor_lines(
+                    s.get("status_json"),
+                    media=bool(media or details)
+                    or "workflow" in data
+                    or "workflow_worker" in data,
+                )
+            )
+            lines.extend(media)
+            lines.extend(details)
         else:
             # last seen = the last time it was actually reachable (not this failed
             # poll), so the time doesn't advance during an outage (#38 review).
@@ -615,6 +852,10 @@ def render_status_md(
                 if seen
                 else f"## {name}: OFFLINE"
             )
+            # #355: the controller may still hear a worker the Hub cannot reach;
+            # indented, so an OFFLINE section keeps no monitor lines
+            lines.extend("  " + line[2:] for line in media)
+            lines.extend(details)
         health = s.get("status_health") or {}
         if health:
             age: Any = health.get("age_seconds")
