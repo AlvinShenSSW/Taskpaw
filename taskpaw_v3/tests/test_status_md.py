@@ -40,7 +40,7 @@ def test_workflow_section_counts_progress_and_hub_local_day():
     ]
     md = render_status_md(statuses, local.strftime("%Y-%m-%d %H:%M:%S"))
     assert "## 媒体处理" in md
-    assert "待处理 2 · 处理中 1 · 待确认 3 · 异常 4 · 完成今日 1" in md
+    assert "待处理 2 · 排队/处理中 1 · 待确认 3 · 异常 4 · 完成今日 1" in md
     assert "ABF-394 修复 · LTX 2/4 encode 52% · 已用 0:12:42" in md
     statuses[0]["reachable"] = False
     offline = render_status_md(statuses, local.strftime("%Y-%m-%d %H:%M:%S"))
@@ -67,7 +67,7 @@ def test_workflow_section_handles_unavailable_and_bad_values():
     ]
     text = render_status_md(rows, "2026-10-22 12:00:00")
     assert "\n## injected" not in text and "nan" not in text
-    assert "待处理 0" in text and "完成今日 0" in text
+    assert "待处理 未知" in text and "完成今日 0" in text
     rows[0]["status_json"] = json.dumps({"workflow": None})
     assert "暂不可用" in render_status_md(rows, "2026-10-22 12:00:00")
 

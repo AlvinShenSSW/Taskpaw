@@ -363,6 +363,84 @@ def _workflow_progress(current: Any, now: datetime) -> str:
     return " · ".join(parts)
 
 
+def _media_text(value: Any, cap: int = 400) -> str:
+    return _inline(value, cap) if isinstance(value, str) else ""
+
+
+def _media_count(value: Any) -> int | None:
+    return int(value) if _is_num(value) and value >= 0 else None
+
+
+def _media_preview(label: str, workflow: dict, key: str, shown: int, unit: str) -> str:
+    values = workflow.get(key)
+    if not isinstance(values, list):
+        return f"{label}未知"
+    total = _media_count(workflow.get(f"{key}_total"))
+    more = _media_count(workflow.get(f"{key}_more"))
+    # Include both source omissions and this renderer's own defensive cap.
+    omitted = max(0, len(values) - shown)
+    if more is not None:
+        omitted += more
+    if total is not None:
+        omitted = max(omitted, total - shown)
+    # Conflicting metadata cannot establish a complete preview.
+    if total is not None and total < len(values):
+        total = None
+    result = f"{label} {shown}/{total if total is not None else '未知'}"
+    return result + (f" · 另有 {omitted} {unit}未展示" if omitted else "")
+
+
+def _workflow_available(workflow: Any) -> bool:
+    if not isinstance(workflow, dict):
+        return False
+    counts = workflow.get("counts")
+    if isinstance(counts, dict) and any(
+        _media_count(counts.get(key)) is not None
+        for key in ("planning", "active", "archiving", "confirm", "attention", "done")
+    ):
+        return True
+    current = workflow.get("current")
+    if isinstance(current, dict) and _media_text(current.get("film")):
+        return True  # older agents may supply only their current film
+    currents = workflow.get("currents")
+    if isinstance(currents, list) and any(
+        isinstance(item, dict) and _media_text(item.get("film"))
+        for item in currents[:16]
+    ):
+        return True
+    return (
+        isinstance(workflow.get("films"), list)
+        and _media_count(workflow.get("films_total")) is not None
+    )
+
+
+def _workflow_film_lines(workflow: dict) -> list[str]:
+    lines = []
+    films = workflow.get("films")
+    for film in films[:32] if isinstance(films, list) else []:
+        if not isinstance(film, dict) or not (name := _media_text(film.get("name"))):
+            continue
+        parts = [name]
+        parts.extend(
+            text
+            for key in ("stage", "status", "machine")
+            if (text := _media_text(film.get(key)))
+        )
+        position = film.get("route_position")
+        if type(position) is int and position >= 0:
+            parts.append(f"队列第 {position + 1} 位")
+        parts.extend(
+            text
+            for key in ("route_live", "note", "attention_kind")
+            if (text := _media_text(film.get(key)))
+        )
+        lines.append("  - " + " · ".join(parts))
+    return [
+        "  " + _media_preview("队列预览", workflow, "films", len(lines), "部"),
+        *lines,
+    ]
+
+
 def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
     sources = []
     for status in statuses:
@@ -370,8 +448,10 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
             data = json.loads(status.get("status_json") or "{}")
         except (TypeError, ValueError):
             continue
+        # Ordinary/older Agents need not host a media controller. An absent
+        # workflow key is not a failed media service; preserve their old output.
         if isinstance(data, dict) and "workflow" in data:
-            sources.append((status, data["workflow"]))
+            sources.append((status, data))
     if not sources:
         return []
     try:
@@ -379,20 +459,64 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
     except ValueError:
         point = datetime.now().astimezone()
     lines = ["## 媒体处理"]
-    for status, workflow in sources:
+    for status, data in sources:
         name = _inline(str(status.get("name", "unknown")))
+        workflow = data.get("workflow")
+        health = status.get("status_health")
+        health = health if isinstance(health, dict) else {}
         if not status.get("reachable"):
             lines.append(f"- {name}: 离线")
             continue
-        if not isinstance(workflow, dict):
+        if health.get("state", "ok") != "ok":
+            lines.append(
+                f"- {name}: 暂不可用（Hub数据 {_media_text(health.get('state'))}）"
+            )
+            continue
+        if not isinstance(workflow, dict) or not _workflow_available(workflow):
             lines.append(f"- {name}: 暂不可用")
             continue
-        counts = workflow.get("counts")
-        counts = counts if isinstance(counts, dict) else {}
+        age: Any = workflow.get("sample_age_seconds")
+        if "sample_age_seconds" in workflow and (
+            not _is_num(age) or not 0 <= age <= 15
+        ):
+            lines.append(f"- {name}: 暂不可用（源采样已过期或年龄无效）")
+            continue
+        source = _media_text(data.get("machine")) or name
+        version = _media_text(data.get("version")) or "未知"
+        lines.append(f"- {name}: 来源 {source} · Agent {version}")
+        hub_age: Any = health.get("age_seconds")
+        age_text = f"源采样年龄 {int(age)}s" if _is_num(age) else "源采样年龄未知"
+        known_hub_age = _is_num(hub_age) and hub_age >= 0
+        age_text += (
+            f" · Hub缓存年龄 {int(hub_age)}s" if known_hub_age else " · Hub缓存年龄未知"
+        )
+        if _is_num(age) and known_hub_age:
+            age_text += f" · 数据年龄约 {int(age + hub_age)}s"
+        lines.append("  " + age_text)
+        if sampled := _media_text(workflow.get("sampled_at")):
+            lines.append(f"  源采样时间 {sampled}（仅诊断）")
+        dispatch = workflow.get("dispatch")
+        if isinstance(dispatch, dict) and _media_text(dispatch.get("state")):
+            parts = ["调度"]
+            if dispatch.get("paused") is True:
+                parts.append("已暂停")
+            parts.append(_media_text(dispatch["state"]))
+            if reason := _media_text(dispatch.get("reason")):
+                parts.append(reason)
+            lines.append(
+                "  " + " ".join(parts[:2]) + "".join(f" · {p}" for p in parts[2:])
+            )
+        else:
+            lines.append("  调度状态未知")
+        counts: Any = workflow.get("counts")
 
-        def count(key: str) -> int:
-            value: Any = counts.get(key)
-            return max(0, int(value)) if _is_num(value) else 0
+        def count(*keys: str) -> str:
+            values = [_media_count(counts.get(key, 0)) for key in keys]
+            return (
+                "未知"
+                if None in values
+                else str(sum(v for v in values if v is not None))
+            )
 
         completions = workflow.get("completed_at")
         today = (
@@ -405,17 +529,29 @@ def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
             if isinstance(completions, list)
             else 0
         )
-        lines.append(
-            f"- {name}: 待处理 {count('planning')} · "
-            f"处理中 {count('active') + count('archiving')} · "
-            f"待确认 {count('confirm')} · "
-            f"异常 {count('attention') + count('packages_attention')} · 完成今日 {today}"
-        )
+        if isinstance(counts, dict) and counts:
+            lines.append(
+                f"  待处理 {count('planning')} · 排队/处理中 {count('active', 'archiving')} · "
+                f"待确认 {count('confirm')} · "
+                f"异常 {count('attention', 'packages_attention')} · 完成今日 {today}"
+            )
+        else:
+            lines.append("  队列计数未知")
+        lines.extend(_workflow_film_lines(workflow))
         # P2-4 R12: each running film with its machine; an older agent
         # sends only `current`
         currents = workflow.get("currents")
+        if "currents_total" in workflow or "currents_more" in workflow:
+            shown = (
+                sum(bool(_workflow_progress(item, point)) for item in currents[:16])
+                if isinstance(currents, list)
+                else 0
+            )
+            lines.append(
+                "  " + _media_preview("当前任务", workflow, "currents", shown, "台")
+            )
         if isinstance(currents, list) and currents:
-            for item in currents[:4]:
+            for item in currents[:16]:
                 progress = _workflow_progress(item, point)
                 machine = (
                     _inline(str(item.get("machine") or ""), 64)

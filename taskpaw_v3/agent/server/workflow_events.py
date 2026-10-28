@@ -31,7 +31,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("taskpaw.workflow.events")
 POLL_SECONDS = 5.0
 INSTANCE = "media-workflow"
-MAX_CURRENTS = 4  # P2-4 R12: the summary's running films, one per machine
+MAX_CURRENTS = 16  # #351: one current per machine, with explicit omissions
+MAX_FILMS = 32
+MAX_SUMMARY_TEXT = 400
 _CLEANUPS: tuple[m.Stage, ...] = ("cleanup_input", "cleanup_workcopy")
 
 
@@ -45,6 +47,7 @@ class WorkflowEvents:
         self._dirty = False
         self._summary: dict[str, Any] | None = None
         self._sampled = 0.0
+        self._sampled_wall = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -149,6 +152,9 @@ class WorkflowEvents:
             if host.state != "running" or host.runtime is None:
                 self._clear()
                 return
+            # Age the board from the start of sampling, not the end of slow
+            # reads. Wall elapsed covers sleep on clocks that pause monotonic.
+            sampled, sampled_wall = time.monotonic(), time.time()
             from taskpaw_v3.agent.server.workflow_reads import board_inputs
 
             rt = host.runtime
@@ -207,17 +213,32 @@ class WorkflowEvents:
                         self._dirty = True
                         self._save()
             current = dispatch.get("current")
+            currents, currents_total = _currents(inputs.currents, rows)
+            queue_rows, films_total = _films(rows, inputs.currents)
             summary = {
                 "counts": board.counts(rows, packages),
                 "current": _current(current),
                 # R12: every running film with its machine (the Mac shows it)
-                "currents": _currents(inputs.currents, rows),
+                "currents": currents,
+                "currents_total": currents_total,
+                "currents_more": currents_total - len(currents),
                 "completed_at": completed,
+                "films": queue_rows,
+                "films_total": films_total,
+                "films_more": films_total - len(queue_rows),
+                "dispatch": {
+                    "state": _text(dispatch.get("state")) or "unknown",
+                    "paused": bool(dispatch.get("paused", False)),
+                    "reason": _text(dispatch.get("reason")) or "",
+                },
+                "sampled_at": datetime.fromtimestamp(
+                    sampled_wall, timezone.utc
+                ).isoformat(),
             }
             with self._summary_lock:
                 if not self._stop.is_set():
                     self._summary = summary
-                    self._sampled = time.monotonic()
+                    self._sampled, self._sampled_wall = sampled, sampled_wall
         except Exception as exc:
             self._clear()
             log.warning("workflow observation failed: %s", type(exc).__name__)
@@ -307,12 +328,14 @@ class WorkflowEvents:
 
     def snapshot(self) -> dict[str, Any] | None:
         with self._summary_lock:
-            if (
-                self._stop.is_set()
-                or time.monotonic() - self._sampled > POLL_SECONDS * 3
-            ):
+            age = max(
+                0.0,
+                time.monotonic() - self._sampled,
+                time.time() - self._sampled_wall,
+            )
+            if self._stop.is_set() or self._summary is None or age > POLL_SECONDS * 3:
                 return None
-            return copy.deepcopy(self._summary)
+            return {**copy.deepcopy(self._summary), "sample_age_seconds": age}
 
     def start(self, host: WorkflowHostLike) -> None:
         def run() -> None:
@@ -334,8 +357,8 @@ class WorkflowEvents:
 
 def _currents(
     currents: dict[str, dict[str, Any]], rows: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """R12: up to four machines, the controller's first, each with one film:
+) -> tuple[list[dict[str, Any]], int]:
+    """R12: bounded machines, the controller's first, each with one film:
     name, stage, progress and the machine (`本机` or the worker's name). §9
     CX12: a machine's running stage wins over its prefetch, and the limit
     counts machines, so a prefetch never displaces another machine."""
@@ -358,7 +381,64 @@ def _currents(
         ((local, item["machine"], item) for _f, item, local in best.values()),
         key=lambda entry: (entry[0], entry[1]),
     )
-    return [item for _local, _machine, item in found[:MAX_CURRENTS]]
+    return [item for _local, _machine, item in found[:MAX_CURRENTS]], len(found)
+
+
+def _text(value: Any) -> str | None:
+    return value[:MAX_SUMMARY_TEXT] if isinstance(value, str) else None
+
+
+def _films(
+    rows: list[dict[str, Any]],
+    currents: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """#351: a read-only board preview, without actions, paths or full steps.
+
+    Board order is not a global dispatch order. Retain stage status separately
+    from group: `active` includes pending work, not only running stages.
+    """
+    total = 0
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if row["group"] == "done":
+            continue
+        total += 1
+        if len(found) == MAX_FILMS:
+            continue
+        route = row.get("route") or {}
+        current = currents.get(row["film_id"]) or {}
+        machine = (
+            route.get("machine")
+            or current.get("machine")
+            or current.get("device")
+            or row.get("lost_worker")
+            or {}
+        )
+        name = _text(machine.get("name"))
+        if route.get("live") == "local":
+            name = "本机"
+        item: dict[str, Any] = {
+            key: _text(row.get(key))
+            for key in (
+                "film_id",
+                "name",
+                "group",
+                "stage",
+                "status",
+                "note",
+                "attention_kind",
+            )
+        }
+        position = route.get("position")
+        item.update(
+            machine=name,
+            route_position=position
+            if type(position) is int and position >= 0
+            else None,
+            route_live=_text(route.get("live")),
+        )
+        found.append(item)
+    return found, total
 
 
 def _film_of(key: str) -> str | None:
