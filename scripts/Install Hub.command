@@ -24,6 +24,13 @@ if [ ! -x "$backend" ]; then
     fail '请先将 TaskPaw Hub.app 拖入 Applications（或 ~/Applications），再双击 Install Hub.command。' 1
 fi
 
+# #357: the ad-hoc package is not notarized. Clearing the quarantine of this
+# installed app only (after the operator approved this command) keeps macOS from
+# asking again for its backend and window.
+if ! xattr -drs com.apple.quarantine "$app"; then
+    printf '未能清除 %s 的隔离标记；macOS 可能仍会要求在「系统设置 → 隐私与安全性」中点「仍要打开」。\n' "$app" >&2
+fi
+
 printf '正在安装并启动 Hub 后台服务，请稍候……\n'
 if "$backend" hub-service install; then
     printf 'Hub 后台服务已就绪，正在打开监控界面。\n'

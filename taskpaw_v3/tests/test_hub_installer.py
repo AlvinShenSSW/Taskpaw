@@ -43,7 +43,20 @@ class InstallerFixture:
             "TEST_LOG": str(self.log),
             "TEST_INSTALL_EXIT": "0",
             "TEST_OPEN_EXIT": "0",
+            "TEST_XATTR_EXIT": "0",
         }
+        # #357: clearing the installed app's quarantine is recorded, not real
+        self._executable(
+            self.bin / "xattr",
+            """#!/bin/sh
+printf 'xattr\n' >> "$TEST_LOG"
+printf 'arg:%s\n' "$@" >> "$TEST_LOG"
+if [ "$TEST_XATTR_EXIT" -ne 0 ]; then
+    printf 'fixture-xattr-failure\n' >&2
+fi
+exit "$TEST_XATTR_EXIT"
+""",
+        )
         self._executable(
             self.bin / "open",
             """#!/bin/sh
@@ -97,6 +110,10 @@ exit "$TEST_INSTALL_EXIT"
     @staticmethod
     def expected(app):
         return [
+            "xattr",
+            "arg:-drs",
+            "arg:com.apple.quarantine",
+            f"arg:{app}",
             f"backend:{app}/Contents/MacOS/taskpaw-backend",
             "arg:hub-service",
             "arg:install",
@@ -136,7 +153,7 @@ def test_install_failure_preserves_status_and_does_not_open(installer):
     result = installer.run()
     assert result.returncode == 37
     assert "fixture-install-failure" in result.stdout + result.stderr
-    assert installer.calls() == installer.expected(app)[:4]
+    assert installer.calls() == installer.expected(app)[:8]
 
 
 @pytest.mark.parametrize("user", [False, True], ids=["system-app", "user-app"])
@@ -178,11 +195,15 @@ def test_open_waits_for_backend_to_complete(installer):
     )
     try:
         deadline = time.monotonic() + 3
-        while not installer.calls() and time.monotonic() < deadline:
+
+        def backend_started():
+            return any(call.startswith("backend:") for call in installer.calls())
+
+        while not backend_started() and time.monotonic() < deadline:
             if process.poll() is not None:
                 break
             time.sleep(0.01)
-        assert installer.calls(), "installer never invoked the backend"
+        assert backend_started(), "installer never invoked the backend"
         assert process.poll() is None, "installer did not wait for the backend"
         assert "open" not in installer.calls()
     finally:
@@ -212,4 +233,31 @@ def test_open_failure_is_reported_without_retrying_install(installer):
     assert result.returncode != 0
     assert "TaskPaw Hub.app" in output
     assert any(word in output.lower() for word in ("open", "打开", "启动"))
+    assert installer.calls() == installer.expected(app)
+
+
+def test_quarantine_is_cleared_on_the_exact_app_before_any_launch(installer):
+    # #357: one Gatekeeper approval (this command), not three
+    app = installer.add_app(user=True)
+    installer.add_app()  # the system app wins; only it is touched
+    result = installer.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = installer.calls()
+    assert calls[:4] == [
+        "xattr",
+        "arg:-drs",
+        "arg:com.apple.quarantine",
+        f"arg:{installer.system_apps}/TaskPaw Hub.app",
+    ]
+    assert f"arg:{app}" not in calls
+
+
+def test_quarantine_failure_is_reported_and_install_continues(installer):
+    app = installer.add_app()
+    installer.env["TEST_XATTR_EXIT"] = "1"
+    result = installer.run()
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "fixture-xattr-failure" in output
+    assert "隐私与安全性" in output  # where macOS will still ask
     assert installer.calls() == installer.expected(app)

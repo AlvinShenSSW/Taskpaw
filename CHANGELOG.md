@@ -4,6 +4,22 @@
 
 ---
 
+## V3 3.11.3 — 发版汇总
+
+- 本版包含 v3.11.2 标签之后合并的：#327（Mac Hub 完整安装包）与 #357（Mac Hub 安装只需放行一次）。Mac Hub DMG 自本版起提供监控界面＋独立后台服务的完整安装包。
+- 无工作流协议、事件、数据库结构或设置变化；主控与工作机无需因本版重装。V3 构建内六处版本同步为 3.11.3。
+
+## V3 3.11.3 — Mac Hub 完整安装包：监控界面＋独立后台服务（#327）
+
+- Mac Hub DMG 内含 `TaskPaw Hub.app`（只连接本机后台服务的监控界面）、`Install Hub.command`、`Manage Hub Service.command` 与 `Hub 安装说明.txt`。拖入 App 后双击 `Install Hub.command`，即安装并启动按用户登录运行的独立后台服务（LaunchAgent），再打开监控界面；关闭窗口或退出 App 不会停止聚合与通知。
+- 沿用原 `~/.taskpaw-hub` 数据目录、`hub.db` / `status.md` 与已注册的 Agent，OpenClaw 读取方式不变。安装与管理说明见 `docs/guides/deployment.md`。
+
+## V3 3.11.3 — Mac Hub 安装只需放行一次（#357）
+
+- 现场：Mac 包为 ad-hoc 签名、未经 Apple 公证，安装时 `Install Hub.command`、后台程序、`TaskPaw Hub.app` 会依次被 Gatekeeper 拦截，要去「系统设置 → 隐私与安全性」点三次「仍要打开」。
+- 现在只需放行 `Install Hub.command` 一次：它随即清除已安装的 `TaskPaw Hub.app`（仅此一个 App，`-s` 不跟随符号链接）的隔离标记，再安装后台服务、打开界面；`Manage Hub Service.command` 同样处理。清除失败会在终端提示，安装照常继续。`Hub 安装说明.txt` 另给一行终端命令，可一次都不弹。
+- 未改签名方式、未做公证，也不改系统设置。
+
 ## V3 3.11.2 — 发版汇总
 
 - 本版包含 3.11.1 之后合并的：#347（概览「正在处理」显示 5 部）、#349（入库不再因 ffprobe 打印舍入误判「时长冲突」）、#351 与 #355（OpenClaw / Mac Hub 读得到媒体处理中心的实时进度）、#353（概览「另有 N 部…」可展开、收起）。

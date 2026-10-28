@@ -78,6 +78,12 @@ Agent remains a separate installation for monitoring this Mac itself.
    or installation failure stays visible in Terminal; the dashboard is not
    opened as a false success. The DMG includes both frontend and backend; no
    additional backend download is needed.
+   The ad-hoc package is not notarized, so macOS blocks the first double-click:
+   approve it once in System Settings → Privacy & Security → Open Anyway. The
+   command then clears the installed app's quarantine before running its backend
+   and opening the window, so neither is blocked again (#357); a failed clear is
+   printed and macOS asks as before. `Hub 安装说明.txt` also gives a one-line
+   Terminal alternative that needs no approval.
 4. The dashboard automatically connects when the service's
    protected local credentials are available. If it shows the waiting page,
    check service `status` and logs rather than repeatedly reopening the window.
