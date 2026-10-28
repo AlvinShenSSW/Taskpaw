@@ -63,7 +63,7 @@ function server(id: number, name: string, snapshot: Record<string, unknown> | nu
 function fleet(flow: unknown = workflow(), controller: Partial<HubServer> = {}) {
   return [
     server(1, "BlackGoldPig", { machine: "BlackGoldPig", version: "3.11.4", monitors: LEGACY, workflow: flow }, controller),
-    server(2, "BlackSilverPig", { machine: "BlackSilverPig", version: "3.11.4", monitors: LEGACY,
+    server(2, "BlackSilverPig", { machine: "BlackSilverPig", version: "3.11.4", monitors: LEGACY, workflow: null,
       workflow_worker: { state: "running", connected: true, current: { film_id: "x", stage: "restore", phase: "running" }, busy: true } }),
     server(3, "DarkbluePig", { machine: "DarkbluePig", version: "3.11.4", monitors: LEGACY }),
     server(4, "Render", { machine: "Render", version: "3.11.4", monitors: LEGACY }),
@@ -101,12 +101,40 @@ describe("hubMedia helpers", () => {
     expect(silver?.tasks.map(t => t.film)).toEqual(["FILM-107"]);
   });
 
+  it("a GPU worker's null workflow never becomes the source (review P1-1)", () => {
+    const servers = fleet();
+    const workerFirst = [servers[1], servers[0], servers[2]];
+    expect(mediaSource(workerFirst, true)?.server.name).toBe("BlackGoldPig");
+    expect(mediaSource(workerFirst, true)?.unavailable).toBeNull();
+    // the stale controller explains; a worker alone is no source at all
+    expect(mediaSource(fleet(workflow(), { online: false }).slice(0, 2).reverse(), true)?.server.name).toBe("BlackGoldPig");
+    expect(mediaSource([servers[1]], true)).toBeNull();
+  });
+
+  it("a lost node's retained heartbeat is not live work (review P1-2)", () => {
+    const flow = workflow({ currents: [], workers: [node("BlackSilverPig", "lost", { heartbeat_age_s: 300,
+      current: { film: "FILM-1", stage: "restore", phase: "running", ltx: LTX } })] });
+    const servers = fleet(flow);
+    const silver = machineMedia(mediaIndex(mediaSource(servers, true)), servers[1]);
+    expect(silver?.tasks).toEqual([]);
+    expect(silver?.worker?.state).toBe("lost");
+  });
+
+  it("drops out-of-range GPU samples and transfer percents", () => {
+    const servers = fleet(workflow({ workers: [node("BlackSilverPig", "online", {
+      gpu: { util: 140, used_mib: -1, vram_mib: 0, power_w: 300 },
+      transfers: [{ film: "F", dir: "down", percent: 250 }] })] }));
+    const row = mediaSource(servers, true)?.summary?.workers?.[0];
+    expect(row?.gpu).toEqual({ util: undefined, used_mib: undefined, vram_mib: undefined, power_w: 300 });
+    expect(row?.transfers).toEqual([{ film: "F", dir: "down", percent: undefined }]);
+  });
+
   it("a stale controller indexes nothing", () => {
     expect(mediaIndex(mediaSource(fleet(), false)).size).toBe(0);
   });
 
   it("reads a worker's self-report; running with no current is idle", () => {
-    expect(selfReport(fleet()[1])).toEqual({ state: "running", connected: true, paused: false,
+    expect(selfReport(fleet()[1])).toEqual({ state: "running", connected: true, paused: false, busy: true,
       current: { stage: "restore", phase: "running" } });
     const idle = server(5, "w", { machine: "w", monitors: {}, workflow_worker: { state: "running", connected: true, current: null, busy: false } });
     expect(selfReport(idle)?.state).toBe("idle");
@@ -164,9 +192,39 @@ describe("HubDashboard 机群 media (#359)", () => {
   it("a lost node's own row says so instead of idle", async () => {
     await show(fleet());
     const dark = within(within(card("DarkbluePig")).getByTestId("hub-machine-media"));
-    expect(dark.getByText("失联 · 心跳 95s 前")).toBeInTheDocument();
+    expect(dark.getByText("媒体节点：失联 · 心跳 95s 前")).toBeInTheDocument();
     expect(dark.queryByText(/空闲/)).not.toBeInTheDocument();
     expect(within(card("Render")).queryByTestId("hub-machine-media")).not.toBeInTheDocument();
+  });
+
+  it("a lost node shows neither its last task nor its last prefetch and transfers", async () => {
+    const flow = workflow({ currents: [], workers: [node("DarkbluePig", "lost", { heartbeat_age_s: 300, staged: 2,
+      current: { film: "FILM-1", stage: "restore", phase: "running", ltx: LTX },
+      transfers: [{ film: "FILM-9", dir: "down", percent: 40 }] })] });
+    await show(fleet(flow));
+    const dark = within(within(card("DarkbluePig")).getByTestId("hub-machine-media"));
+    expect(dark.getByText("媒体节点：失联 · 心跳 300s 前")).toBeInTheDocument();
+    expect(dark.queryByText("FILM-1")).not.toBeInTheDocument();
+    expect(dark.queryByText(/已预取|下载 FILM-9/)).not.toBeInTheDocument();
+    expect(dark.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("an online node's transfer without a percent omits it; prefetch work reads 下载", async () => {
+    const flow = workflow({ currents: [{ film: "FILM-5", stage: "fetch", machine: "Blacksilverpig" }],
+      workers: [node("Blacksilverpig", "online", { transfers: [{ film: "FILM-5", dir: "down" }] })] });
+    await show(fleet(flow));
+    const silver = within(within(card("BlackSilverPig")).getByTestId("hub-machine-media"));
+    expect(silver.getByText(/· 下载 FILM-5$/)).toBeInTheDocument();
+    expect(silver.queryByText(/—%/)).not.toBeInTheDocument();
+    expect(silver.getByText("下载")).toBeInTheDocument();
+  });
+
+  it("a busy worker without a current stage is not reported as having no task", async () => {
+    const servers = fleet(workflow({ sample_age_seconds: 40 }));
+    servers[1] = server(2, "BlackSilverPig", { machine: "BlackSilverPig", monitors: {}, workflow: null,
+      workflow_worker: { state: "running", connected: true, current: null, busy: true } });
+    await show(servers);
+    expect(within(card("BlackSilverPig")).getByText("运行中 · 本机自报 · 已连接主控")).toBeInTheDocument();
   });
 
   it("a stale controller makes no live claims; workers fall back to their self-report", async () => {

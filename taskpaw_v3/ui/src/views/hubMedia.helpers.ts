@@ -71,15 +71,20 @@ function worker(v: unknown): MediaWorker | null {
   const name = text(v.name, 64);
   if (!name) return null;
   const gpu = obj(v.gpu) ? v.gpu : undefined;
+  // status.md's ranges: a malformed sample is left out rather than shown
+  const range = (value: unknown, low: number, high = Infinity, open = false) => {
+    const n = num(value);
+    return n !== undefined && (open ? n > low : n >= low) && n <= high ? n : undefined;
+  };
   const transfers = Array.isArray(v.transfers) ? v.transfers.slice(0, 8) : [];
   return {
     name, state: text(v.state, 32) ?? "unknown", heartbeat_age_s: num(v.heartbeat_age_s),
     paused: v.paused === true,
-    gpu: gpu && { util: num(gpu.util), used_mib: num(gpu.used_mib), vram_mib: num(gpu.vram_mib),
-      power_w: num(gpu.power_w) },
+    gpu: gpu && { util: range(gpu.util, 0, 100), used_mib: range(gpu.used_mib, 0),
+      vram_mib: range(gpu.vram_mib, 0, Infinity, true), power_w: range(gpu.power_w, 0) },
     current: task(v.current), staged: num(v.staged),
     transfers: transfers.flatMap(t => obj(t) ? [{ film: text(t.film, 200) ?? "", dir: text(t.dir, 8),
-      percent: num(t.percent) }] : []),
+      percent: range(t.percent, 0, 100) }] : []),
   };
 }
 
@@ -114,11 +119,7 @@ function summary(workflow: Obj): MediaSummary | null {
   };
 }
 
-// The controller: the first server whose status carries a `workflow` key. A
-// stale Hub response, an offline/stale server or an old sample is unavailable.
-export function mediaSource(servers: HubServer[], responseCurrent: boolean): MediaSource | null {
-  const server = servers.find(s => obj(s.snapshot) && Object.hasOwn(s.snapshot, "workflow"));
-  if (!server) return null;
+function evaluate(server: HubServer, responseCurrent: boolean): MediaSource {
   const workflow = (server.snapshot as unknown as Obj).workflow;
   const unavailable = (code: MediaUnavailable): MediaSource => ({ server, summary: null, unavailable: code });
   const health = hubServerHealth(server, responseCurrent);
@@ -131,6 +132,20 @@ export function mediaSource(servers: HubServer[], responseCurrent: boolean): Med
   }
   const parsed = summary(workflow);
   return parsed ? { server, summary: parsed, unavailable: null } : unavailable({ code: "notRunning" });
+}
+
+// The controller: the first current source among servers whose status carries
+// a `workflow` key. A GPU worker also carries the key (as null, next to its
+// `workflow_worker`), so it is only a candidate for a current summary, never
+// the one that explains why the media view is unavailable. Otherwise the first
+// non-worker candidate gives the reason (stale Hub response, offline/stale
+// server, not running, old sample).
+export function mediaSource(servers: HubServer[], responseCurrent: boolean): MediaSource | null {
+  const candidates = servers.filter(s => obj(s.snapshot) && Object.hasOwn(s.snapshot, "workflow"));
+  const evaluated = candidates.map(s => evaluate(s, responseCurrent));
+  return evaluated.find(e => !e.unavailable)
+    ?? evaluated.find(e => !obj((e.server.snapshot as unknown as Obj).workflow_worker))
+    ?? null;
 }
 
 export function machineKeys(server: HubServer): Set<string> {
@@ -179,8 +194,9 @@ export function machineMedia(index: Map<string, MachineMedia>, server: HubServer
           worker: found.worker ?? entry.worker }
       : entry;
   }
-  if (found && !found.tasks.length && found.worker?.current) {
-    // the bounded currents may leave a machine out; its heartbeat still knows
+  if (found && !found.tasks.length && found.worker?.state === "online" && found.worker.current) {
+    // the bounded currents may leave a machine out; its heartbeat still knows.
+    // A lost node's last heartbeat is not live work.
     found = { ...found, tasks: [found.worker.current] };
   }
   return found;
@@ -190,6 +206,7 @@ export interface SelfReport {
   state: string;
   connected: boolean;
   paused: boolean;
+  busy: boolean;
   current?: { stage?: string; phase?: string };
 }
 
@@ -201,7 +218,7 @@ export function selfReport(server: HubServer): SelfReport | null {
     ? { stage: text(own.current.stage, 64), phase: text(own.current.phase, 64) } : undefined;
   let state = text(own.state, 32) ?? "unknown";
   if (state === "running" && !current && own.busy !== true) state = "idle";
-  return { state, connected: own.connected === true, paused: own.paused === true, current };
+  return { state, connected: own.connected === true, paused: own.paused === true, busy: own.busy === true, current };
 }
 
 // Whether a machine takes part in media work, so its disabled legacy

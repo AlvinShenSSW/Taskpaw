@@ -40,7 +40,8 @@ export function MediaTaskLine({ task, machine }: { task: MediaTask; machine?: st
         {machine && <Typography variant="body2" fontWeight={600} sx={{ overflowWrap: "anywhere" }}>{machine}</Typography>}
         {task.film && <Typography variant="body2" sx={DATA}>{task.film}</Typography>}
         {task.stage && <Chip size="small" variant="outlined"
-          label={t(`media.stage.${task.stage}`, { defaultValue: task.stage })} />}
+          label={task.stage === "fetch" ? t("hub.media.fetch")  // a machine's prefetch (#351 currents)
+            : t(`media.stage.${task.stage}`, { defaultValue: task.stage })} />}
         {stage && <Typography variant="caption" color="text.secondary" sx={DATA}>
           {stage}{known ? ` · ${t(`jasna.${known}`)}` : ""}
         </Typography>}
@@ -73,10 +74,14 @@ function workerFacts(row: MediaWorker, t: T): string[] {
     }
     if (row.gpu.power_w !== undefined) parts.push(`${Math.round(row.gpu.power_w)}W`);
   }
-  if (row.staged) parts.push(t("hub.media.staged", { count: row.staged }));
-  for (const tr of row.transfers) {
-    parts.push(t(tr.dir === "up" ? "hub.media.upload" : "hub.media.download",
-      { film: tr.film, percent: tr.percent ?? "—" }));
+  if (row.state === "online") {
+    // like the GPU sample, a lost node's last prefetch and transfers are not current
+    if (row.staged) parts.push(t("hub.media.staged", { count: row.staged }));
+    for (const tr of row.transfers) {
+      const dir = tr.dir === "up" ? "hub.media.upload" : "hub.media.download";
+      parts.push(tr.percent === undefined ? t(`${dir}Unknown`, { film: tr.film })
+        : t(dir, { film: tr.film, percent: Math.round(tr.percent) }));
+    }
   }
   return parts;
 }
@@ -156,9 +161,9 @@ export function MachineMediaBlock({ media, self, source }: {
     const row = media.worker;
     body = <Stack spacing={1}>
       {media.tasks.map((item, i) => <MediaTaskLine key={`${item.film}-${i}`} task={item} />)}
-      {!media.tasks.length && <Typography variant="body2" color="text.secondary">
-        {row && row.state !== "online" ? workerFacts(row, t).slice(0, 2).join(" · ") : t("hub.media.idle")}
-      </Typography>}
+      {/* a lost/waiting node says so on its node line, never "idle" */}
+      {!media.tasks.length && (!row || row.state === "online") && <Typography variant="body2" color="text.secondary">
+        {t("hub.media.idle")}</Typography>}
       {row && <Typography variant="caption" color="text.secondary" sx={DATA}>
         {t("hub.media.nodeLine", { facts: workerFacts(row, t).join(" · ") })}</Typography>}
       {media.controller && source?.summary && <ControllerPart summary={source.summary} />}
@@ -166,10 +171,12 @@ export function MachineMediaBlock({ media, self, source }: {
   } else if (self) {
     const parts = [t("hub.media.selfReport"), t(self.connected ? "hub.media.connected" : "hub.media.disconnected")];
     if (self.paused) parts.push(t("hub.media.paused"));
-    parts.push(self.current
-      ? [self.current.stage && t(`media.stage.${self.current.stage}`, { defaultValue: self.current.stage }), self.current.phase]
-        .filter(Boolean).join(" ")
-      : t("hub.media.noTasks"));
+    if (self.current) {
+      parts.push([self.current.stage && t(`media.stage.${self.current.stage}`, { defaultValue: self.current.stage }),
+        self.current.phase].filter(Boolean).join(" "));
+    } else if (!self.busy) {
+      parts.push(t("hub.media.noTasks"));  // busy: unsettled work on disk, not "no task"
+    }
     body = <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
       {t(`hub.media.selfState.${self.state}`, { defaultValue: self.state })} · {parts.join(" · ")}
     </Typography>;
