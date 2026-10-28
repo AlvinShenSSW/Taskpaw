@@ -20,7 +20,7 @@ describe("R14 Hub event request evidence", () => {
   };
   it("shows loading rather than No events before the first response", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
-      ? Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) })
+      ? Promise.resolve(Response.json({ machine: "hub-box", servers: [], self: {}, acks: {} }))
       : new Promise(() => {})));
     await showEvents();
     expect(screen.queryByText(/No events yet/)).not.toBeInTheDocument();
@@ -28,7 +28,7 @@ describe("R14 Hub event request evidence", () => {
   });
   it("shows a safe first error and Retry rather than No events", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
-      ? Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) })
+      ? Promise.resolve(Response.json({ machine: "hub-box", servers: [], self: {}, acks: {} }))
       : Promise.reject(new Error("PRIVATE-UPSTREAM"))));
     await showEvents();
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load events");
@@ -41,10 +41,10 @@ describe("R14 Hub event request evidence", () => {
     let retryPending = false;
     let finishRetry!: (value: Response) => void;
     vi.stubGlobal("fetch", vi.fn((url: string) => {
-      if (url.includes("/status")) return Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) });
+      if (url.includes("/status")) return Promise.resolve(Response.json({ machine: "hub-box", servers: [], self: {}, acks: {} }));
       if (retryPending) return new Promise<Response>(resolve => { finishRetry = resolve; });
       if (fail) return Promise.reject(new Error("PRIVATE-UPSTREAM"));
-      return Promise.resolve({ ok: true, json: async () => ({ events: [{ id: 1, message: "retained fixture" }] }) });
+      return Promise.resolve(Response.json({ events: [{ id: 1, message: "retained fixture" }] }));
     }));
     const { qc } = await showEvents();
     await screen.findByText("retained fixture");
@@ -174,7 +174,9 @@ describe("R14 Hub event request evidence", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
       expect(fetcher.mock.calls.filter(([url]) => url.includes("/events"))).toHaveLength(count);
       view.unmount(); qc.clear();
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Streaming Response completion may queue one Query notify callback at
+      // this clock tick. Drain that callback, then prove no display/request timer.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
@@ -223,7 +225,7 @@ function stubFetch() {
     "fetch",
     vi.fn((url: string) => {
       const body = url.includes("/status") ? STATUS : { events: [] };
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      return Promise.resolve(Response.json(body));
     }),
   );
 }
@@ -245,13 +247,14 @@ describe("HubDashboard (#95)", () => {
   it("tallies fleet health from online + snapshot (ok / degraded / offline)", async () => {
     renderHub();
     const summary = await screen.findByLabelText(/Fleet health|机群健康/);
-    // 2 healthy, 1 degraded, 1 offline. Each count is scoped to its labelled row.
+    // 2 healthy, 1 degraded, 1 intentionally disabled; disabled is not a fault.
     const row = (re: RegExp) => within(summary).getByText(re).closest("p") as HTMLElement;
     expect(within(row(/healthy|正常/)).getByText("2")).toBeInTheDocument();
     expect(within(row(/degraded|降级/)).getByText("1")).toBeInTheDocument();
-    expect(within(row(/offline|离线/)).getByText("1")).toBeInTheDocument();
+    expect(within(row(/offline|离线/)).getByText("0")).toBeInTheDocument();
+    expect(within(row(/disabled|禁用/)).getByText("1")).toBeInTheDocument();
     // Status conveyed by a labelled dot, not color alone (a11y §1): one per count.
-    expect(within(summary).getAllByLabelText(/status:/).length).toBe(3);
+    expect(within(summary).getAllByLabelText(/status:/).length).toBe(4);
   });
 
   // Each machine is now a full-width row (a Card), not a click-to-expand button (#131).
@@ -311,7 +314,7 @@ describe("HubDashboard (#95)", () => {
   it("filters the events feed by server on the Events tab (#133)", async () => {
     const fetchMock = vi.fn((url: string) => {
       const body = url.includes("/status") ? STATUS : { events: [] };
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      return Promise.resolve(Response.json(body));
     });
     vi.stubGlobal("fetch", fetchMock);
     renderHub();
@@ -342,7 +345,7 @@ describe("hubStatus auto-refresh (#95)", () => {
     try {
       const fetchMock = vi.fn((url: string) => {
         const body = url.includes("/status") ? STATUS : { events: [] };
-        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+        return Promise.resolve(Response.json(body));
       });
       vi.stubGlobal("fetch", fetchMock);
       renderHub();
@@ -370,8 +373,7 @@ describe("#210 actual Hub task cards", () => {
       snapshot: { version, machine: "agent", monitors: { "task-fixture": { state: "running", type_id: type, metrics } } } }],
   });
   function transport(status: unknown, code = 404, error = "film_list_unavailable") {
-    const mock = vi.fn((input: string) => Promise.resolve({ ok: input.endsWith("/status"), status: input.endsWith("/status") ? 200 : code,
-      json: async () => input.endsWith("/status") ? status : { error, detail: "never display raw upstream" } }));
+    const mock = vi.fn((input: string) => Promise.resolve(Response.json(input.endsWith("/status") ? status : { error, detail: "never display raw upstream" }, { status: input.endsWith("/status") ? 200 : code })));
     vi.stubGlobal("fetch", mock); return mock;
   }
   it.each(["jasna", "avsubs"])("renders %s stepper, model, icon and safe tiles", async type => {
@@ -418,14 +420,14 @@ describe("#210 actual Hub task cards", () => {
   it.each(["offline", "disabled", "tab", "removed"])("stops film polling and drops late feedback on %s; reconnect starts fresh", async transition => {
     vi.useFakeTimers();
     let status = fleet("avsubs", { films: snapshotFilms });
-    let resolve!: (value: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
+    let resolve!: (value: Response) => void;
     let delayed = false;
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       calls.push(url);
-      if (url.endsWith("/status")) return Promise.resolve({ ok: true, json: async () => status });
+      if (url.endsWith("/status")) return Promise.resolve(Response.json(status));
       if (delayed) return new Promise(r => { resolve = r; });
-      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: "film_list_unavailable" }) });
+      return Promise.resolve(Response.json({ error: "film_list_unavailable" }, { status: 404 }));
     }));
     const view = renderHub();
     try {
@@ -443,7 +445,7 @@ describe("#210 actual Hub task cards", () => {
       expect(screen.queryByText("snapshot-only.mp4")).toBeNull();
       const count = calls.filter(u => u.includes("/monitors/films")).length;
       await act(async () => {
-        resolve({ ok: false, status: 504, json: async () => ({ error: "agent_timeout" }) });
+        resolve(Response.json({ error: "agent_timeout" }, { status: 504 }));
         await vi.advanceTimersByTimeAsync(10000);
       });
       expect(calls.filter(u => u.includes("/monitors/films"))).toHaveLength(count);
@@ -477,7 +479,7 @@ it("shows online activity provenance and hides an offline stale badge", async ()
   await i18n.changeLanguage("en");
   const metrics = { ai_state: "busy", busy_tools: ["codex"], tools: [{tool:"codex",state:"busy",present:true,age_s:null,source:"session",host:"vscode"}] };
   const status = { ...STATUS, servers: [true,false].map((online,n) => ({id:n+1,name:`activity-${n}`,ip:"10.0.0.1",port:5680,enabled:1,online,snapshot:{monitors:{ai:{state:"running",type_id:"dev_activity",metrics}}}})) };
-  vi.stubGlobal("fetch",vi.fn((url:string)=>Promise.resolve({ok:true,json:()=>Promise.resolve(url.includes("/status")?status:{events:[]})})));
+  vi.stubGlobal("fetch",vi.fn((url:string)=>Promise.resolve(Response.json(url.includes("/status")?status:{events:[]}))));
   renderHub();
   const on = (await screen.findByText("activity-0")).closest(".MuiCard-root") as HTMLElement;
   const off = (await screen.findByText("activity-1")).closest(".MuiCard-root") as HTMLElement;

@@ -16,17 +16,21 @@ name: release
 # installers ship UNSIGNED (the prior behaviour) — nothing breaks (#112).
 on:
   workflow_dispatch:
+    inputs:
+      role:
+        description: Desktop installer role
+        type: choice
+        default: agent
+        options: [agent, hub]
   push:
     tags: ["v[0-9]*"]
 
 jobs:
   bundle:
+    if: github.event_name != 'workflow_dispatch' || inputs.role != 'hub'
     strategy:
       fail-fast: false
-      # AGENT installers only. The Hub runs HEADLESS (design §7.1: `python -m
-      # taskpaw_v3.hub run`); a GUI that spawns+kills the Hub backend on window
-      # close would risk silently stopping aggregation — a dashboard-only client
-      # is tracked separately (#52). macOS ARM64 + Intel + Windows.
+      # Agent ownership/packaging remains separate from the Mac-only Hub job.
       matrix:
         include:
           - os: macos-15
@@ -170,3 +174,54 @@ jobs:
             taskpaw_v3/src-tauri/target/release/bundle/**/*.app
             taskpaw_v3/src-tauri/target/release/bundle/**/*.msi
             taskpaw_v3/src-tauri/target/release/bundle/**/*.exe
+
+  hub:
+    if: github.event_name == 'workflow_dispatch' && inputs.role == 'hub'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            label: macos-intel
+    runs-on: ${{ matrix.os }}
+    env:
+      TASKPAW_BUILD_ROLE: hub
+      TASKPAW_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: astral-sh/setup-uv@v7
+      - name: Install Python and build dependencies
+        run: uv sync --frozen --extra build --extra v3
+      - name: Build and exercise the native Hub service
+        # Exclusive fresh VM: isolated HOME, fake Agent/OpenClaw, fixed owned
+        # LaunchAgent installed/stopped/uninstalled serially by the smoke.
+        env:
+          TASKPAW_MACOS_SMOKE_ISOLATION: github-hosted-fresh
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY || secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+          TASKPAW_MACOS_SIGNING_KEYCHAIN: ${{ vars.TASKPAW_MACOS_SIGNING_KEYCHAIN }}
+          TASKPAW_MACOS_NOTARY_PROFILE: ${{ vars.TASKPAW_MACOS_NOTARY_PROFILE }}
+        run: uv run python scripts/build.py
+      - name: Collect verified Hub installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: taskpaw-hub-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            taskpaw_v3/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            taskpaw_v3/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.zip
+            taskpaw_v3/src-tauri/target/${{ matrix.target }}/release/bundle/macos-verification.json

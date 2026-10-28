@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaskPaw Hub — 等待后台服务</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { margin: 0; padding: 48px 24px; line-height: 1.7; }
+    main { max-width: 720px; margin: 8vh auto; }
+    h1 { font-size: 28px; line-height: 1.3; }
+    h2 { font-size: 18px; margin-top: 32px; }
+    p { opacity: .85; }
+    .state { display: inline-block; border: 1px solid #8888; border-radius: 8px; padding: 6px 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="state" role="status">等待本机 Hub 后台服务 · Waiting for the local Hub</div>
+    <h1>TaskPaw Hub</h1>
+    <p>尚未找到有效、安全的 Hub 连接凭据。后台服务可能尚未安装或启动，也可能正在重新启动。</p>
+    <p>首次安装：先将安装包中的 TaskPaw Hub.app 拖入“应用程序”，再双击同一安装包中的 <strong>Install Hub.command</strong>，无需输入命令。它会安装并启动后台服务，然后打开 Hub。</p>
+    <p>如果后台已安装，请通过安装包中的 Manage Hub Service.command 检查服务状态，并按安装说明查看日志。连接凭据就绪后，此窗口会自动连接。</p>
+    <p>关闭或重新打开此窗口只影响监控界面，不会启动、停止或重启后台服务。后台服务运行时，聚合与通知会继续。</p>
+    <h2>Independent background service</h2>
+    <p>No valid protected Hub credentials are available yet. For first installation, drag TaskPaw Hub.app to Applications, then double-click <strong>Install Hub.command</strong> in the same package. No command input is needed; it installs and starts the service, then opens the Hub.</p>
+    <p>If the service was already installed, use Manage Hub Service.command to check its status and follow the installation guide to view logs. This window reconnects automatically when credentials become available.</p>
+    <p>Closing or reopening this dashboard does not start, stop or restart the Hub. Aggregation and notifications continue while its background service is running.</p>
+  </main>
+</body>
+</html>

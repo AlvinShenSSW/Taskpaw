@@ -15,6 +15,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Callable
 
 from taskpaw_v3.core.config import HubConfig, load_yaml
 from taskpaw_v3.hub.server.app import run_hub
@@ -115,7 +116,11 @@ def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
 
 
 def run_from_config(
-    config_path: Path | None = None, db_path: Path | None = None
+    config_path: Path | None = None,
+    db_path: Path | None = None,
+    *,
+    reclaim_stale: bool = True,
+    on_ready: Callable[[HubConfig, Path], None] | None = None,
 ) -> int:
     path = config_path or default_config_path()
     if not path.exists():
@@ -163,7 +168,20 @@ def run_from_config(
 
     # #299 R15: the UI's settings are store overrides over hub.yaml
     effective = effective_hub_config(config, store)
-    run_hub(effective, store, block=True, config_path=path, yaml_config=config)
+    shutdown = run_hub(
+        effective,
+        store,
+        block=on_ready is None,
+        config_path=path,
+        yaml_config=config,
+        reclaim_stale=reclaim_stale,
+    )
+    if on_ready is not None:
+        try:
+            on_ready(effective, resolved_db)
+            shutdown.stopped.wait()
+        finally:
+            shutdown.shutdown()
     return restart.exit_code(0)
 
 

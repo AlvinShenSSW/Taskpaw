@@ -1,0 +1,16 @@
+TaskPaw Hub 完整安装包（监控界面＋独立后台服务）
+
+1. 将 TaskPaw Hub.app 拖入 Applications（也支持 ~/Applications）。
+2. 双击本安装包中的 Install Hub.command，等待完成；成功后会自动打开监控界面。
+
+无需安装 Python、Node 或另行下载后端。请使用当前登录的 Mac 用户安装，不要使用 sudo。
+仅打开 App 不会安装或启动后台服务。若界面显示等待凭据，请完成第 2 步；若安装失败，请保留终端错误。
+
+安装后，后台服务会在用户登录时运行；关闭监控窗口或退出 App 不会停止聚合与通知。
+重复运行 Install Hub.command 会复用现有服务管理器；更新时先替换 Applications 中的 App，再运行此入口。
+需要查看状态、停止、启动、重启或卸载服务时，双击 Manage Hub Service.command，按提示输入对应操作。
+停止或卸载服务会保留配置与历史数据。卸载 App 本身不等于卸载后台服务。
+日志位于 ~/Library/Application Support/TaskPaw/HubService/hub.log。
+
+ad-hoc 签名包尚未经 Apple 公证。其他 Mac 的 Gatekeeper 放行、实际窗口打开及重新登录行为仍需现场验证。
+若 macOS 拒绝运行，请保留系统提示；安装入口不会自动移除隔离属性、放宽权限或绕过系统保护。

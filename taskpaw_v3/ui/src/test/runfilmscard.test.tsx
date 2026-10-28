@@ -32,7 +32,7 @@ const smallPage = (films: RunFilm[], filter: RunFilter = "all") => {
 };
 const metrics = { film: "PQRS-current.mp4", steps: [{ key: "restore", state: "active" }],
   films: ["PQRS-fallback-1.mp4", "PQRS-fallback-2.mp4"].map(name => ({ name, steps: { restore: "pending" }, status: "pending" })), films_more: 23 };
-const response = (body: unknown, ok = true) => ({ ok, status: ok ? 200 : 404, json: async () => body });
+const response = (body: unknown, ok = true) => Response.json(body, { status: ok ? 200 : 404 });
 function deferred() {
   let resolve!: (value: ReturnType<typeof response>) => void;
   const promise = new Promise<ReturnType<typeof response>>(r => { resolve = r; });
@@ -367,7 +367,7 @@ describe("#210 Hub run films", () => {
     mountHub(); await screen.findByText(pager(1));
     const failed = deferred(); serve = () => failed.promise; fireEvent.click(filterButton("open"));
     const recovery = deferred(); serve = () => recovery.promise;
-    await act(async () => failed.resolve({ ok: false, status, json: async () => ({ error: status === 404 ? "film_list_unavailable" : "agent_timeout" }) }));
+    await act(async () => failed.resolve(Response.json({ error: status === 404 ? "film_list_unavailable" : "agent_timeout" }, { status })));
     await waitFor(() => expect(requests.filter(u => u.searchParams.get("filter") === "done")).toHaveLength(2));
     if (status === 404) {
       expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
@@ -400,7 +400,7 @@ it("#210 SR-2: empty-success restart fallback retains the transient error reason
   serve = () => response(smallPage([], "done"));
   render(<MonitorMetrics metrics={metrics} taskName="same" taskType="jasna" filmSource={{ kind: "hub", serverId: 1 }} />, { wrapper });
   await screen.findByText("正在同步新一轮影片，暂时显示状态中的影片。");
-  serve = () => ({ ok: false, status: 504, json: async () => ({ error: "agent_timeout" }) });
+  serve = () => Response.json({ error: "agent_timeout" }, { status: 504 });
   await act(async () => { await qc.invalidateQueries({ queryKey: ["hubRunFilms"] }); });
   expect(await screen.findByText("读取影片列表超时，将自动重试。")).toBeInTheDocument();
   expect(screen.getByText("显示上次成功读取的列表。")).toBeInTheDocument();

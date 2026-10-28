@@ -57,6 +57,11 @@ MAGICS = {
     b"\xbf\xba\xfe\xca",
 }
 TAIL_LIMIT = 65536
+HUB_PACKAGE_FILES = (
+    ("Manage Hub Service.command", 0o755),
+    ("Install Hub.command", 0o755),
+    ("Hub 安装说明.txt", 0o644),
+)
 _cancellation = None
 
 
@@ -494,7 +499,13 @@ class Isolation:
                 and self.env.get("RUNNER_OS") == "macOS"
                 and self.env.get("RUNNER_ARCH")
                 == ("ARM64" if self.plan.arch == "arm64" else "X64")
-                and self.env.get("GITHUB_JOB") == "bundle"
+                and (
+                    self.env.get("GITHUB_JOB") == "bundle"
+                    or (
+                        self.env.get("GITHUB_JOB") == "hub"
+                        and self.env.get("TASKPAW_BUILD_ROLE") == "hub"
+                    )
+                )
                 and bool(re.fullmatch(r"[0-9]+", self.env.get("GITHUB_RUN_ID", "")))
             )
             if not valid:
@@ -876,13 +887,13 @@ def verify_app(app, plan, env, root):
     return sidecar, verify_archive(sidecar, plan, env, root)
 
 
-def ready_line(line, base):
+def ready_line(line, base, *, role="agent"):
     try:
         data = json.loads(line)
         return (
             isinstance(data, dict)
             and data.get("taskpaw_ready") is True
-            and data.get("role") == "agent"
+            and data.get("role") == role
             and data.get("base_url") == base
         )
     except (ValueError, UnicodeError):
@@ -998,7 +1009,23 @@ def smoke_lineage(config, previous=None):
         raise BuildError("macos_smoke_lineage_invalid") from None
 
 
-def smoke(sidecar, plan, isolation, env, version, *, upgrade=False):
+def smoke(
+    sidecar,
+    plan,
+    isolation,
+    env,
+    version,
+    *,
+    upgrade=False,
+    role="agent",
+    installer=None,
+):
+    if role == "hub":
+        from scripts.macos_hub_smoke import smoke as hub_smoke
+
+        return hub_smoke(sidecar, plan, isolation, env, version, installer=installer)
+    if role != "agent":
+        raise BuildError("macos_bundle_role_invalid")
     # This is intentionally before HOME/ports or any backend Popen.
     isolation.require()
     with tempfile.TemporaryDirectory(prefix="taskpaw-release-smoke-") as tmp:
@@ -1265,6 +1292,40 @@ def zip_app(app, path, env):
     tool("app_zip", ["ditto", "-c", "-k", "--keepParent", str(app), str(path)], env=env)
 
 
+def bundle_role(product_name, identifier=None):
+    roles = {"TaskPaw Agent": "agent", "TaskPaw Hub": "hub"}
+    role = roles.get(product_name)
+    if role is None or (
+        identifier is not None and identifier != "com.taskpaw.app." + role
+    ):
+        raise BuildError("macos_bundle_role_invalid")
+    return role
+
+
+def stage_hub_manager(staging):
+    """Explicit operator entries and instructions, never run by the GUI."""
+    for name, mode in HUB_PACKAGE_FILES:
+        source = Path(__file__).with_name(name)
+        target = staging / name
+        shutil.copyfile(source, target)
+        target.chmod(mode)
+
+
+def verify_hub_package(staging):
+    for name, mode in HUB_PACKAGE_FILES:
+        target = staging / name
+        try:
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or target.read_bytes() != Path(__file__).with_name(name).read_bytes()
+                or (os.name != "nt" and stat.S_IMODE(target.stat().st_mode) != mode)
+            ):
+                raise BuildError("macos_hub_package_invalid")
+        except OSError:
+            raise BuildError("macos_hub_package_invalid") from None
+
+
 def verify_zip(path, plan, isolation, env, root, version, product_name):
     with tempfile.TemporaryDirectory(prefix="taskpaw-zip-verification-") as tmp:
         dest = Path(tmp) / "TaskPaw smoke 測試"
@@ -1273,7 +1334,7 @@ def verify_zip(path, plan, isolation, env, root, version, product_name):
         sidecar, _ = verify_app(dest / (product_name + ".app"), plan, env, root)
         if not os.access(sidecar, os.X_OK):
             raise BuildError("macos_archive_executable_mode_missing")
-        smoke(sidecar, plan, isolation, env, version)
+        smoke(sidecar, plan, isolation, env, version, role=bundle_role(product_name))
 
 
 def verify_dmg(path, plan, isolation, env, root, version, product_name):
@@ -1299,7 +1360,19 @@ def verify_dmg(path, plan, isolation, env, root, version, product_name):
             app.parent.mkdir(mode=0o700)
             shutil.copytree(mount / (product_name + ".app"), app, symlinks=True)
             sidecar, _ = verify_app(app, plan, env, root)
-            smoke(sidecar, plan, isolation, env, version)
+            installer = None
+            if bundle_role(product_name) == "hub":
+                verify_hub_package(mount)
+                installer = mount / "Install Hub.command"
+            return smoke(
+                sidecar,
+                plan,
+                isolation,
+                env,
+                version,
+                role=bundle_role(product_name),
+                installer=installer,
+            )
         finally:
             # Also covers attach failure after a successful mount operation.
             if os.path.ismount(mount):
@@ -1307,6 +1380,7 @@ def verify_dmg(path, plan, isolation, env, root, version, product_name):
 
 
 def finalize(plan, isolation, env, root, cfg):
+    role = bundle_role(cfg["productName"], cfg["identifier"])
     bundle = plan.bundle_root(root)
     app = bundle / "macos" / (cfg["productName"] + ".app")
     if not app.is_dir():
@@ -1322,7 +1396,9 @@ def finalize(plan, isolation, env, root, cfg):
         for path in [*bundles, staged_app]:
             sign(path, plan, env, root)
         sidecar, count = verify_app(staged_app, plan, env, root)
-        smoke(sidecar, plan, isolation, env, cfg["version"], upgrade=True)
+        runtime_evidence = smoke(
+            sidecar, plan, isolation, env, cfg["version"], upgrade=True, role=role
+        )
         if plan.mode == "formal":
             submitted_zip = work / "submitted-app.zip"
             zip_app(staged_app, submitted_zip, env)
@@ -1348,6 +1424,8 @@ def finalize(plan, isolation, env, root, cfg):
             staging.mkdir()
             shutil.copytree(staged_app, staging / app.name, symlinks=True)
             (staging / "Applications").symlink_to("/Applications")
+            if role == "hub":
+                stage_hub_manager(staging)
             dmg = work / (stem + ".dmg")
             tool(
                 "dmg_create",
@@ -1370,9 +1448,11 @@ def finalize(plan, isolation, env, root, cfg):
                 signature(dmg, plan, env, root, dmg=True)
                 notarize(dmg, plan, env)
                 staple(dmg, env)
-            verify_dmg(
+            dmg_evidence = verify_dmg(
                 dmg, plan, isolation, env, root, cfg["version"], cfg["productName"]
             )
+            if role == "hub":
+                runtime_evidence = dmg_evidence
             artifacts.append((dmg, bundle / "dmg" / dmg.name))
         for source, dest in artifacts:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1384,7 +1464,7 @@ def finalize(plan, isolation, env, root, cfg):
         shutil.copytree(staged_app, app, symlinks=True)
         summary = {
             "schema_version": 1,
-            "role": cfg["identifier"].rsplit(".", 1)[-1],
+            "role": role,
             "version": cfg["version"],
             "target": plan.target,
             "mode": plan.mode,
@@ -1401,6 +1481,8 @@ def finalize(plan, isolation, env, root, cfg):
                 for _, dest in artifacts
             ],
         }
+        if role == "hub":
+            summary["hub_runtime"] = runtime_evidence
         commit, _ = tool(
             "source_revision", ["git", "rev-parse", "HEAD"], env=env, cwd=root
         )

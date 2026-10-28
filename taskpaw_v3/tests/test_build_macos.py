@@ -293,6 +293,24 @@ def test_hosted_context_lock_and_invalidation(tmp_path, monkeypatch):
         second.close()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mac-only execution context lock")
+def test_hub_hosted_job_requires_explicit_hub_role(tmp_path, monkeypatch):
+    for role in (None, "agent", "other"):
+        env = {**HOSTED, "GITHUB_JOB": "hub"}
+        if role is not None:
+            env["TASKPAW_BUILD_ROLE"] = role
+        isolation = hosted_isolation(tmp_path, monkeypatch, env)
+        with pytest.raises(mac.BuildError, match="isolation_required"):
+            isolation.require()
+        assert isolation.fd is None
+    with hosted_isolation(
+        tmp_path,
+        monkeypatch,
+        {**HOSTED, "GITHUB_JOB": "hub", "TASKPAW_BUILD_ROLE": "hub"},
+    ) as isolation:
+        assert isolation.fd is not None
+
+
 def attestation(tmp_path, monkeypatch):
     boot = str(uuid.uuid4())
     monkeypatch.setattr(mac, "boot_uuid", lambda: boot)
