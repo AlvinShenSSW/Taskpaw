@@ -316,3 +316,33 @@ def test_idle_worker_self_report_is_not_running():
     assert "- 媒体处理中心: stopped（本机自报 · 未连接主控 · 无运行任务）" in section(
         text, "Wildpig"
     )
+
+
+def test_worker_omitted_from_bounded_currents_is_not_idle():
+    # Codex: the currents preview is capped, the worker row still has `current`
+    workflow = {
+        **controller_311(),
+        "currents": [],
+        "currents_total": 17,
+        "currents_more": 17,
+        "workers": [
+            worker(
+                "BlackSilverPig",
+                current={
+                    "film": "FILM-300",
+                    "stage": "restore",
+                    "phase": "running",
+                    "progress": "修复 · 阶段 3/4 denoise · 51% · 剩余 07:05",
+                    "ltx": ltx(3, "denoise", 51.0),
+                },
+            )
+        ],
+        "workers_total": 1,
+        "workers_more": 0,
+    }
+    silver = section(fleet(workflow), "BlackSilverPig")
+    assert "idle" not in silver
+    assert (
+        "- 媒体处理中心: running | FILM-300 | 修复 · LTX 3/4 denoise 51% · 剩余 07:05"
+        in silver
+    )

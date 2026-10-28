@@ -751,7 +751,12 @@ def _machine_media(
             lines.append(f"- 媒体处理中心: running | {name} | {' · '.join(parts)}")
     if not lines and worker is not None:
         state = worker.get("state")
-        if state == "online":
+        # the currents preview is bounded: a worker left out of it still
+        # reports its own running stage, so idle needs a null `current`
+        name, parts = _workflow_detail(worker.get("current"), point)
+        if state == "online" and name:
+            lines.append(f"- 媒体处理中心: running | {name} | {' · '.join(parts)}")
+        elif state == "online":
             lines.append("- 媒体处理中心: idle（无运行任务）")
         elif state in ("lost", "waiting"):
             lines.append(f"- 媒体处理中心: {state}（{_worker_text(worker)}）")
