@@ -35,6 +35,16 @@ MAX_CURRENTS = 16  # #351: one current per machine, with explicit omissions
 MAX_FILMS = 32
 MAX_SUMMARY_TEXT = 400
 _CLEANUPS: tuple[m.Stage, ...] = ("cleanup_input", "cleanup_workcopy")
+_LTX_TOKENS = (
+    "percent_text",
+    "current",
+    "total",
+    "rate_value",
+    "rate_unit",
+    "elapsed",
+    "eta",
+    "run_eta",
+)
 
 
 class WorkflowEvents:
@@ -540,4 +550,10 @@ def _current(value: Any) -> dict[str, Any] | None:
             for k in ("stage_index", "stage_total", "stage_name", "percent", "mode")
             if k in ltx
         }
+        # #359: the tqdm tokens the Hub dashboard shows; never the raw line
+        result["ltx"].update(
+            (k, ltx[k])
+            for k in _LTX_TOKENS
+            if isinstance(ltx.get(k), str) and len(ltx[k]) <= 64
+        )
     return copy.deepcopy(result)
