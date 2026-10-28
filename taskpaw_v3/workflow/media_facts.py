@@ -276,6 +276,8 @@ def _stream(data: dict[str, object], issues: list[ProbeIssue]) -> RawStreamFacts
                         source="ticks", stream_index=index, seconds=seconds
                     )
                 )
+    if len(durations) == 2 and _print_rounding(*durations):
+        durations = durations[1:]
     order = data.get("field_order", "unknown")
     if order not in ("progressive", "tt", "bb", "tb", "bt", "unknown"):
         order = "unknown"
@@ -329,6 +331,20 @@ def _stream(data: dict[str, object], issues: list[ProbeIssue]) -> RawStreamFacts
 
 def _milliseconds(value: Rational) -> int:
     return (2 * value.numerator * 1000 + value.denominator) // (2 * value.denominator)
+
+
+def _print_rounding(printed: DurationObservation, ticks: DurationObservation) -> bool:
+    """ffprobe prints `duration` with six decimals, so a tick duration just below a
+    half-millisecond is printed onto it and rounds up a millisecond (#349). Such a
+    printed value adds nothing to the exact ticks and is dropped, which keeps the
+    facts valid for workers that still require equal milliseconds."""
+    exact = [
+        Fraction(value.seconds.numerator, value.seconds.denominator)
+        for value in (printed, ticks)
+    ]
+    return _milliseconds(printed.seconds) != _milliseconds(ticks.seconds) and abs(
+        exact[0] - exact[1]
+    ) <= Fraction(1, 1_000_000)
 
 
 def parse_ffprobe(payload: bytes, *, limits: ProbeParseLimits) -> RawMediaFacts:
