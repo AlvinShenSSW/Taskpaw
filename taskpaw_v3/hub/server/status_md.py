@@ -335,7 +335,8 @@ def _workflow_time(value: Any) -> datetime | None:
         return None
 
 
-_ETA = re.compile(r"剩余 (\d+:\d{2}:\d{2})")
+# Jasna prints h:mm:ss or mm:ss (`run 09:54 left`), passed on as `剩余 …`
+_ETA = re.compile(r"剩余 ((?:\d+:)?\d{1,2}:\d{2})")
 
 
 def _workflow_progress(current: Any, now: datetime) -> str:
@@ -765,12 +766,17 @@ _STAGES = {"restore": "修复", "asr": "识别", "fetch": "下载"}
 
 def _self_report(own: dict) -> str:
     """A worker's own `/status.workflow_worker` when no current controller
-    summary names it (#355): state, controller link, pause and its stage."""
+    summary names it (#355): state, controller link, pause and its stage.
+    `running` is the worker service's state, so a running service with no
+    stage and not busy reads `idle`."""
     state = _media_text(own.get("state")) or "unknown"
+    current = own.get("current")
+    working = isinstance(current, dict) or own.get("busy") is True
+    if state == "running" and not working:
+        state = "idle"
     parts = ["本机自报", "已连接主控" if own.get("connected") is True else "未连接主控"]
     if own.get("paused") is True:
         parts.append("已暂停")
-    current = own.get("current")
     if isinstance(current, dict) and isinstance(current.get("stage"), str):
         stage = _STAGES.get(current["stage"], _media_text(current["stage"], 32))
         phase = _media_text(current.get("phase"), 32)

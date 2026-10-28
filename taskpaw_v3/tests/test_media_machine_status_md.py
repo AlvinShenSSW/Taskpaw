@@ -281,3 +281,38 @@ def test_offline_server_keeps_controller_view_indented():
     assert silver.startswith("## BlackSilverPig: OFFLINE")
     assert "\n  媒体处理中心: running | FILM-107 | 修复" in silver
     assert "\n- " not in silver  # an OFFLINE section has no monitor lines
+
+
+def test_ltx_remaining_time_under_an_hour_is_kept():
+    # B1: Jasna prints `run 09:54 left`; exec_restore passes it on as `剩余 09:54`
+    workflow = controller_311()
+    workflow["currents"][1]["progress"] = "修复 · 阶段 2/4 encode · 36% · 剩余 09:54"
+    silver = section(fleet(workflow), "BlackSilverPig")
+    assert "LTX 2/4 encode 21% · 剩余 09:54 · 已用 " in silver
+
+
+def test_idle_worker_self_report_is_not_running():
+    # I-2: `running` is the worker service state, not a task
+    idle = {
+        "state": "running",
+        "reason": "",
+        "connected": True,
+        "routes": 0,
+        "current": None,
+        "paused": False,
+        "busy": False,
+    }
+    stopped = {**idle, "state": "stopped", "connected": False}
+    text = fleet(
+        None,
+        extra=[
+            server("Bushpig", {"monitors": {}, "workflow_worker": idle}),
+            server("Wildpig", {"monitors": {}, "workflow_worker": stopped}),
+        ],
+    )
+    assert "- 媒体处理中心: idle（本机自报 · 已连接主控 · 无运行任务）" in section(
+        text, "Bushpig"
+    )
+    assert "- 媒体处理中心: stopped（本机自报 · 未连接主控 · 无运行任务）" in section(
+        text, "Wildpig"
+    )
