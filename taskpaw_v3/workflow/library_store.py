@@ -476,6 +476,22 @@ class LibraryStore:
             ).rowcount:
                 raise LibraryError(404, "片库不存在")
 
+    def reorder(self, ids: list[str]) -> list[dict[str, Any]]:
+        """The actor libraries' priority (§8 `priority`): `ids` is every actor
+        library exactly once, in the new order; categories keep theirs."""
+        with self.transaction() as conn:
+            current = {
+                row["id"]
+                for row in conn.execute("SELECT id FROM libraries WHERE kind='actor'")
+            }
+            if len(ids) != len(set(ids)) or set(ids) != current:
+                raise LibraryError(422, "顺序必须恰好包含每个演员片库一次")
+            conn.executemany(
+                "UPDATE libraries SET position=? WHERE id=?",
+                [(position, library_id) for position, library_id in enumerate(ids, 1)],
+            )
+        return self.libraries()
+
     def unreachable(self) -> list[tuple[str, str]]:
         """(id, path) of every library whose last scan could not reach it."""
         with self.reading() as conn:

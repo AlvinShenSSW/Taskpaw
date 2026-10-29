@@ -685,6 +685,34 @@ def test_an_alias_hit_returns_every_location_of_the_group(library):
     assert names(store.search("hana", aliases=False)) == []
 
 
+def test_reorder_sets_the_actor_priority_that_preselects_a_location(library, tmp_path):
+    """#365: the 归档规则 order is `position`; `priority` follows it (§8)."""
+    store, a, b = library
+    cat = store.add_library("category", str(root(tmp_path, "cat")))
+    by_id = {lib["id"]: lib for lib in store.libraries()}
+    assert (by_id[a]["position"], by_id[b]["position"]) == (1, 2)
+
+    def chosen():
+        selected = store.candidates(["仓木华"], "X")["selected"]
+        assert selected["kind"] == "performer"
+        return next(
+            item["library_id"]
+            for item in store.search("仓木华")["items"]
+            if item["id"] == selected["id"]
+        )
+
+    assert chosen() == a
+    listed = store.reorder([b, a])
+    assert [lib["id"] for lib in listed if lib["kind"] == "actor"] == [b, a]
+    by_id = {lib["id"]: lib for lib in listed}
+    assert (by_id[b]["position"], by_id[a]["position"]) == (1, 2)
+    assert by_id[cat["id"]]["position"] == cat["position"]  # categories untouched
+    assert chosen() == b
+    for wrong in ([b], [b, a, a], [b, a, cat["id"]], [b, "nope"], []):
+        expect(422, store.reorder, wrong)
+    assert [lib["id"] for lib in store.libraries() if lib["kind"] == "actor"] == [b, a]
+
+
 def test_fuzzy_hits_are_listed_and_flagged(library):
     store, _, _ = library
     assert names(store.search("葵つかさ")) == []

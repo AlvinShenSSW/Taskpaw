@@ -1,12 +1,15 @@
 // 片库与规则 · 归档规则 (#361 §8): every switch is saved on its own (「规则已保存」); the fixed rules
 // have no switch.
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
-import { type Library, type LibraryRules, type MultiLocation } from "../../api";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type Library, type LibraryRules, type MultiLocation } from "../../api";
 import { Toggle } from "./LibraryParts";
-import { actorLibraries, letters, useRules, useSaveRules } from "./libraryModel";
+import { actorLibraries, LIBRARIES_KEY, letters, RULES_KEY, useRules, useSaveRules } from "./libraryModel";
 import { Chip, Icon, Notice } from "./parts";
-import { errorText } from "./workspace";
+import { errorText, useWorkspace } from "./workspace";
 
 type Flag = { [K in keyof LibraryRules]: LibraryRules[K] extends boolean ? K : never }[keyof LibraryRules];
 
@@ -21,9 +24,32 @@ const FIXED: Array<[string, string]> = [
   ["只读片库不作入库目标", "只读片库只用来匹配和查重，不会往里写。"],
 ];
 
+// The new order of every actor library after moving `id` past its archive-role neighbour (read-only
+// libraries keep their places: they are never targets, so they are not ranked).
+function moved(actors: Library[], id: string, step: -1 | 1): string[] {
+  const ids = actors.map((l) => l.id);
+  const ranked = actors.filter((l) => l.role === "archive").map((l) => l.id);
+  const other = ranked[ranked.indexOf(id) + step];
+  const i = ids.indexOf(id);
+  const j = ids.indexOf(other);
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  return ids;
+}
+
 export function RulesTab({ libraries }: { libraries: Library[] }) {
+  const ws = useWorkspace();
+  const qc = useQueryClient();
   const rules = useRules();
   const save = useSaveRules();
+  const order = useMutation({
+    mutationFn: (ids: string[]) => api.libraryOrder(ids),
+    onSuccess: (list) => {
+      qc.setQueryData(LIBRARIES_KEY, list);
+      void qc.invalidateQueries({ queryKey: RULES_KEY });  // an unset 新演员 default follows the order
+      ws.toast("规则已保存");
+    },
+    onError: (e) => ws.toast(errorText(e)),
+  });
   const r = rules.data;
   if (rules.isLoading) return <p className="muted">正在读取归档规则…</p>;
   if (rules.error || !r) return <Notice tone="red" icon={WarningAmberIcon}>无法读取归档规则：{errorText(rules.error)}</Notice>;
@@ -62,7 +88,16 @@ export function RulesTab({ libraries }: { libraries: Library[] }) {
                       <li key={l.id} className={ro ? "ro" : undefined}>
                         <span className="rank">{archiveRank.get(l.id) ?? "—"}</span>
                         <div className="grow"><strong className="small">{letter[l.id]} · {l.label}</strong><div className="path tiny">{l.path}</div></div>
-                        {ro && <Chip>只读</Chip>}
+                        {ro ? <Chip>只读</Chip> : (
+                          <>
+                            <button type="button" className="btn ghost icon-btn small" aria-label={`上移 ${l.label}`}
+                              disabled={order.isPending || archiveRank.get(l.id) === 1}
+                              onClick={() => order.mutate(moved(actors, l.id, -1))}><Icon of={KeyboardArrowUpIcon} /></button>
+                            <button type="button" className="btn ghost icon-btn small" aria-label={`下移 ${l.label}`}
+                              disabled={order.isPending || archiveRank.get(l.id) === archive.length}
+                              onClick={() => order.mutate(moved(actors, l.id, 1))}><Icon of={KeyboardArrowDownIcon} /></button>
+                          </>
+                        )}
                       </li>
                     );
                   })}

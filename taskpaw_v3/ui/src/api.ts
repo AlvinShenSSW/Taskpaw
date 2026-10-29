@@ -1023,6 +1023,8 @@ export const api = {
   libraryAdd: (body: LibraryBody) => send<Library>("agent", "POST", `${LIBRARY}/libraries`, body),
   libraryUpdate: (id: string, patch: LibraryPatch) => send<Library>("agent", "PATCH", `${LIBRARY}/libraries/${seg(id)}`, patch),
   libraryRemove: (id: string) => send<void>("agent", "DELETE", `${LIBRARY}/libraries/${seg(id)}`),
+  // 归档规则's priority: every actor library id once, in the new order
+  libraryOrder: (ids: string[]) => send<LibraryList>("agent", "PUT", `${LIBRARY}/order`, { ids }),
   libraryScan: (id: string) => send<ScanStatus>("agent", "POST", `${LIBRARY}/libraries/${seg(id)}/scan`),
   libraryScanAll: () => send<ScanStatus>("agent", "POST", `${LIBRARY}/scan-all`),
   libraryScanStatus: () => get<ScanStatus>("agent", `${LIBRARY}/scan-status`),

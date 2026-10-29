@@ -302,6 +302,32 @@ describe("片库与规则 · 归档规则", () => {
   });
 });
 
+describe("片库与规则 · 归档规则 · 片库优先级", () => {
+  it("moves an archive library past the other one, leaving read-only ones unranked, and saves the order", async () => {
+    const m = mockLibrary();
+    const second = { ...LIB_A, id: "lib-c", label: "第二片库", path: "\\\\nas-3\\films\\", position: 3 };
+    libraries = { ...LIBRARIES, items: [LIB_A, LIBRARIES.items[1], second, CAT_K] };
+    const order = vi.spyOn(api, "libraryOrder").mockImplementation(async (ids) => {
+      libraries = { ...libraries, items: [...ids.map((id, i) => ({ ...libraries.items.find((l) => l.id === id)!, position: i + 1 })), CAT_K] };
+      return libraries;
+    });
+    const ws = mount(<LibraryPage />);
+    await tab("归档规则");
+    const prio = await screen.findByRole("list", { name: "片库优先级" });
+    expect(within(prio).getByRole("button", { name: "上移 主片库" })).toBeDisabled();
+    expect(within(prio).getByRole("button", { name: "下移 第二片库" })).toBeDisabled();
+    expect(within(prio).queryByRole("button", { name: /备份库/ })).toBeNull();  // read-only: — / 只读
+    expect(within(prio).getByText("C · 第二片库").closest("li")).toHaveTextContent(/^2/);
+    fireEvent.click(within(prio).getByRole("button", { name: "上移 第二片库" }));
+    // the read-only library keeps its place; every actor library is sent once
+    await waitFor(() => expect(order).toHaveBeenCalledWith(["lib-c", "lib-b", "lib-a"]));
+    await waitFor(() => expect(ws.toast).toHaveBeenCalledWith("规则已保存"));
+    await waitFor(() => expect(within(prio).getByText("A · 第二片库").closest("li")).toHaveTextContent(/^1/));
+    expect(within(prio).getByText("C · 主片库").closest("li")).toHaveTextContent(/^2/);
+    expect(m.saveRules).not.toHaveBeenCalled();
+  });
+});
+
 describe("片库与规则 · 归档历史", () => {
   it("lists receipts with 打开目录 per target, filters, and opens the receipt drawer", async () => {
     const m = mockLibrary();

@@ -351,6 +351,7 @@ export const MEDIA_CSS = `
 .mw .prio li{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #2d405a;border-radius:9px;background:#0c1729}
 .mw .prio .rank{font:600 13px var(--mono);color:var(--green-light);width:18px;text-align:center}
 .mw .prio .grow{flex:1;min-width:0}
+.mw .icon-btn.small{width:36px;height:36px;min-height:36px;padding:0}
 .mw .prio li.ro{opacity:.7}
 .mw .prio li.ro .rank{color:var(--muted)}
 .mw .fixed{display:flex;flex-direction:column;gap:10px}
