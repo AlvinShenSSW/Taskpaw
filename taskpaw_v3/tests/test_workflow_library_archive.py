@@ -579,7 +579,7 @@ def test_a_new_actor_target_proves_the_library_root(rig):
         actor_name="ACTOR",  # casefold of nas/Actor
     ).message
     assert "ACTOR" in message
-    for name in ("", "a:b", "CON", f"{STAGING_PREFIX}x", "trailing."):
+    for name in ("", "a:b", "CON", f"{STAGING_PREFIX}x", "trailing.", ".New"):
         _refused(
             "invalid",
             rig.archive.target,
@@ -588,6 +588,7 @@ def test_a_new_actor_target_proves_the_library_root(rig):
             library_id=rig.library_id,
             actor_name=name,
         )
+    assert not (rig.root / ".New").exists()
     category, _ = _category(rig)
     _refused(
         "readonly",

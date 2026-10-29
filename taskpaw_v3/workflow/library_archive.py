@@ -418,6 +418,8 @@ class LibraryArchive:
         name = spec["actor_name"]
         if spec["library_id"] is not None:
             check_name(name)
+            if name.startswith("."):  # the scan skips dot folders: it would go missing
+                raise _refused("演员目录名不能以 . 开头")
         try:
             identity, names = directory_identity(parent), _names(parent)
         except OSError as exc:

@@ -136,6 +136,12 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
                 (library_id,),
             )
         }
+        known = {
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM performers WHERE library_id=?", (library_id,)
+            )
+        }
     if lib is None:
         raise LibraryError(404, "片库不存在")
     root = lib["path"]
@@ -170,7 +176,9 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
         ):
             raise LibraryError(404, "片库不存在")
         if lib["kind"] == "actor":
-            _apply_actor(conn, library_id, root, names, counts, thumbs, at, result)
+            _apply_actor(
+                conn, library_id, root, names, counts, thumbs, at, result, known
+            )
             result.film_count = sum(counts.values())
         else:
             result.film_count = len(names)
@@ -195,12 +203,14 @@ def _apply_actor(
     thumbs: dict[str, tuple[bytes, float] | tuple[()] | None],
     now: str,
     result: ScanResult,
+    known: set[str],
 ) -> None:
+    """`known`: the library's performer ids read BEFORE the root was listed;
+    only those can be missing (a row born after, e.g. an archive mkdir, is not)."""
     rows = {
         row["folder_name"].casefold(): row
         for row in conn.execute(
-            "SELECT id, folder_name, is_missing, first_seen_at FROM performers"
-            " WHERE library_id=?",
+            "SELECT id, folder_name, is_missing FROM performers WHERE library_id=?",
             (library_id,),
         )
     }
@@ -254,8 +264,7 @@ def _apply_actor(
             )
     present = {name.casefold() for name in names}
     for key, row in rows.items():
-        # a row born after the snapshot (archive mkdir) is not missing
-        if key not in present and not row["is_missing"] and row["first_seen_at"] <= now:
+        if key not in present and row["id"] in known and not row["is_missing"]:
             conn.execute("UPDATE performers SET is_missing=1 WHERE id=?", (row["id"],))
             result.missing += 1
 
