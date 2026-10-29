@@ -685,7 +685,10 @@ def test_a_category_prefix_preselects_only_without_an_actor_and_hints_otherwise(
         _rules(world, second_target_hint=False)
         assert fin.preflight(world.film)["second_hint"] is None
         _rules(world, category_always=False)
-        assert fin.preflight(world.film)["categories"] == []
+        _rules(world, second_target_hint=True)
+        listing = fin.preflight(world.film)
+        assert listing["categories"] == []  # the switch only hides the listing
+        assert listing["second_hint"] == series  # ... not the §8 hint
         with store.transaction() as conn:
             conn.execute("DELETE FROM performers")
         none = fin.preflight(world.film)

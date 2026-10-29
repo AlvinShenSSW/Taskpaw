@@ -624,7 +624,12 @@ def test_library_open_only_opens_library_and_receipt_paths(
     manual.mkdir()
     _archived(world, host, client, target_dir=str(manual))
     url = f"{BASE}/library/open"
+    (world.nas / "deeper").mkdir()
+    runnable = world.nas / "deeper" / "run.cmd"  # a file would be executed
+    runnable.write_text("@echo x")
     with world.fake:
+        assert client.post(url, json={"path": str(runnable)}).status_code == 403
+        assert opened == []
         for path in (world.nas, world.nas / "deeper", manual / FILM_DIR):
             assert client.post(url, json={"path": str(path)}).status_code == 204
         for path in (

@@ -307,6 +307,38 @@ def test_scan_adds_visible_actor_dirs_with_their_film_counts(store, tmp_path):
     assert isinstance(info["free_bytes"], int)
 
 
+def test_a_row_born_after_the_snapshot_is_not_marked_missing(
+    store, tmp_path, monkeypatch
+):
+    lib = actor_library(store, tmp_path, "Alice", "Gone")
+    scan_library(store, lib)
+    base = Path(store.library(lib)["path"])
+    real = library_scan.list_dirs
+    inserted = []
+
+    def list_then_mkdir_insert(path):
+        names = real(path)
+        if not inserted:  # the archive's mkdir lands after the listing
+            inserted.append(path)
+            with store.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO performers(id, name, name_norm, library_id,"
+                    " folder_name, path, first_seen_at, last_seen_at, is_missing)"
+                    " VALUES ('new','New','new',?, 'New', ?,"
+                    " '9999-01-01T00:00:00+00:00','9999-01-01T00:00:00+00:00',0)",
+                    (lib, str(base / "New")),
+                )
+        return names
+
+    shutil.rmtree(base / "Gone")
+    monkeypatch.setattr(library_scan, "list_dirs", list_then_mkdir_insert)
+    result = scan_library(store, lib)
+    rows = performers(store, lib)
+    assert rows["New"]["is_missing"] == 0
+    assert rows["Gone"]["is_missing"] == 1  # an ordinary vanished folder
+    assert result.missing == 1
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows attributes")
 def test_scan_skips_hidden_and_system_directories(store, tmp_path):
     import ctypes

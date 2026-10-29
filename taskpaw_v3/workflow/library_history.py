@@ -172,8 +172,8 @@ def recent(
 def may_open(rt: LocalRuntime, store: LibraryStore, path: str) -> bool:
     """`POST /library/open`: only a path inside a registered library root, or
     equal to or inside a receipt's target path (§10)."""
-    if not os.path.isabs(path):
-        return False
+    if not os.path.isabs(path) or not os.path.isdir(path):
+        return False  # a file would be executed by the opener
     key = path_key(path)
     allowed = [library["path"] for library in store.libraries()]
     for row, _, _ in _rows(rt, store):

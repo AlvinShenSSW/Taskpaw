@@ -199,7 +199,8 @@ def _apply_actor(
     rows = {
         row["folder_name"].casefold(): row
         for row in conn.execute(
-            "SELECT id, folder_name, is_missing FROM performers WHERE library_id=?",
+            "SELECT id, folder_name, is_missing, first_seen_at FROM performers"
+            " WHERE library_id=?",
             (library_id,),
         )
     }
@@ -253,7 +254,8 @@ def _apply_actor(
             )
     present = {name.casefold() for name in names}
     for key, row in rows.items():
-        if key not in present and not row["is_missing"]:
+        # a row born after the snapshot (archive mkdir) is not missing
+        if key not in present and not row["is_missing"] and row["first_seen_at"] <= now:
             conn.execute("UPDATE performers SET is_missing=1 WHERE id=?", (row["id"],))
             result.missing += 1
 

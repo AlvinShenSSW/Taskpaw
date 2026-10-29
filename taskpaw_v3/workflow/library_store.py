@@ -728,13 +728,13 @@ class LibraryStore:
             for lib in libraries
             if lib["kind"] == "category"
         ]
-        if archive and not rules["category_always"]:
-            categories = []
         matched = max(
             (c for c in categories if c["prefix_match"]),
             key=lambda c: longest(c["prefixes"]),
             default=None,
         )
+        if archive and not rules["category_always"]:
+            categories = []
         selected = None
         if len(groups) == 1 and rules["preselect_single"]:
             (locations,) = groups.values()
