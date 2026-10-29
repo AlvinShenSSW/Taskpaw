@@ -415,6 +415,8 @@ class LibraryStore:
         prefixes: list[str] | None = None,
     ) -> dict[str, Any]:
         """The root must be an existing directory now (§6)."""
+        if not path.strip():  # blank would resolve to the drive root (CX5)
+            raise LibraryError(422, "请填写片库路径")
         normalized = normalize_path(path)
         if not is_dir(normalized):
             raise LibraryError(422, f"路径不可达或不是目录：{normalized}")
