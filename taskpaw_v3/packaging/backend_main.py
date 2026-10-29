@@ -11,7 +11,8 @@ sidecar next to the app and runs it with the role. Falls back to `agent`.
 
 Runtime roles retain their role-only dispatch. The bundled backend reads its
 config from the platform config dir (agent.yaml / hub.yaml) — it intentionally
-takes no runtime flags. Two fixed offline routes, `agent-state` and `hub-cursor`,
+takes no runtime flags. Fixed offline route `library-check` (no config or data access) proves the packaged
+library normalizer. Two more fixed offline routes, `agent-state` and `hub-cursor`,
 accept explicit temporary/operator config or DB paths for event-lineage recovery.
 They never start services or provide arbitrary module/server-admin dispatch.
 """
@@ -19,6 +20,15 @@ They never start services or provide arbitrary module/server-admin dispatch.
 from __future__ import annotations
 
 import sys
+
+
+def library_check() -> int:
+    """Offline packaged-build probe: zhconv must load its table and fold 張."""
+    from taskpaw_v3.workflow.library_store import normalize
+
+    result = normalize("張")
+    print(result)
+    return 0 if result == "张" else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         from taskpaw_v3.monitors.plugins.jasna_download import main as download_main
 
         return download_main()
+    if role == "library-check":
+        return library_check()
     if role == "upstream-http":
         from taskpaw_v3.hub.server.upstream_worker import main as upstream_main
 

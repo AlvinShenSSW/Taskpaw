@@ -157,8 +157,8 @@ def fuzzy_key(norm: str) -> str:
 def normalize_path(path: str) -> str:
     """`/` → `\\` and one trailing separator (the native one off Windows)."""
     path = path.strip()
-    if os.sep == "\\":
-        path = path.replace("/", "\\")
+    if path:  # `.`/`..` segments and mixed separators must not split one root
+        path = os.path.normpath(os.path.abspath(path))
     return path if path.endswith(os.sep) else path + os.sep
 
 
@@ -352,10 +352,11 @@ class LibraryStore:
                 try:
                     step(conn)
                     conn.execute("UPDATE schema_version SET version=?", (version + 1,))
+                    conn.execute("COMMIT")
                 except BaseException:
-                    conn.execute("ROLLBACK")
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
                     raise
-                conn.execute("COMMIT")
                 version += 1
             conn.execute("PRAGMA foreign_keys = ON")
             conn.create_function("fuzzy", 1, fuzzy_key, deterministic=True)
@@ -380,10 +381,11 @@ class LibraryStore:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 yield self._conn
+                self._conn.execute("COMMIT")
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
                 raise
-            self._conn.execute("COMMIT")
 
     # ── libraries (§6) ──────────────────────────────────────────────────
     def libraries(self) -> list[dict[str, Any]]:

@@ -100,8 +100,11 @@ def _thumb(
     jpg = os.path.join(folder, "folder.jpg")
     try:
         mtime = os.stat(jpg).st_mtime
-    except OSError:  # removed: clear whatever was stored
+    except FileNotFoundError:  # removed: clear whatever was stored
         return () if cached_mtime is not None or cached_side is not None else None
+    except OSError as exc:  # unreadable is not removed: keep the old thumb
+        log.warning("thumbnail stat failed for %s: %s", jpg, exc)
+        return None
     if cached_mtime == mtime and cached_side == THUMB_MAX_SIDE:
         return None
     try:
@@ -139,7 +142,11 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
     result = ScanResult(library_id, ok=True, at=at)
     try:
         names = list_dirs(root)
-        counts = {name: len(list_dirs(os.path.join(root, name))) for name in names}
+        counts = (
+            {name: len(list_dirs(os.path.join(root, name))) for name in names}
+            if lib["kind"] == "actor"
+            else {}
+        )
     except LibraryUnreachable:
         with store.transaction() as conn:  # the status only, no performer row
             conn.execute(

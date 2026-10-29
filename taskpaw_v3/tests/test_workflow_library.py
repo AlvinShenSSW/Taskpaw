@@ -142,6 +142,31 @@ def test_normalize_is_filmpaw_s():
     assert normalize("ＡＢＣ（Ｘ）") == "abc(x)"
 
 
+def test_library_check_role_runs_in_process(capsys):
+    from taskpaw_v3.packaging import backend_main
+
+    assert backend_main.main(["library-check"]) == 0
+    assert capsys.readouterr().out.strip() == "张"
+
+
+def test_packaged_library_normalizes_traditional_chinese():
+    """The built sidecar's zhconv loader (pkg_resources path) must work frozen."""
+    import subprocess
+
+    supplied = os.environ.get("TASKPAW_TEST_UPSTREAM_BACKEND")
+    if not supplied:
+        pytest.skip("actual built sidecar not supplied; no frozen acceptance claim")
+    done = subprocess.run(
+        [str(Path(supplied).resolve()), "library-check"],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.decode("utf-8").strip() == "张"
+
+
 # ── libraries (§6) ───────────────────────────────────────────────────────
 def test_add_normalizes_the_path_and_defaults_label_and_role(store, tmp_path):
     path = root(tmp_path, "Actors")
@@ -185,6 +210,27 @@ def test_add_refuses_the_same_root_in_any_case(store, tmp_path):
     expect(409, store.add_library, "category", str(path) + os.sep)
     if sys.platform == "win32":  # a case-insensitive file system
         expect(409, store.add_library, "actor", str(path).upper())
+
+
+def test_equivalent_spellings_of_a_root_are_one_root(store, tmp_path):
+    path = root(tmp_path, "Actors", "sub")
+    (tmp_path / "other").mkdir()
+    store.add_library("actor", str(path))
+    for spelling in (
+        os.path.join(str(path), ".", ""),
+        os.path.join(str(path), "sub", ".."),
+        os.path.join(str(tmp_path), "other", "..", "Actors"),
+    ):
+        assert (
+            expect(409, store.add_library, "category", spelling).detail
+            == "该片库已存在"
+        )
+    nested = os.path.join(str(tmp_path), "other", "..", "Actors", "sub")
+    assert (
+        expect(409, store.add_library, "category", nested).detail
+        == "该目录与已有片库互相包含"
+    )
+    assert len(store.libraries()) == 1
 
 
 def test_a_root_may_not_contain_or_sit_inside_another(store, tmp_path):
@@ -341,6 +387,45 @@ def test_a_vanished_folder_is_marked_missing_and_clears_on_return(store, tmp_pat
     assert performers(store, lib)["Bob"]["is_missing"] == 0
 
 
+def test_a_category_scan_ignores_film_folder_contents(store, tmp_path, monkeypatch):
+    lib = store.add_library("category", str(root(tmp_path, "cat", "FC2-1", "FC2-2")))
+    real = library_scan.list_dirs
+
+    def flaky(path):
+        if os.path.basename(path.rstrip(os.sep + "/")) == "FC2-1":
+            raise OSError("unlistable")
+        return real(path)
+
+    monkeypatch.setattr(library_scan, "list_dirs", flaky)
+    result = scan_library(store, lib["id"])
+    assert (result.ok, result.film_count) == (True, 2)
+    assert store.library(lib["id"])["last_scan_ok"] in (1, True)
+
+
+def test_a_failed_commit_rolls_back_and_the_next_write_works(store, tmp_path):
+    class Flaky:
+        def __init__(self, conn):
+            self.conn, self.failed = conn, False
+
+        def execute(self, sql, *args):
+            if sql == "COMMIT" and not self.failed:
+                self.failed = True
+                raise sqlite3.OperationalError("database is locked")
+            return self.conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    real = store._conn
+    store._conn = Flaky(real)
+    with pytest.raises(sqlite3.OperationalError):
+        with store.transaction() as conn:
+            conn.execute("UPDATE settings SET value=value")
+    assert not real.in_transaction
+    store._conn = real
+    store.add_library("actor", str(root(tmp_path, "after")))
+
+
 def test_a_category_scan_counts_films_and_records_no_performers(store, tmp_path):
     lib = store.add_library(
         "category", str(root(tmp_path, "cat", "FC2-1", "FC2-2", ".x"))
@@ -444,6 +529,27 @@ def test_an_unreadable_folder_jpg_keeps_the_old_thumb(store, tmp_path, caplog):
     row = thumb_row(store, lib, "Alice")
     assert (row["thumb"], row["thumb_mtime"]) == (old["thumb"], old["thumb_mtime"])
     assert "thumbnail failed" in caplog.text
+
+
+def test_a_stat_error_on_folder_jpg_keeps_the_old_thumb(store, tmp_path, monkeypatch):
+    pytest.importorskip("PIL.Image")
+    lib = actor_library(store, tmp_path, "Alice")
+    jpg = Path(store.library(lib)["path"]) / "Alice" / "folder.jpg"
+    jpeg_file(jpg)
+    scan_library(store, lib)
+    old = thumb_row(store, lib, "Alice")
+    real = os.stat
+
+    def deny(path, *a, **kw):
+        if str(path).endswith("folder.jpg"):
+            raise PermissionError("denied")
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(library_scan.os, "stat", deny)
+    scan_library(store, lib)
+    monkeypatch.undo()
+    row = thumb_row(store, lib, "Alice")
+    assert (row["thumb"], row["thumb_mtime"]) == (old["thumb"], old["thumb_mtime"])
 
 
 def test_without_pillow_thumbnails_are_skipped(store, tmp_path, monkeypatch):

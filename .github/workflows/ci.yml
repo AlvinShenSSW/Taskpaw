@@ -97,7 +97,7 @@ jobs:
             *) exit 1 ;;
           esac
           export TASKPAW_TEST_UPSTREAM_BACKEND="$PWD/taskpaw_v3/src-tauri/binaries/taskpaw-backend-$triple"
-          uv run --python 3.12 pytest -s taskpaw_v3/tests/test_upstream_isolation.py -k native_upstream_helper_only
+          uv run --python 3.12 pytest -s taskpaw_v3/tests/test_upstream_isolation.py taskpaw_v3/tests/test_workflow_library.py -k 'native_upstream_helper_only or packaged_library'
       - name: Run tests (with V3 coverage report; no hard threshold yet)
         run: uv run --python ${{ matrix.python-version }} pytest --cov=taskpaw_v3 --cov-report=term-missing
 
@@ -136,7 +136,7 @@ jobs:
         shell: bash
         run: |
           export TASKPAW_TEST_UPSTREAM_BACKEND="$PWD/taskpaw_v3/src-tauri/binaries/taskpaw-backend-x86_64-unknown-linux-gnu"
-          uv run pytest -s taskpaw_v3/tests/test_upstream_isolation.py -k native_upstream_helper_only
+          uv run pytest -s taskpaw_v3/tests/test_upstream_isolation.py taskpaw_v3/tests/test_workflow_library.py -k 'native_upstream_helper_only or packaged_library'
       - name: "cargo test (shell logic — loopback validation, role)"
         working-directory: taskpaw_v3/src-tauri
         run: cargo test --locked
@@ -187,7 +187,7 @@ jobs:
         run: |
           $env:TASKPAW_TEST_UPSTREAM_BACKEND = Join-Path (Get-Location) 'taskpaw_v3/src-tauri/binaries/taskpaw-backend-x86_64-pc-windows-msvc.exe'
           $env:TASKPAW_TEST_UPSTREAM_PREREAD_FROZEN = '1'
-          uv run --python 3.12 pytest -s taskpaw_v3/tests/test_upstream_isolation.py -k 'native_upstream_helper_only or windows_preread_backpressure'
+          uv run --python 3.12 pytest -s taskpaw_v3/tests/test_upstream_isolation.py taskpaw_v3/tests/test_workflow_library.py -k 'native_upstream_helper_only or windows_preread_backpressure or packaged_library'
       - name: Native Windows Rust tests
         working-directory: taskpaw_v3/src-tauri
         run: cargo test --locked
