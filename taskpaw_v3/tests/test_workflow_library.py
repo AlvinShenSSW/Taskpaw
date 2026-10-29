@@ -146,7 +146,7 @@ def test_library_check_role_runs_in_process(capsys):
     from taskpaw_v3.packaging import backend_main
 
     assert backend_main.main(["library-check"]) == 0
-    assert capsys.readouterr().out.strip() == "张"
+    assert capsys.readouterr().out.strip() == "\u5f20"  # 张, ASCII-escaped
 
 
 def test_packaged_library_normalizes_traditional_chinese():
@@ -164,7 +164,7 @@ def test_packaged_library_normalizes_traditional_chinese():
         check=False,
     )
     assert done.returncode == 0, done.stderr
-    assert done.stdout.decode("utf-8").strip() == "张"
+    assert done.stdout.decode("ascii").strip() == "\u5f20"  # 张, ASCII-escaped
 
 
 # ── libraries (§6) ───────────────────────────────────────────────────────

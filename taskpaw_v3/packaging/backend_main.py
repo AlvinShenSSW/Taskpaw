@@ -27,7 +27,8 @@ def library_check() -> int:
     from taskpaw_v3.workflow.library_store import normalize
 
     result = normalize("張")
-    print(result)
+    # ASCII only: a piped stdout on a cp1252 console cannot encode 张
+    print(result.encode("unicode_escape").decode("ascii"))
     return 0 if result == "张" else 1
 
 
