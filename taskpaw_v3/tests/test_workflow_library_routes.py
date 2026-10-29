@@ -91,8 +91,10 @@ def test_library_crud(client, host, tmp_path):
     assert missing.status_code == 422
     odd = client.post(f"{BASE}/libraries", json={"kind": "film", "path": str(path)})
     assert odd.status_code == 422
-    (item,) = client.get(f"{BASE}/libraries").json()["items"]
+    listed = client.get(f"{BASE}/libraries").json()
+    (item,) = listed["items"]
     assert item["id"] == lib["id"]
+    assert listed["db_path"] == str(host.library.path)  # 设置 · 片库数据
 
     patched = client.patch(
         f"{BASE}/libraries/{lib['id']}", json={"label": "演员", "role": "readonly"}

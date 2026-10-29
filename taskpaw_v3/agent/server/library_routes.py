@@ -114,7 +114,8 @@ def register_library_routes(
 
     @app.get(f"{BASE}/libraries")
     def library_list() -> dict[str, Any]:
-        return {"items": _store().libraries()}
+        store = _store()
+        return {"items": store.libraries(), "db_path": str(store.path)}
 
     @app.post(f"{BASE}/libraries", status_code=201)
     def library_add(body: LibraryBody) -> dict[str, Any]:

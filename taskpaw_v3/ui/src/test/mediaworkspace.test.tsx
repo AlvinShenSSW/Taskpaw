@@ -209,7 +209,7 @@ describe("#302 finished history", () => {
 });
 
 describe("MediaWorkspace shell", () => {
-  it("lists the ten pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 on the later pages", async () => {
+  it("lists the ten pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 only on Mac 信息桥", async () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
@@ -219,8 +219,10 @@ describe("MediaWorkspace shell", () => {
       ["overview", "pending", "queue", "review", "exceptions", "devices", "local", "libraries", "bridge", "settings"]);
     expect(items[1]).toHaveTextContent("待处理3");
     expect(items[4]).toHaveTextContent("异常6");
-    for (const i of [7, 8, 9]) expect(items[i]).toHaveTextContent("后续");
-    expect(items[5]).not.toHaveTextContent("后续");  // 设备 is live since P2-2
+    expect(items[8]).toHaveTextContent("后续");
+    // 设备 is live since P2-2, 片库与规则 and 设置 (renamed from 设置 / 迁移) since #361
+    for (const i of [5, 7, 9]) expect(items[i]).not.toHaveTextContent("后续");
+    expect(items[9]).toHaveTextContent(/^设置$/);
     for (const i of [0, 2, 6]) expect(items[i].querySelector(".nav-count")).toBeNull();
     expect(items[0]).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("TaskPaw / 媒体处理中心 / 概览")).toBeInTheDocument();
@@ -230,15 +232,15 @@ describe("MediaWorkspace shell", () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
-    for (const label of ["概览", "待处理", "影片队列", "待确认", "异常", "设备", "本机", "片库与规则", "Mac 信息桥", "设置 / 迁移"]) {
+    for (const label of ["概览", "待处理", "影片队列", "待确认", "异常", "设备", "本机", "片库与规则", "Mac 信息桥", "设置"]) {
       await go(label);
       const main = screen.getByRole("main");
       expect(within(main).getAllByRole("heading", { level: 1 })).toHaveLength(1);
       for (const s of SLOGANS) expect(main.textContent).not.toContain(s);
       expect(document.body.textContent).not.toMatch(FORBIDDEN);
       expect(main).toHaveFocus();
+      if (label === "Mac 信息桥") expect(within(main).getByText("此功能将在多机工作流阶段提供")).toBeInTheDocument();
     }
-    expect(screen.getAllByText("此功能将在多机工作流阶段提供").length).toBeGreaterThan(0);
   });
 
   it("shows the reason without the pages when the workflow is not running", async () => {
