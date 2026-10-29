@@ -15,7 +15,7 @@ vi.mock("../views/AgentConsole", () => ({ AgentConsole: () => <div>Agent console
 function view(over: Partial<WorkflowSettingsView> = {}): WorkflowSettingsView {
   return {
     enabled: false, role: "off", inbox_root: null, data_dir: null, ffprobe_path: null, jasna_exe_path: null,
-    whisperjav_exe_path: null, ltx_gpu: "auto", mdcx_python: null, mdcx_root: null, mdcx_profile: null, filmpaw_data_dir: null,
+    whisperjav_exe_path: null, ltx_gpu: "auto", mdcx_python: null, mdcx_root: null, mdcx_profile: null,
     remote_workers: false, worker_api_port: 5682, staging_dir: null, staging_cap_gb: 500, ...over,
   };
 }

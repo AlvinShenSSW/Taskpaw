@@ -2,8 +2,9 @@
 
 ``confirm`` is the operator's one click: it binds the film's final package, the chosen archive
 folder and both cleanup scopes into a T01 approval. ``Finalizer.run_once`` then moves every approved
-film forward a step per tick without further input: submit the package to Filmpaw, accept its receipt,
-delete the bound sources on the same handle that proved them, and reclaim Taskpaw's private work dirs.
+film forward a step per tick without further input: submit the package to the library archive
+(`library_archive.py`), accept its receipt, delete the bound sources on the same handle that proved
+them, and reclaim Taskpaw's private work dirs.
 
 Nothing here retries a copy: an archive is submitted once per approval under its operation key and only
 looked up afterwards; a failed archive waits for the operator to confirm again.
@@ -25,8 +26,8 @@ from taskpaw_v3.core.state import atomic_json
 
 from . import file_identity
 from . import models as m
-from .filmpaw_client import FilmpawClient, FilmpawRefused, FilmpawUnavailable
 from .intake_reclaim import remove_work_tree
+from .library_archive import LibraryArchive, LibraryRefused, LibraryUnavailable
 from .local_runtime import PRODUCER, LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.finalize")
@@ -38,7 +39,11 @@ _PERFORMER_NS = uuid.UUID("0b7f3c2e-6f2d-4a8e-9c1d-3e5a7b9d2f41")
 _STAGES = ("archive", "cleanup_input", "cleanup_workcopy")
 _OPEN = ("pending", "failed", "running", "unknown")
 _RETRYABLE = ("pending", "blocked_writing", "failed", "unknown")
-FILMPAW_WAIT = "等待 Filmpaw 运行"
+LIBRARY_WAIT = "等待片库可用"
+# §9.8: an archive approved through Filmpaw and still open at the upgrade
+CUTOVER = "升级前未完成的归档，请重新确认入库"
+# preflight error codes the 待确认 dialog knows; the message says the rest
+_UI_CODES = {"readonly": "permission", "invalid": "permission"}
 
 Scope = Literal["input", "workcopy"]
 
@@ -56,7 +61,7 @@ class ConfirmError(Exception):
 
 
 def performer_uuid(performer_id: str) -> str:
-    return str(uuid.uuid5(_PERFORMER_NS, f"filmpaw-performer:{performer_id}"))
+    return str(uuid.uuid5(_PERFORMER_NS, f"taskpaw-performer:{performer_id}"))
 
 
 def _host(target_path: str) -> str:
@@ -70,9 +75,9 @@ def _new_id() -> str:
 
 class Finalizer:
     def __init__(
-        self, runtime: LocalRuntime, inbox: Path | None, filmpaw: FilmpawClient
+        self, runtime: LocalRuntime, inbox: Path | None, library: LibraryArchive
     ) -> None:
-        self.runtime, self.inbox, self.filmpaw = runtime, inbox, filmpaw
+        self.runtime, self.inbox, self.library = runtime, inbox, library
         self.waiting: dict[str, str] = {}
         self.progress: dict[str, dict[str, Any]] = {}
         # set by the dispatcher: stop between films and between members on shutdown
@@ -105,11 +110,14 @@ class Finalizer:
         target_dir: str | None = None,
     ) -> dict[str, Any]:
         """Where 确认入库 would archive, read-only: the target folder under the
-        chosen performer or manual directory and whether it is free, plus Filmpaw's candidates for
-        the film's NFO actors (0 / 1 / many; the dialog pre-selects only one).
+        chosen performer or manual directory and whether it is free, plus the library's
+        candidates for the film's NFO actors (0 / 1 / many; the dialog pre-selects only one;
+        missing performers are not listed).
 
-        `error_code`: offline (Filmpaw or its share unreachable), permission,
-        missing (the performer record is gone), duplicate (the folder exists).
+        `error_code`: offline (the library or its share unreachable), permission
+        (also a read-only library or an invalid name), missing (the performer
+        record is gone), duplicate (the folder exists). It is mapped from the
+        refusal's `code`, never from its status (§9.1).
 
         Without an explicit target, exactly one candidate is checked in the same
         call (U1 Codex r2 F4; `performer_id` then names it): the list reads one
@@ -143,7 +151,7 @@ class Finalizer:
         try:
             items: dict[str, dict[str, Any]] = {}
             for actor in dict.fromkeys(actors):
-                for item in self.filmpaw.performers(actor):
+                for item in self.library.performers(actor)["items"]:
                     items.setdefault(item["id"], item)
             value["candidates"] = {
                 "query": list(dict.fromkeys(actors)),
@@ -152,25 +160,20 @@ class Finalizer:
             if not performer_id and not target_dir and len(items) == 1:
                 performer_id = value["performer_id"] = next(iter(items))
             if performer_id or target_dir:
-                proof = self.filmpaw.target(
+                proof = self.library.target(
                     performer_id, film_dir, target_dir=target_dir
                 )
                 value["absent"] = bool(proof["absent"])
-                value["target_path"] = str(
-                    Path(proof["expected_target"]["target_path"]) / film_dir
-                )
+                value["target_path"] = proof["target_path"]
                 if not value["absent"]:
                     value.update(
                         error_code="duplicate",
                         message=f"{'目标' if target_dir else '演员'}目录下已有同名目录：{film_dir}",
                     )
-        except FilmpawUnavailable as e:
-            value.update(error_code="offline", message=f"Filmpaw 未运行：{e}")
-        except FilmpawRefused as e:
-            code = {403: "permission", 404: "missing"}.get(e.status, "offline")
-            value.update(error_code=code, message=e.message)
-        except (KeyError, TypeError) as e:
-            value.update(error_code="offline", message=f"Filmpaw 返回的目标无效：{e}")
+        except LibraryUnavailable as e:
+            value.update(error_code="offline", message=f"片库不可用：{e}")
+        except LibraryRefused as e:
+            value.update(error_code=_UI_CODES.get(e.code, e.code), message=e.message)
         return value
 
     # ── 确认入库 ────────────────────────────────────────────────────────
@@ -199,10 +202,10 @@ class Finalizer:
         final = store.get_final_manifest(op, film_id, film.current_final_revision)
         film_dir = PurePosixPath(final.output_relative_path).name
         try:
-            proof = self.filmpaw.target(performer_id, film_dir, target_dir=target_dir)
-        except FilmpawUnavailable as e:
-            raise ConfirmError(f"Filmpaw 未运行：{e}") from e
-        except FilmpawRefused as e:
+            proof = self.library.target(performer_id, film_dir, target_dir=target_dir)
+        except LibraryUnavailable as e:
+            raise ConfirmError(f"片库不可用：{e}") from e
+        except LibraryRefused as e:
             raise ConfirmError(e.message) from e
         if not proof["absent"]:
             raise ConfirmError(
@@ -256,7 +259,7 @@ class Finalizer:
                 producer=signer,
             ),
             target=rt.evidence(
-                "filmpaw_target", payload_digest=m.digest(proof), producer=signer
+                "library_target", payload_digest=m.digest(proof), producer=signer
             ),
             input_cleanup=rt.evidence("input_members_checked", producer=signer),
             workcopy_cleanup=rt.evidence("workcopy_members_checked", producer=signer),
@@ -306,7 +309,7 @@ class Finalizer:
         expected: dict[str, Any],
         target_dir: str | None = None,
     ) -> m.TargetIdentity:
-        root = (
+        root = (  # the manual root id is unchanged from the Filmpaw era (§9.7)
             str(uuid.uuid5(_PERFORMER_NS, f"filmpaw-manual-target:{target_dir}"))
             if target_dir
             else performer_uuid(str(performer_id))
@@ -316,7 +319,7 @@ class Finalizer:
             host_identity=_host(expected["target_path"]),
             export_identity=expected["target_path"],
             native_identity=m.NativeIdentity(
-                scheme="manual_directory" if target_dir else "export_object_id",
+                scheme="manual_directory" if target_dir else "library_performer",
                 root_id=root,
                 volume_or_export_id=target_dir or str(performer_id),
                 object_id=json.dumps(expected["directory_identity"]),
@@ -439,21 +442,24 @@ class Finalizer:
         binding: m.ApprovalBinding,
         waiting: dict[str, str],
     ) -> None:
+        target = binding.target
+        scheme, volume = (
+            target.native_identity.scheme,
+            target.native_identity.volume_or_export_id,
+        )
+        if scheme not in ("library_performer", "manual_directory"):
+            self._fail(operation_id, CUTOVER)  # a Filmpaw-era binding (§9.8)
+            return
+        manual = scheme == "manual_directory"
         final = self.runtime.store.get_final_manifest(
             self.runtime.operator, film_id, binding.final_revision
         )
-        target = binding.target
-        manual = target.native_identity.scheme == "manual_directory"
         try:
-            self.filmpaw.archive(
+            self.library.archive(
                 operation_id,
                 self._package_dir(final),
-                performer_id=None
-                if manual
-                else target.native_identity.volume_or_export_id,
-                target_dir=target.native_identity.volume_or_export_id
-                if manual
-                else None,
+                performer_id=None if manual else volume,
+                target_dir=volume if manual else None,
                 expected_target={
                     "target_path": target.export_identity,
                     "directory_identity": json.loads(target.native_identity.object_id),
@@ -466,18 +472,13 @@ class Finalizer:
                     }
                     for item in final.items
                 ],
+                final_hash=final.manifest_hash,
             )
             waiting[film_id] = "归档中"
-        except FilmpawUnavailable:
-            waiting[film_id] = FILMPAW_WAIT  # looked up by operation key next tick
-        except FilmpawRefused as e:
-            if e.status in (
-                409,
-                503,
-            ):  # busy, nothing created: submit again later (D06)
-                waiting[film_id] = f"Filmpaw 暂时无法归档：{e.message}"
-            else:
-                self._fail(operation_id, f"Filmpaw 拒绝归档：{e.message}")
+        except LibraryUnavailable:
+            waiting[film_id] = LIBRARY_WAIT  # looked up by operation key next tick
+        except LibraryRefused as e:  # permanent (§9.1): a new confirm is needed
+            self._fail(operation_id, f"片库拒绝归档：{e.message}")
 
     def _poll(
         self,
@@ -491,12 +492,9 @@ class Finalizer:
             waiting[wf.film_id] = "归档审批已变化"
             return False
         try:
-            task = self.filmpaw.lookup(op.operation_id)
-        except FilmpawUnavailable:
-            waiting[wf.film_id] = FILMPAW_WAIT
-            return False
-        except FilmpawRefused as e:
-            waiting[wf.film_id] = f"Filmpaw 查询失败：{e.message}"
+            task = self.library.lookup(op.operation_id)
+        except LibraryUnavailable:
+            waiting[wf.film_id] = LIBRARY_WAIT
             return False
         if task is None:  # never accepted: the same operation key is safe to submit
             self.progress.pop(wf.film_id, None)
@@ -538,7 +536,7 @@ class Finalizer:
             return True
         self._fail(
             op.operation_id,
-            f"Filmpaw {status}：{task.get('message') or ''}",
+            f"归档未完成（{status}）：{task.get('message') or ''}",
             op.version,
         )
         return True
@@ -561,7 +559,7 @@ class Finalizer:
             Path(binding.target.export_identity) / binding.target.relative_path
         )
         if files != expected or receipt["target_path"] != target_path:
-            self._fail(op.operation_id, "Filmpaw 回执与已批准清单不一致", op.version)
+            self._fail(op.operation_id, "归档回执与已批准清单不一致", op.version)
             return
         signer = rt.archive_auth
         rt.store.accept_archive_receipt(
@@ -616,7 +614,7 @@ class Finalizer:
                 expected_version=version,
                 error_code=message[:2000],
                 evidence=rt.evidence(
-                    "filmpaw_failed", message[:2000], producer=rt.archive_auth
+                    "archive_failed", message[:2000], producer=rt.archive_auth
                 ),
             ),
         )

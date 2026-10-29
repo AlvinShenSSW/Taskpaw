@@ -277,8 +277,14 @@ class AuthorityBootstrap(Model):
 
 
 class NativeIdentity(Model):
+    # `export_object_id`: a Filmpaw-era archive target (#361 §9.8);
+    # `library_performer`: a performer directory of Taskpaw's library (§9.7)
     scheme: Literal[
-        "windows_file_id", "posix_inode", "export_object_id", "manual_directory"
+        "windows_file_id",
+        "posix_inode",
+        "export_object_id",
+        "manual_directory",
+        "library_performer",
     ]
     root_id: Id
     volume_or_export_id: Text

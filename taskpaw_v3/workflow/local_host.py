@@ -25,10 +25,10 @@ from . import models as m
 from .auth import STAGE_ROLES
 from .exec_common import MISSING_LTX
 from .executors import StageExecutor
-from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
 from .fleet_live import FleetLive
 from .intake_protocol import ProbeArtifact
+from .library_archive import LibraryArchive
 from .library_scan import LibraryScanner
 from .library_store import LibraryStore
 from .local_dispatch import LocalDispatcher, ReturnStep
@@ -306,6 +306,8 @@ class LocalWorkflowHost:
         self.library: LibraryStore | None = None
         self.library_scanner: LibraryScanner | None = None
         self.library_reason = ""
+        # #363: the finalizer's archive engine over that library
+        self.library_archive = LibraryArchive(None)
         # P2-4 R1: the last pass's decision; its waiting reasons reach the board
         self.last_pass: Any = None
         # the controller's free disk for the C8 gate (tests inject a figure)
@@ -369,11 +371,9 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.intake.start()
-            data = self.settings.filmpaw_data_dir
+            self._start_library()
             self.finalizer = Finalizer(
-                rt,
-                Path(inbox) if inbox else None,
-                FilmpawClient(Path(data) if data else None),
+                rt, Path(inbox) if inbox else None, self.library_archive
             )
             self.sources = SourceWatch(
                 rt, Path(inbox) if inbox else None, on_change=self._on_sources
@@ -414,7 +414,6 @@ class LocalWorkflowHost:
                 self.scheduler.start()
             if self._stopping.is_set():
                 return
-            self._start_library()
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)
@@ -424,17 +423,23 @@ class LocalWorkflowHost:
 
     def _start_library(self) -> None:
         """`library.db` beside `workflow.db`; a failure here leaves the
-        workflow running and the 片库 routes answering with the reason."""
+        workflow running, the 片库 routes answering with the reason and the
+        finalizer waiting for the library."""
         try:
             self.library = LibraryStore.open(self.data_dir / "library.db")
             self.library_scanner = LibraryScanner(self.library)
             self.library_scanner.start()
+            self.library_archive = LibraryArchive(self.library)
+            self.library_archive.start()  # restart recovery runs first (§9.3)
         except Exception as exc:
             log.exception("library index failed to start")
+            if self.library_scanner is not None:
+                self.library_scanner.stop()
             if self.library is not None:
                 self.library.close()
             self.library, self.library_scanner = None, None
             self.library_reason = f"片库启动失败：{exc}"
+            self.library_archive = LibraryArchive(None, self.library_reason)
 
     def stop(self, timeout: float = 60.0) -> None:
         """Stop everything; keep the store open unless every user stopped (R5).
@@ -468,6 +473,10 @@ class LocalWorkflowHost:
             confirmed &= self.library_scanner.stop(
                 timeout=max(1.0, deadline - time.monotonic())
             )
+        # a copy stops at its next chunk; the restart recovery settles it
+        confirmed &= self.library_archive.stop(
+            timeout=max(1.0, deadline - time.monotonic())
+        )
         if self.scheduler is not None:  # R13: before the dispatcher it wakes
             confirmed &= self.scheduler.stop(timeout=min(timeout, 30.0))
         if self.dispatcher is not None:

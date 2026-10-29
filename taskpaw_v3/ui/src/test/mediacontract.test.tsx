@@ -350,7 +350,7 @@ describe("contract: 待确认 and 图文确认", () => {
     expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();
   });
 
-  it("Filmpaw offline: no candidates, the card and the dialog say the NAS is offline", async () => {
+  it("Library offline: no candidates, the card and the dialog say the NAS is offline", async () => {
     mockApi(() => C.target.offline);
     wrap(<MediaWorkspace />);
     const card = within(await openReview());

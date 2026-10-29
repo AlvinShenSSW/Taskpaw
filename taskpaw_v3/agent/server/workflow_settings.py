@@ -67,7 +67,6 @@ PATHS = (
     "mdcx_python",
     "mdcx_root",
     "mdcx_profile",
-    "filmpaw_data_dir",
     "staging_dir",
 )
 _DIRS = ("inbox_root", "output_dir", "mdcx_root")

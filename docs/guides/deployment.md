@@ -164,7 +164,7 @@ setup above. Everything below is for one user on a trusted home LAN.
 
 | Role | Machine | Runs |
 |------|---------|------|
-| 媒体主控 (controller) | Windows only | 媒体处理中心, the INBOX watcher, local ASR (WhisperJAV), translate, Miko scrape and Filmpaw ingest. It dispatches restore and never restores itself (OD1, OD7). Any GPU works, e.g. the RTX 5060 8 GB. |
+| 媒体主控 (controller) | Windows only | 媒体处理中心, the INBOX watcher, local ASR (WhisperJAV), translate, Miko scrape and archiving into its own NAS library (片库). It dispatches restore and never restores itself (OD1, OD7). Any GPU works, e.g. the RTX 5060 8 GB. |
 | GPU 工作机 (worker) | Windows only, GPU of **16 GB or more** | Jasna restore, 1080p and 4K, and nothing else (OD7). A card under 16 GB never restores (OD5): the wizard disables the card with 「本机显卡不足 16 GB」. |
 | Mac Hub | macOS | Only the Hub: the read-only 媒体处理 tab, notifications, and the **single** consumer of each Agent's `/events` (see the section below). The Mac is never a controller or a worker: those wizard cards read 「仅支持 Windows」. |
 

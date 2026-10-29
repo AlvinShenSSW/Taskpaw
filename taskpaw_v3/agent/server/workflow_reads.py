@@ -56,8 +56,9 @@ def off_state(settings: WorkflowSettings) -> tuple[str, str]:
 @contextmanager
 def _mapped() -> Iterator[None]:
     """Domain errors as HTTP statuses (§8); HTTPException passes through."""
-    from taskpaw_v3.workflow.filmpaw_client import FilmpawRefused, FilmpawUnavailable
     from taskpaw_v3.workflow.finalize import ConfirmError
+    from taskpaw_v3.workflow.library_archive import LibraryRefused, LibraryUnavailable
+    from taskpaw_v3.workflow.library_store import LibraryError
     from taskpaw_v3.workflow.models import WorkflowError
 
     try:
@@ -74,11 +75,13 @@ def _mapped() -> Iterator[None]:
         raise HTTPException(
             status_code=503, detail=f"媒体流水线暂不可用：{exc.code}"
         ) from None
-    except FilmpawUnavailable as exc:
+    except LibraryUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None
-    except FilmpawRefused as exc:
-        status = 404 if exc.status == 404 else 503
+    except LibraryRefused as exc:
+        status = 404 if exc.code == "missing" else exc.status
         raise HTTPException(status_code=status, detail=exc.message) from None
+    except LibraryError as exc:  # e.g. an invalid page of the performer search
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from None
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from None
     except RuntimeError as exc:  # the host has not started its runtime yet

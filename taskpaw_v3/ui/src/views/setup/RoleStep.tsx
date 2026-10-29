@@ -14,12 +14,12 @@ const CARDS: Array<{ role: SetupRole; text: string; chips: string[]; will: strin
     will: ["局域网访问与访问令牌", "本机监控项（自动发现，可再手动添加）"],
   },
   {
-    role: "controller", text: "监视 INBOX，把修复（Jasna）派给 GPU 工作机；本机负责识别、翻译、Miko 刮削与 Filmpaw 入库。",
+    role: "controller", text: "监视 INBOX，把修复（Jasna）派给 GPU 工作机；本机负责识别、翻译、Miko 刮削与片库入库。",
     chips: ["家里只需一台"],
     will: ["局域网访问与访问令牌", "INBOX 与工作目录", "ffprobe、Jasna、WhisperJAV、Miko 自动检测", "是否允许 GPU 工作机接入"],
   },
   {
-    role: "worker", text: "从主控领取修复（Jasna），做完自动回传。不需要 WhisperJAV、Miko 或 Filmpaw。",
+    role: "worker", text: "从主控领取修复（Jasna），做完自动回传。不需要 WhisperJAV、Miko 或片库。",
     chips: ["需要 NVIDIA 显卡 · 16 GB"],
     will: ["局域网访问与访问令牌", "显卡与 Jasna 自动检测", "暂存目录与暂存上限", "粘贴配对码，加入主控"],
   },

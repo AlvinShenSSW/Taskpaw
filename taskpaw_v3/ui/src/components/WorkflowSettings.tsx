@@ -29,30 +29,30 @@ const ROLES: Array<[WorkflowRole, string]> = [
 const ROLE_SHORT: Record<WorkflowRole, string> = { controller: "媒体主控", worker: "GPU 工作机", off: "不参与" };
 const WINDOWS_ONLY_NOTE = "媒体主控和 GPU 工作机仅支持 Windows；这台电脑只能选「不参与」。";
 // IR3: the native picker per path field — a folder (选择) or a tool's file (更改)
-const DIR_FIELDS = ["inbox_root", "output_dir", "data_dir", "staging_dir", "mdcx_root", "filmpaw_data_dir"];
+const DIR_FIELDS = ["inbox_root", "output_dir", "data_dir", "staging_dir", "mdcx_root"];
 const FILE_FIELDS = ["ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "mdcx_python", "mdcx_profile"];
 const MISSING_DIR = "目录不存在";
 
 type Form = Record<string, string | boolean>;
 const TEXT_FIELDS = [
   "inbox_root", "output_dir", "data_dir", "ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "ltx_gpu",
-  "mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir", "staging_dir",
+  "mdcx_python", "mdcx_root", "mdcx_profile", "staging_dir",
 ] as const;
 const NUMBER_FIELDS = ["worker_api_port", "staging_cap_gb"] as const;
 // The fields each role edits (the backend validates only the role's own; the rest stay as saved).
 const CONTROLLER_FIELDS = [
   "inbox_root", "output_dir", "data_dir", "ffprobe_path", "remote_workers", "worker_api_port", "jasna_exe_path", "whisperjav_exe_path",
-  "ltx_gpu", "mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir",
+  "ltx_gpu", "mdcx_python", "mdcx_root", "mdcx_profile",
 ];
 // OD7 (#298 R11): a GPU worker restores only — no WhisperJAV (its saved value stays as is)
 const WORKER_FIELDS = ["data_dir", "jasna_exe_path", "ltx_gpu", "staging_dir", "staging_cap_gb"];
 const LABELS: Record<string, string> = {
   output_dir: "成品目录", role: "本机角色", inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", remote_workers: "允许 GPU 工作机接入",
   worker_api_port: "工作机接口端口", jasna_exe_path: "Jasna", whisperjav_exe_path: "WhisperJAV", ltx_gpu: "LTX 显卡预设",
-  mdcx_python: "Miko Python", mdcx_root: "Miko 目录", mdcx_profile: "Miko 配置", filmpaw_data_dir: "Filmpaw 数据目录",
+  mdcx_python: "Miko Python", mdcx_root: "Miko 目录", mdcx_profile: "Miko 配置",
   staging_dir: "暂存目录", staging_cap_gb: "暂存上限",
 };
-const MIKO = ["mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir"];
+const MIKO = ["mdcx_python", "mdcx_root", "mdcx_profile"];
 // 刮削 needs all three (backend `miko_status`)
 const MIKO_THREE = ["mdcx_python", "mdcx_root", "mdcx_profile"] as const;
 
@@ -320,13 +320,12 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
           {asrTool}
           <details open={MIKO.some((k) => errors[k]) || undefined}>
             <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>
-              Miko 与 Filmpaw（可选）{miko && <span style={{ opacity: 0.7 }}>&nbsp;· {miko}</span>}
+              Miko（可选）{miko && <span style={{ opacity: 0.7 }}>&nbsp;· {miko}</span>}
             </summary>
             <Stack spacing={2} sx={{ mt: 1 }}>
               {text("mdcx_python", "Miko Python", "MDCX304 环境的 python.exe；三项齐全才启用刮削")}
               {text("mdcx_root", "Miko 目录")}
               {text("mdcx_profile", "Miko 配置", "config.json")}
-              {text("filmpaw_data_dir", "Filmpaw 数据目录", "留空用默认位置")}
             </Stack>
           </details>
         </>

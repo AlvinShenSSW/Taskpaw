@@ -301,7 +301,7 @@ function settingsState(): WorkflowSettingsState {
   const view = {
     enabled: true, role: "controller" as const, inbox_root: "E:\\TODO", data_dir: "D:\\TaskpawWork", ffprobe_path: null,
     jasna_exe_path: null, whisperjav_exe_path: null, ltx_gpu: "auto", mdcx_python: null, mdcx_root: null, mdcx_profile: null,
-    filmpaw_data_dir: null, remote_workers: false, worker_api_port: 5682, staging_dir: null, staging_cap_gb: 500,
+    remote_workers: false, worker_api_port: 5682, staging_dir: null, staging_cap_gb: 500,
   };
   return {
     saved: view, running: view, restart_required: false, busy: { films: 0, remote: 0, unknown: false },

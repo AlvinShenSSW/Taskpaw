@@ -1,4 +1,4 @@
-"""#301: temporary packages and fake Filmpaw only."""
+"""#301: temporary packages and the fake library only."""
 
 # ruff: noqa: F811
 import errno
@@ -216,7 +216,7 @@ def test_archive_progress_cleared_before_wait_or_resubmit(monkeypatch, reason):
     elif reason == "changed_approval":
         op.approval_id = "old"
     fin.progress[wf.film_id] = {"copied_bytes": 60}
-    fin.filmpaw.lookup = lambda _: None
+    fin.library.lookup = lambda _: None
     submissions = []
     monkeypatch.setattr(fin, "_submit", lambda *args: submissions.append(args))
     assert fin._poll(wf, op, {}) == (reason == "vanished")
@@ -397,7 +397,7 @@ def test_archive_progress_reaches_list_and_detail(
         created_at="2026-10-24T08:00:00Z",
         items=[dict(name="ABC-123", progress_bytes=60, size_bytes=100)],
     )
-    monkeypatch.setattr(fin.filmpaw, "lookup", lambda _: task)
+    monkeypatch.setattr(fin.library, "lookup", lambda _: task)
     fin.run_once()
     for data in [
         client.get("/control/workflow/films").json()["films"][0],

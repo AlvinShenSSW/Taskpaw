@@ -159,7 +159,7 @@ export function settingsView(role: WorkflowRole, over: Partial<WorkflowSettingsV
   return {
     enabled: role !== "off", role, inbox_root: "E:\\TODO", data_dir: "D:\\TaskpawWork", ffprobe_path: null,
     jasna_exe_path: "C:\\Jasna\\jasna.exe", whisperjav_exe_path: null, ltx_gpu: "auto", mdcx_python: null, mdcx_root: null,
-    mdcx_profile: null, filmpaw_data_dir: null, remote_workers: true, worker_api_port: 5682, staging_dir: null, staging_cap_gb: 500,
+    mdcx_profile: null, remote_workers: true, worker_api_port: 5682, staging_dir: null, staging_cap_gb: 500,
     ...over,
   };
 }

@@ -88,7 +88,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
   const [submittedAt, setSubmittedAt] = useState(0);
   const actor = film?.actors[0] ?? "";
-  // Candidates: the preflight's (Filmpaw searched for every NFO actor); while Filmpaw is offline
+  // Candidates: the preflight's (the library searched for every NFO actor); while it is offline
   // (null) or the preflight failed, a manual search is offered instead.
   const search = useQuery({
     queryKey: ["mediaPerformers", actor], queryFn: () => api.performers(actor),

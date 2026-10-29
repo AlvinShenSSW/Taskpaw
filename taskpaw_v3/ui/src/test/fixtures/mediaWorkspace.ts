@@ -154,7 +154,7 @@ export const PREFLIGHTS: Record<string, TargetPreflight> = {
   "abf-406": preflight("ABF-406", [performer(1, "演员星河", "NAS-A")]),
   "abf-407": preflight("ABF-407", [performer(2, "演员夜航", "NAS-A"), performer(3, "演员夜航乙", "NAS-B")]),
   "abf-408": preflight("ABF-408", []),
-  "abf-409": preflight("ABF-409", null, { error_code: "offline", message: "Filmpaw 未运行" }),
+  "abf-409": preflight("ABF-409", null, { error_code: "offline", message: "片库不可用" }),
 };
 
 export const LOOKUP_DONE: PlanLookup = {

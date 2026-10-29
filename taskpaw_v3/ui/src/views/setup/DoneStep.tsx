@@ -99,7 +99,6 @@ export function DoneStep({ role, go }: StepProps) {
               {!s.remote_workers && <Row k="Jasna" v={s.jasna_exe_path ? (tools?.jasna.version ?? "已找到") : "未配置"} />}
               <Row k="WhisperJAV" v={s.whisperjav_exe_path ? "已找到" : "未配置"} />
               <Row k="Miko 引擎" v={settings.data?.miko === "complete" ? "MDCX304 · 三项齐全" : tools ? mikoLine(tools.miko) : "未配置"} />
-              <Row k="Filmpaw" v={s.filmpaw_data_dir ?? "默认数据目录"} />
             </Group>
           </>
         )}
