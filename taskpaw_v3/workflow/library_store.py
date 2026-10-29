@@ -646,8 +646,14 @@ class LibraryStore:
             ).fetchone()
             paged, limit = cond, " LIMIT :limit OFFSET :offset"
             if group:  # the page's groups, then all their rows
+                # filters pick the groups; each shows all its locations
+                shown = (
+                    "1=1"
+                    if include_missing or filter == "missing"
+                    else "p.is_missing = 0"
+                )
                 paged, limit = (
-                    f"{cond} AND p.name_norm IN (SELECT DISTINCT p.name_norm"
+                    f"{shown} AND p.name_norm IN (SELECT DISTINCT p.name_norm"
                     f" FROM performers p {join} WHERE {cond}"
                     " ORDER BY p.name_norm LIMIT :limit OFFSET :offset)",
                     "",

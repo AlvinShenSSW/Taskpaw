@@ -688,6 +688,35 @@ def test_group_mode_pages_whole_name_groups(library):
     assert store.search(group=True, library_id=b)["total"] == 2
 
 
+def test_group_mode_filters_pick_groups_but_show_every_location(library, tmp_path):
+    """CX3-6: library/missing/multi filters decide which groups are listed; each
+    listed group still carries all its locations."""
+    store, a, b = library
+    both = {a, b}
+
+    def libs(result):
+        return {i["library_id"] for i in result["items"] if i["name_norm"] == "张小雨"}
+
+    assert libs(store.search(group=True, library_id=a)) == both
+    assert store.search(group=True, library_id=a)["total"] == 4
+    assert libs(store.search(group=True, filter="multi")) == both
+    (tmp_path / "b" / "Bob_1").rename(tmp_path / "gone")
+    scan_library(store, b)
+    gone = store.search(group=True, filter="missing", include_missing=True)
+    assert gone["total"] == 1 and names(gone) == ["Bob_1"]
+    (tmp_path / "a" / "Alice").rename(tmp_path / "gone2")
+    scan_library(store, a)
+    (tmp_path / "b" / "张小雨").rename(tmp_path / "gone3")
+    scan_library(store, b)
+    hit = store.search(group=True, filter="missing", include_missing=True)
+    assert sorted(names(hit)) == ["Alice", "Bob_1", "张小雨", "張小雨"]
+    assert libs(hit) == both  # 張小雨 in A survives and is still shown
+    assert libs(store.search(group=True, filter="missing")) == {a, b}
+    assert libs(store.search(group=True, library_id=a, include_missing=True)) == both
+    assert store.search(group=True, library_id=b)["total"] == 0  # all missing there
+    assert libs(store.search(group=True, library_id=a)) == {a}  # default hides missing
+
+
 def test_search_escapes_like_wildcards(library):
     store, _, _ = library
     assert names(store.search("%")) == []

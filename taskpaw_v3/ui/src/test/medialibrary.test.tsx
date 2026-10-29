@@ -235,6 +235,20 @@ describe("片库与规则 · 演员", () => {
     await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ q: "ハル" })));
   });
 
+  it("opens the drawer for the location that supplies the row thumbnail", async () => {
+    const m = mockLibrary();
+    const bare = performer({ id: "p-kei-a", name: "Kei", library_id: "lib-a", has_thumb: false });
+    const shot = performer({ id: "p-kei-b", name: "Kei", library_id: "lib-b" });
+    m.performers.mockResolvedValue({ items: [bare, shot], total: 1, page: 1, page_size: 50 });
+    m.performer.mockResolvedValue({ ...shot, locations: [bare, shot], receipts: [] });
+    mount(<LibraryPage />);
+    await tab("演员");
+    fireEvent.click(await screen.findByRole("row", { name: "Kei 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "演员详情" });
+    await waitFor(() => expect(m.performer).toHaveBeenCalledWith("p-kei-b"));
+    expect((await within(drawer).findByRole("img", { name: "Kei 的 folder.jpg" })).closest(".avatar")).toHaveClass("lg");
+  });
+
   it("opens the drawer with the large thumbnail, every location and receipt, and edits aliases", async () => {
     const m = mockLibrary();
     const ws = mount(<LibraryPage />);

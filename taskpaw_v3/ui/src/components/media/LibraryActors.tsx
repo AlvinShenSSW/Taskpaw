@@ -80,7 +80,7 @@ export function ActorsTab({ libraries }: { libraries: Library[] }) {
             <tbody>
               {rows.map((locations) => {
                 const first = locations.find((p) => p.has_thumb) ?? locations[0];
-                const open = () => setOpened(locations[0].id);
+                const open = () => setOpened(first.id);
                 return (
                   <tr key={locations[0].id} tabIndex={0} aria-label={`${first.name} 详情`} onClick={open} onKeyDown={rowKeys(open)}>
                     <td><div className="who">
