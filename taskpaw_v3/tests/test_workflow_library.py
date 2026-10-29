@@ -199,6 +199,9 @@ def test_add_category_uppercases_prefixes(store, tmp_path):
 
 
 def test_add_requires_an_existing_directory(store, tmp_path):
+    for blank in ("", "   "):  # never the current drive root (CX5)
+        expect(422, store.add_library, "actor", blank)
+    assert store.libraries() == []
     expect(422, store.add_library, "actor", str(tmp_path / "nope"))
     (tmp_path / "file").write_text("x")
     expect(422, store.add_library, "actor", str(tmp_path / "file"))
