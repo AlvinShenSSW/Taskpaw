@@ -136,10 +136,11 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
                 (library_id,),
             )
         }
-        known = {
+        known = {  # present before the listing: only these can go missing now
             row["id"]
             for row in conn.execute(
-                "SELECT id FROM performers WHERE library_id=?", (library_id,)
+                "SELECT id FROM performers WHERE library_id=? AND is_missing=0",
+                (library_id,),
             )
         }
     if lib is None:
