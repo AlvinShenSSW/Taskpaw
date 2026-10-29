@@ -12,7 +12,7 @@ datas, binaries, hiddenimports = [], [], []
 # These libs ship data files / dynamically-imported submodules PyInstaller's
 # static analysis misses — collect them wholesale.
 for pkg in ("uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
-            "yaml", "psutil", "anyio", "click", "h11"):
+            "yaml", "psutil", "anyio", "click", "h11", "zhconv"):
     try:
         d, b, h = collect_all(pkg)
         datas += d
@@ -22,6 +22,10 @@ for pkg in ("uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
         # These are REQUIRED runtime libs — fail the build rather than ship a
         # backend that crashes on import at runtime (Kimi).
         raise SystemExit(f"packaging error: cannot collect required package {pkg!r}: {e}")
+# #362: the library's name normalization loads zhconv's dictionary at runtime;
+# without it every lookup crashes, so a bundle without it must not build.
+if not any(os.path.basename(src) == "zhcdict.json" for src, _ in datas):
+    raise SystemExit("packaging error: zhconv's zhcdict.json is not bundled (#362)")
 hiddenimports += collect_submodules("taskpaw_v3")
 # Bundle the example config templates that bootstrap.scaffold() reads on first
 # run. collect_submodules grabs .py only, not data files, so without these the

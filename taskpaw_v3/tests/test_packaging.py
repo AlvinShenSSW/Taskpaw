@@ -143,6 +143,44 @@ def test_examples_bundled_for_scaffold():
     ), "taskpaw-backend.spec no longer bundles taskpaw_v3/examples/*.yaml (#53)"
 
 
+def test_zhconv_dictionary_is_bundled():
+    """#362: the library's normalize() reads zhconv's zhcdict.json at runtime, so
+    the spec collects zhconv wholesale and refuses to build without the file."""
+    import ast
+    import re
+
+    import zhconv
+
+    from taskpaw_v3.workflow.library_store import normalize
+
+    assert (Path(zhconv.__file__).parent / "zhcdict.json").is_file()
+    assert normalize("張") == "张"
+    spec = (
+        Path(__file__).resolve().parents[2]
+        / "taskpaw_v3/packaging/taskpaw-backend.spec"
+    )
+    text = spec.read_text(encoding="utf-8")
+    loop = next(
+        n
+        for n in ast.walk(ast.parse(text))
+        if isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Tuple)
+        and "collect_all" in ast.unparse(n)
+    )
+    assert "zhconv" in [ast.literal_eval(e) for e in loop.iter.elts]
+    assert re.search(
+        r'if not any\(os\.path\.basename\(src\) == "zhcdict\.json" for src, _ in datas\):'
+        r"\s+raise SystemExit",
+        text,
+    )
+    try:
+        from PyInstaller.utils.hooks import collect_all
+    except ImportError:  # the `build` extra is not installed here
+        return
+    datas = collect_all("zhconv")[0]
+    assert any(os.path.basename(src) == "zhcdict.json" for src, _ in datas)
+
+
 def test_agent_service_scaffold_oserror_clean_exit(tmp_path, monkeypatch):
     # If the default config dir isn't writable, fail cleanly (exit 1), don't crash.
     import sys
