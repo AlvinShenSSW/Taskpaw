@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from taskpaw_v3.core.config import WorkflowSettings
@@ -51,6 +52,11 @@ class AliasBody(BaseModel):
 class ImportBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: Optional[str] = Field(default=None, max_length=1024)
+
+
+class OpenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=1024)
 
 
 @contextmanager
@@ -192,3 +198,47 @@ def register_library_routes(
         for library_id in result["added"]:
             host.library_scanner.request(library_id)
         return result
+
+    # ── 归档历史 (§10) ─────────────────────────────────────────────────
+    @app.get(f"{BASE}/history")
+    def library_history_list(
+        filter: Optional[
+            Literal["pending", "new", "category", "manual", "second"]
+        ] = None,
+        q: str = Query(default="", max_length=256),
+        page: int = Query(default=1, ge=1),
+    ) -> dict[str, Any]:
+        from taskpaw_v3.workflow import library_history
+
+        host = _host()
+        with reads._mapped():
+            return library_history.history(
+                reads.runtime(host), host.library, filter, q, page
+            )
+
+    @app.get(f"{BASE}/history/{{receipt_id}}")
+    def library_history_receipt(receipt_id: str) -> dict[str, Any]:
+        from taskpaw_v3.workflow import library_history
+
+        host = _host()
+        with reads._mapped():
+            return library_history.receipt(
+                reads.runtime(host), host.library, receipt_id
+            )
+
+    @app.post(f"{BASE}/open")
+    def library_open(body: OpenBody) -> Response:
+        """Opens only a library root's subtree or a receipt's target (403)."""
+        from taskpaw_v3.workflow import library_history
+
+        from .workflow_routes import open_response
+
+        host = _host()
+        with reads._mapped():
+            if not library_history.may_open(
+                reads.runtime(host), host.library, body.path
+            ):
+                raise HTTPException(
+                    status_code=403, detail="只能打开片库或归档目标中的目录"
+                )
+            return open_response(Path(body.path))

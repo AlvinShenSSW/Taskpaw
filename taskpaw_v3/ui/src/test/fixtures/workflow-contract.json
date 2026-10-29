@@ -1540,6 +1540,7 @@
         "status": "pending",
         "error": null,
         "manual": false,
+        "kind": null,
         "target_path": null
       },
       "cleanup": {
@@ -1822,6 +1823,7 @@
         "status": "pending",
         "error": null,
         "manual": false,
+        "kind": null,
         "target_path": null
       },
       "cleanup": {
@@ -2125,6 +2127,7 @@
         "status": "pending",
         "error": null,
         "manual": false,
+        "kind": null,
         "target_path": null
       },
       "cleanup": {
@@ -2330,6 +2333,7 @@
         "status": "pending",
         "error": null,
         "manual": false,
+        "kind": null,
         "target_path": null
       },
       "cleanup": {
@@ -2529,6 +2533,7 @@
         "status": "pending",
         "error": null,
         "manual": false,
+        "kind": null,
         "target_path": null
       },
       "cleanup": {
@@ -2696,9 +2701,11 @@
       "film_dir": "ABC-123",
       "performer_id": "actor",
       "target_dir": null,
+      "category_id": null,
       "manual": false,
       "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
       "absent": true,
+      "archived": false,
       "error_code": null,
       "message": null,
       "candidates": {
@@ -2715,20 +2722,33 @@
             "aliases": [],
             "alias_ids": [],
             "library_id": "id-10",
+            "role": "archive",
             "is_missing": false,
             "film_count": null,
             "fuzzy": false
           }
         ]
+      },
+      "categories": [],
+      "selected": {
+        "kind": "performer",
+        "id": "actor"
+      },
+      "second_hint": null,
+      "new_actor": {
+        "library_id": "id-10",
+        "name": "Actor"
       }
     },
     "selected": {
       "film_dir": "ABC-123",
       "performer_id": "actor",
       "target_dir": null,
+      "category_id": null,
       "manual": false,
       "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
       "absent": true,
+      "archived": false,
       "error_code": null,
       "message": null,
       "candidates": {
@@ -2745,20 +2765,33 @@
             "aliases": [],
             "alias_ids": [],
             "library_id": "id-10",
+            "role": "archive",
             "is_missing": false,
             "film_count": null,
             "fuzzy": false
           }
         ]
+      },
+      "categories": [],
+      "selected": {
+        "kind": "performer",
+        "id": "actor"
+      },
+      "second_hint": null,
+      "new_actor": {
+        "library_id": "id-10",
+        "name": "Actor"
       }
     },
     "missing": {
       "film_dir": "ABC-123",
       "performer_id": "gone",
       "target_dir": null,
+      "category_id": null,
       "manual": false,
       "target_path": null,
       "absent": null,
+      "archived": null,
       "error_code": "missing",
       "message": "所选演员记录已不存在",
       "candidates": {
@@ -2775,23 +2808,40 @@
             "aliases": [],
             "alias_ids": [],
             "library_id": "id-10",
+            "role": "archive",
             "is_missing": false,
             "film_count": null,
             "fuzzy": false
           }
         ]
+      },
+      "categories": [],
+      "selected": {
+        "kind": "performer",
+        "id": "gone"
+      },
+      "second_hint": null,
+      "new_actor": {
+        "library_id": "id-10",
+        "name": "Actor"
       }
     },
     "offline": {
       "film_dir": "ABC-123",
       "performer_id": "actor",
       "target_dir": null,
+      "category_id": null,
       "manual": false,
       "target_path": null,
       "absent": null,
+      "archived": null,
       "error_code": "offline",
       "message": "片库不可用：片库尚未启动",
-      "candidates": null
+      "candidates": null,
+      "categories": null,
+      "selected": null,
+      "second_hint": null,
+      "new_actor": null
     }
   }
 }

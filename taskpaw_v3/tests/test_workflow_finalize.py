@@ -27,7 +27,7 @@ from taskpaw_v3.tests.workflow_fake_library import FakeLibrary
 from taskpaw_v3.workflow import file_identity
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.finalize import ConfirmError, Finalizer
-from taskpaw_v3.workflow.library_store import insert_library
+from taskpaw_v3.workflow.library_store import insert_library, normalize
 
 FILM_DIR = "ABC-123"
 
@@ -561,30 +561,356 @@ def test_an_open_filmpaw_era_manual_archive_resubmits_to_the_engine(world, monke
     assert (destination / FILM_DIR).is_dir()
 
 
-def test_candidates_come_from_the_library_with_todays_preselection(world, tmp_path):
+def _library(world, kind: str, path: Path, **kw) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    with world.fake.store.transaction() as conn:
+        return insert_library(conn, kind, str(path), **kw)
+
+
+def _location(world, performer_id: str, path: Path, *, films: int = 0) -> str:
+    """One more location of the `Actor` group, in a library of its own."""
+    library = _library(world, "actor", path.parent)
+    path.mkdir(exist_ok=True)
+    with world.fake.store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO performers(id, name, name_norm, library_id, folder_name,"
+            " path, first_seen_at, last_seen_at, is_missing, film_count)"
+            " VALUES (?,?,?,?,?,?,'t','t',0,?)",
+            (
+                performer_id,
+                path.name,
+                normalize(path.name),
+                library,
+                path.name,
+                str(path),
+                films,
+            ),
+        )
+    return library
+
+
+def _rules(world, **rules) -> None:
+    world.fake.store.put_rules(rules)
+
+
+def test_candidates_come_from_the_library_and_the_rules_preselect(world, tmp_path):
+    """§9.6 step 1: one group preselects, its locations by `multi_location`."""
     world.scrape()
     with world.fake:
         fin = world.finalizer()
         only = fin.preflight(world.film)
         assert only["performer_id"] == "actor" and only["absent"] is True
-        other = tmp_path / "nas2" / "Actor"
-        other.mkdir(parents=True)
-        with world.fake.store.transaction() as conn:
-            library = insert_library(conn, "actor", str(other.parent))
-            conn.execute(
-                "INSERT INTO performers(id, name, name_norm, library_id, folder_name,"
-                " path, first_seen_at, last_seen_at, is_missing)"
-                " VALUES ('second','Actor','actor',?,'Actor',?,'t','t',0)",
-                (library, str(other)),
-            )
+        assert only["selected"] == {"kind": "performer", "id": "actor"}
+        assert only["archived"] is False and only["categories"] == []
+        _location(world, "second", tmp_path / "nas2" / "Actor", films=5)
         several = fin.preflight(world.film)
         assert [i["id"] for i in several["candidates"]["items"]] == ["actor", "second"]
-        assert several["performer_id"] is None and several["target_path"] is None
+        assert several["performer_id"] == "actor"  # priority: library order
+        _rules(world, multi_location="most")
+        assert fin.preflight(world.film)["performer_id"] == "second"
+        _rules(world, multi_location="recent")  # no receipt yet: library order
+        assert fin.preflight(world.film)["performer_id"] == "actor"
+        _rules(world, preselect_single=False)
+        unselected = fin.preflight(world.film)
+        assert (unselected["selected"], unselected["target_path"]) == (None, None)
+        _rules(world, preselect_single=True)
         with world.fake.store.transaction() as conn:
             conn.execute("UPDATE performers SET is_missing=1 WHERE id='second'")
         again = fin.preflight(world.film)  # include_missing=false
         assert [i["id"] for i in again["candidates"]["items"]] == ["actor"]
-        assert again["performer_id"] == "actor"
+
+
+def test_the_recent_rule_picks_the_location_of_the_newest_receipt(world, tmp_path):
+    world.scrape()
+    second = tmp_path / "nas2" / "Actor"
+    _location(world, "second", second)
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "second")
+        world.ticks(fin)
+        assert (second / FILM_DIR).is_dir()
+        _rules(world, multi_location="recent")
+        assert world.fake.store.candidates(["Actor"], "X")["selected"] == {
+            "kind": "performer",
+            "id": "second",
+        }
+
+
+def test_several_groups_fuzzy_and_read_only_candidates_are_never_preselected(
+    world, tmp_path
+):
+    world.scrape()
+    store = world.fake.store
+    _location(world, "other", tmp_path / "nas2" / "Actress")
+    with store.transaction() as conn:  # a second group found by an alias
+        conn.execute(
+            "INSERT INTO aliases(name_norm, alias, alias_norm)"
+            " VALUES ('actress','Actor','actor')"
+        )
+    groups = store.candidates(["Actor"], "X")
+    assert {i["id"] for i in groups["items"]} == {"actor", "other"}
+    assert groups["selected"] is None  # §9.6 step 2
+    _rules(world, alias_match=False)
+    assert store.candidates(["Actor"], "X")["selected"]["id"] == "actor"
+    fuzzy = store.candidates(["Act or"], "X")  # §6: listed only
+    assert [(i["id"], i["fuzzy"]) for i in fuzzy["items"]] == [("actor", True)]
+    assert fuzzy["selected"] is None
+    _rules(world, fuzzy=False)
+    assert store.candidates(["Act or"], "X")["items"] == []
+    with store.transaction() as conn:
+        conn.execute("UPDATE libraries SET role='readonly' WHERE kind='actor'")
+    readonly = store.candidates(["Actor"], "X")
+    assert [i["role"] for i in readonly["items"]] == ["readonly"]
+    assert readonly["selected"] is None
+
+
+def test_a_category_prefix_preselects_only_without_an_actor_and_hints_otherwise(
+    world, tmp_path
+):
+    """§9.6 steps 3–4 and the `category_*` / `second_target_hint` rules."""
+    world.scrape()
+    store = world.fake.store
+    photo = _library(world, "category", tmp_path / "photo", prefixes=["AB"])
+    series = _library(world, "category", tmp_path / "series", prefixes=["abc"])
+    with world.fake:
+        fin = world.finalizer()
+        actor = fin.preflight(world.film)
+        assert actor["selected"] == {"kind": "performer", "id": "actor"}
+        assert actor["second_hint"] == series  # the longest prefix
+        assert [(c["id"], c["prefix_match"]) for c in actor["categories"]] == [
+            (photo, True),
+            (series, True),
+        ]
+        assert actor["categories"][1]["prefixes"] == ["ABC"]
+        _rules(world, second_target_hint=False)
+        assert fin.preflight(world.film)["second_hint"] is None
+        _rules(world, category_always=False)
+        assert fin.preflight(world.film)["categories"] == []
+        with store.transaction() as conn:
+            conn.execute("DELETE FROM performers")
+        none = fin.preflight(world.film)
+        assert none["selected"] == {"kind": "category", "id": series}
+        assert none["category_id"] == series and none["second_hint"] is None
+        assert none["target_path"] == str(tmp_path / "series" / FILM_DIR)
+        assert none["absent"] is True and none["error_code"] is None
+        _rules(world, category_prefix=False)
+        assert fin.preflight(world.film)["selected"] is None
+        assert store.candidates([], "XYZ-1")["selected"] is None
+
+
+def test_the_new_actor_defaults_follow_the_rules(world):
+    world.scrape()
+    store = world.fake.store
+    with world.fake:
+        fin = world.finalizer()
+        (library,) = store.library_ids()
+        assert fin.preflight(world.film)["new_actor"] == {
+            "library_id": library,
+            "name": "Actor",
+        }
+        _rules(world, new_actor_name="ask")
+        assert fin.preflight(world.film)["new_actor"]["name"] == ""
+        _rules(world, allow_new_actor=False)
+        assert fin.preflight(world.film)["new_actor"] is None
+
+
+def test_a_new_actor_preflight_proves_the_root_and_refuses_an_existing_actor(world):
+    world.scrape()
+    (library,) = world.fake.store.library_ids()
+    with world.fake:
+        fin = world.finalizer()
+        new = fin.preflight(world.film, library_id=library, actor_name="新人")
+        assert new["selected"] == {"kind": "new_actor", "id": library}
+        assert new["target_path"] == str(world.nas.parent / "新人" / FILM_DIR)
+        assert (new["absent"], new["error_code"]) == (True, None)
+        taken = fin.preflight(world.film, library_id=library, actor_name="actor")
+        assert taken["error_code"] == "actor_exists"  # casefold of nas/Actor
+        bad = fin.preflight(world.film, library_id=library, actor_name="a:b")
+        assert bad["error_code"] == "permission"
+        with pytest.raises(ConfirmError, match="只选择一个"):
+            fin.preflight(world.film, "actor", category_id="c")
+
+
+def _root(key: str) -> str:
+    return str(uuid.uuid5(uuid.UUID("0b7f3c2e-6f2d-4a8e-9c1d-3e5a7b9d2f41"), key))
+
+
+def _second_row(world) -> dict | None:
+    with world.fake.store.reading() as conn:
+        row = conn.execute("SELECT * FROM second_targets").fetchone()
+    return dict(row) if row else None
+
+
+def test_a_category_confirm_is_encoded_and_archived_into_the_category(world, tmp_path):
+    world.scrape()
+    photo = tmp_path / "photo"
+    category = _library(world, "category", photo, prefixes=["ABC"])
+    package = _files(_scrape_out(world))
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, category_id=category)
+        target = _binding_target(world)
+        native = target.native_identity
+        assert (native.scheme, native.volume_or_export_id) == (
+            "library_category",
+            category,
+        )
+        assert target.root_id == _root(f"taskpaw-category:{category}")
+        assert target.export_identity == str(photo)
+        assert target.relative_path == FILM_DIR
+        assert _second_row(world) is None  # only actor targets carry one
+        with patch.object(fin.library, "archive", wraps=fin.library.archive) as call:
+            world.ticks(fin)
+        assert call.call_args.kwargs["category_id"] == category
+        assert call.call_args.kwargs["second"] is None
+    assert world.status("cleanup_input") == "succeeded"
+    assert _files(photo / FILM_DIR) == package
+    with pytest.raises(ConfirmError, match="第二目标"):
+        world.finalizer().confirm(
+            world.film, category_id=category, second_category_id=category
+        )
+
+
+def test_a_new_actor_confirm_creates_the_directory_and_its_performer(world):
+    world.scrape()
+    (library,) = world.fake.store.library_ids()
+    actor = world.nas.parent / "新人"
+    package = _files(_scrape_out(world))
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, library_id=library, actor_name="新人")
+        assert not actor.exists()  # created only by the archive (D3)
+        target = _binding_target(world)
+        native = target.native_identity
+        assert (native.scheme, native.volume_or_export_id) == (
+            "library_new_actor",
+            library,
+        )
+        assert target.root_id == _root(f"taskpaw-new-actor:{library}:新人")
+        assert target.export_identity == str(world.nas.parent)
+        assert target.relative_path == f"新人/{FILM_DIR}"
+        st = os.lstat(world.nas.parent)
+        assert native.object_id == json.dumps([str(st.st_dev), str(st.st_ino)])
+        assert _second_row(world)["category_id"] is None  # always written
+        world.ticks(fin)
+        (row,) = world.fake.store.search("新人")["items"]
+        assert (row["unc_path"], row["is_missing"]) == (str(actor), False)
+    assert world.status("cleanup_input") == "succeeded"
+    assert _files(actor / FILM_DIR) == package
+    wf = world.rt.store.film_workflow(world.rt.operator, world.film)
+    assert wf.archive_path == str(actor / FILM_DIR)
+
+
+def test_a_second_target_is_copied_too_before_any_cleanup(world, tmp_path):
+    """§9.4: one approval, two verified copies, then cleanup."""
+    world.scrape()
+    photo = tmp_path / "photo"
+    category = _library(world, "category", photo)
+    package = _files(_scrape_out(world))
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor", second_category_id=category)
+        approval = world.rt.store.film_workflow(world.rt.operator, world.film).approval
+        row = _second_row(world)
+        assert row["binding_hash"] == approval.binding_hash
+        assert (row["category_id"], row["target_path"]) == (category, str(photo))
+        with patch.object(fin.library, "archive", wraps=fin.library.archive) as call:
+            fin.run_once()  # submitted and copied twice inline
+        assert call.call_args.kwargs["second"]["category_id"] == category
+        world.ticks(fin)
+    assert world.fake.copies == 2
+    assert _files(world.nas / FILM_DIR) == _files(photo / FILM_DIR) == package
+    assert world.status("cleanup_input") == "succeeded"
+    assert world.status("cleanup_workcopy") == "succeeded"
+
+
+def test_an_actor_binding_without_its_second_target_row_fails_unarchived(world):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        with world.fake.store.transaction() as conn:
+            conn.execute("DELETE FROM second_targets")
+        world.ticks(fin, 2)
+    assert world.status("archive") == "failed"
+    (failed,) = world.rt.store.film_workflow(
+        world.rt.operator, world.film
+    ).archive_operations
+    assert failed.error_code == "入库目标记录缺失，请重新确认入库"
+    assert world.fake.posts == 0 and world.status("cleanup_input") == "pending"
+
+
+def test_a_receipt_without_the_bound_second_copy_is_not_accepted(world, tmp_path):
+    world.scrape()
+    category = _library(world, "category", tmp_path / "photo")
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor", second_category_id=category)
+        real = fin.library.lookup
+
+        def one_copy(operation_id):
+            task = real(operation_id)
+            if task and task["receipt"]:
+                task = {**task, "receipt": {**task["receipt"], "second": None}}
+            return task
+
+        with patch.object(fin.library, "lookup", one_copy):
+            world.ticks(fin)
+    assert world.status("archive") == "failed"
+    assert world.status("cleanup_input") == "pending"
+    wf = world.rt.store.film_workflow(world.rt.operator, world.film)
+    assert wf.archive_operations[-1].error_code == "归档回执与已批准清单不一致"
+
+
+def test_a_failed_second_copy_is_retried_alone_after_a_new_confirm(
+    world, tmp_path, monkeypatch
+):
+    """§9.5: the primary reads as archived, is re-verified, and is not copied."""
+    from taskpaw_v3.workflow import library_archive as la
+
+    world.scrape()
+    photo = tmp_path / "photo"
+    category = _library(world, "category", photo)
+    package = _files(_scrape_out(world))
+    real = la.LibraryArchive._verify
+
+    def second_fails(self, task, payload, staging, hashes):
+        if staging.parent == photo:
+            raise la._Failed("SHA-256 内容校验失败：模拟")
+        return real(self, task, payload, staging, hashes)
+
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor", second_category_id=category)
+        monkeypatch.setattr(la.LibraryArchive, "_verify", second_fails)
+        world.ticks(fin, 2)
+        monkeypatch.undo()
+        assert world.status("archive") == "failed"
+        assert world.fake.copies == 1 and (world.nas / FILM_DIR).is_dir()
+        assert world.status("cleanup_input") == "pending"  # nothing cleaned
+        again = fin.preflight(world.film)
+        assert (again["absent"], again["archived"], again["error_code"]) == (
+            False,
+            True,
+            None,
+        )
+        fin.confirm(world.film, "actor", second_category_id=category)
+        assert _binding_target(world).expected_absent is True
+        world.ticks(fin)
+    assert world.fake.copies == 2  # only the second copy ran again
+    assert _files(world.nas / FILM_DIR) == _files(photo / FILM_DIR) == package
+    assert world.status("cleanup_input") == "succeeded"
+
+
+def test_a_folder_this_engine_did_not_commit_still_blocks_confirm(world):
+    world.scrape()
+    (world.nas / FILM_DIR).mkdir()
+    with world.fake:
+        fin = world.finalizer()
+        found = fin.preflight(world.film)
+        assert (found["archived"], found["error_code"]) == (False, "duplicate")
+        with pytest.raises(ConfirmError, match="同名"):
+            fin.confirm(world.film, "actor")
 
 
 def test_preflight_maps_the_refusal_code_not_the_status(world):

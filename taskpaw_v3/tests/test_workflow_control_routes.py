@@ -21,6 +21,7 @@ from taskpaw_v3.tests import test_workflow_scrape_step as scr
 from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     FILM_DIR,
     World,
+    _files,
     probeable_video,
     world,
 )
@@ -30,6 +31,7 @@ from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow.library_store import insert_library
 from taskpaw_v3.workflow.local_host import film_policy, retry_failed_stage
 
 AUTH = {"Authorization": "Bearer t"}
@@ -49,6 +51,7 @@ class Host:
         self.state, self.reason = "running", ""
         self.runtime = world.rt
         self.finalizer = world.finalizer()
+        self.library = world.fake.store  # #364: history and performer detail
         self.current: dict[str, str] | None = None
         self.intake: dict[str, Any] | None = None
         self.confirm_error: Exception | None = None
@@ -72,10 +75,11 @@ class Host:
         film_id: str,
         performer_id: str | None = None,
         target_dir: str | None = None,
+        **target: str | None,
     ) -> str:
         if self.confirm_error is not None:
             raise self.confirm_error
-        return self.finalizer.confirm(film_id, performer_id, target_dir)
+        return self.finalizer.confirm(film_id, performer_id, target_dir, **target)
 
     def retry(self, film_id: str, stage: str) -> None:
         retry_failed_stage(self.runtime, film_id, stage)
@@ -298,6 +302,7 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "error": None,
         "target_path": None,
         "manual": False,
+        "kind": None,
     }
     assert data["cleanup"] == {"input": "pending", "workcopy": "pending", "kept": []}
 
@@ -390,6 +395,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         "error": None,
         "target_path": str(world.nas / FILM_DIR),
         "manual": False,
+        "kind": "performer",
     }
     assert data["cleanup"] == {
         "input": "succeeded",
@@ -450,6 +456,197 @@ def test_performer_search_leaves_out_missing_performers_by_default(world, client
         assert [i["id"] for i in shown.json()["items"]] == ["actor"]
 
 
+# ── category, new actor, second target, history (#364: §9.6, §10) ───────
+def _category(world, name: str = "photo") -> tuple[str, Path]:
+    path = world.tmp / name
+    path.mkdir()
+    with world.fake.store.transaction() as conn:
+        return insert_library(conn, "category", str(path), prefixes=["ABC"]), path
+
+
+def test_the_target_preflight_takes_a_category_or_a_new_actor(world, client):
+    world.scrape()
+    category, photo = _category(world)
+    (library,) = [
+        lib["id"] for lib in world.fake.store.libraries() if lib["kind"] == "actor"
+    ]
+    url = f"{BASE}/films/{world.film}/target"
+    with world.fake:
+        chosen = client.get(url).json()
+        assert chosen["selected"] == {"kind": "performer", "id": "actor"}
+        assert chosen["second_hint"] == category
+        assert [c["id"] for c in chosen["categories"]] == [category]
+        assert chosen["new_actor"] == {"library_id": library, "name": "Actor"}
+        to_category = client.get(url, params={"category_id": category}).json()
+        assert to_category["target_path"] == str(photo / FILM_DIR)
+        assert to_category["selected"] == {"kind": "category", "id": category}
+        new = client.get(
+            url, params={"library_id": library, "actor_name": "新人"}
+        ).json()
+        assert new["target_path"] == str(world.nas.parent / "新人" / FILM_DIR)
+        assert new["error_code"] is None
+        both = client.get(
+            url, params={"performer_id": "actor", "category_id": category}
+        )
+        assert both.status_code == 409
+
+
+def test_confirm_takes_a_new_actor_with_a_second_category(world, host, client):
+    world.scrape()
+    category, photo = _category(world)
+    (library,) = [
+        lib["id"] for lib in world.fake.store.libraries() if lib["kind"] == "actor"
+    ]
+    url = f"{BASE}/films/{world.film}/confirm"
+    with world.fake:
+        response = client.post(
+            url,
+            json={
+                "new_actor": {"library_id": library, "name": "新人"},
+                "second_category_id": category,
+            },
+        )
+        assert response.status_code == 200, response.text
+        world.ticks(host.finalizer)
+    archive = client.get(f"{BASE}/films/{world.film}").json()["archive"]
+    assert archive["kind"] == "new_actor" and archive["status"] == "succeeded"
+    assert archive["target_path"] == str(world.nas.parent / "新人" / FILM_DIR)
+    assert (photo / FILM_DIR).is_dir()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"performer_id": "actor", "category_id": "c"},
+        {"category_id": "c", "new_actor": {"library_id": "l", "name": "n"}},
+        {"new_actor": {"library_id": "l"}},
+        {"second_category_id": "c"},
+    ],
+)
+def test_confirm_takes_exactly_one_target_of_any_kind(world, client, body):
+    response = client.post(f"{BASE}/films/{world.film}/confirm", json=body)
+    assert response.status_code == 422
+
+
+def _archived(world, host, client, **body) -> None:
+    world.scrape()
+    with world.fake:
+        response = client.post(f"{BASE}/films/{world.film}/confirm", json=body)
+        assert response.status_code == 200, response.text
+        world.ticks(host.finalizer)
+
+
+def test_history_lists_receipts_with_both_targets_facts_and_cleanup(
+    world, host, client
+):
+    category, photo = _category(world)
+    _archived(world, host, client, performer_id="actor", second_category_id=category)
+    url = f"{BASE}/library/history"
+    with world.fake:
+        body = client.get(url).json()
+        (row,) = body["items"]
+        assert (body["total"], body["page"]) == (1, 1)
+        assert row["kind"] == "performer" and row["film_id"] == world.film
+        assert row["target_path"] == str(world.nas / FILM_DIR)
+        assert row["second_target_path"] == str(photo / FILM_DIR)
+        assert (row["number"], row["title"], row["actors"]) == (
+            FILM_DIR,
+            "假的标题",
+            ["Actor"],
+        )
+        assert row["cleanup"] == {"input": "verified", "workcopy": "verified"}
+        assert row["pending"] is False
+        for filter, count in (
+            ("second", 1),
+            ("pending", 0),
+            ("new", 0),
+            ("category", 0),
+            ("manual", 0),
+        ):
+            listed = client.get(url, params={"filter": filter}).json()
+            assert listed["total"] == count, filter
+        assert client.get(url, params={"q": "假的"}).json()["total"] == 1
+        assert client.get(url, params={"q": "photo"}).json()["total"] == 1
+        assert client.get(url, params={"q": "nothing"}).json()["total"] == 0
+        assert client.get(url, params={"filter": "x"}).status_code == 422
+        assert client.get(url, params={"page": 2}).json()["items"] == []
+        detail = client.get(f"{url}/{row['receipt_id']}").json()
+        assert detail["second_target_path"] == row["second_target_path"]
+        assert {f["path"] for f in detail["files"]} == set(_files(world.nas / FILM_DIR))
+        assert detail["message"].startswith("影片包已归档")
+        assert client.get(f"{url}/{identity()}").status_code == 404
+
+
+def test_a_receipt_waiting_for_cleanup_is_pending(world, host, client):
+    world.scrape()
+    with world.fake:
+        client.post(
+            f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
+        )
+        host.finalizer.run_once()  # submitted and copied inline
+        host.finalizer.run_once()  # receipt accepted; no cleanup yet
+        listed = client.get(f"{BASE}/library/history", params={"filter": "pending"})
+        (row,) = listed.json()["items"]
+        assert row["pending"] is True
+        assert row["cleanup"] == {"input": None, "workcopy": None}
+
+
+def test_a_filmpaw_era_receipt_falls_back_to_its_binding_scheme(
+    world, host, client, monkeypatch
+):
+    _archived(world, host, client, performer_id="actor")
+    with world.fake.store.transaction() as conn:
+        conn.execute("DELETE FROM archive_tasks")  # Filmpaw kept its own tasks
+    real = world.rt.store.archive_receipts
+
+    def filmpaw_era(auth):
+        rows = real(auth)
+        for row in rows:
+            row["target"]["native_identity"]["scheme"] = "export_object_id"
+        return rows
+
+    monkeypatch.setattr(world.rt.store, "archive_receipts", filmpaw_era)
+    with world.fake:
+        (row,) = client.get(f"{BASE}/library/history").json()["items"]
+        assert (row["kind"], row["second_target_path"]) == ("performer", None)
+        assert row["target_path"] == str(world.nas / FILM_DIR)
+        detail = client.get(f"{BASE}/library/history/{row['receipt_id']}").json()
+        assert detail["message"] is None
+        assert {f["path"] for f in detail["files"]} == set(_files(world.nas / FILM_DIR))
+
+
+def test_library_open_only_opens_library_and_receipt_paths(
+    world, host, client, monkeypatch
+):
+    opened: list[Path] = []
+    monkeypatch.setattr(workflow_routes, "open_folder", opened.append)
+    manual = world.tmp / "manual"
+    manual.mkdir()
+    _archived(world, host, client, target_dir=str(manual))
+    url = f"{BASE}/library/open"
+    with world.fake:
+        for path in (world.nas, world.nas / "deeper", manual / FILM_DIR):
+            assert client.post(url, json={"path": str(path)}).status_code == 204
+        for path in (
+            str(manual),  # the manual parent is not a receipt target
+            str(world.tmp),
+            str(world.nas.parent / ".." / "elsewhere"),
+            "relative/path",
+        ):
+            assert client.post(url, json={"path": path}).status_code == 403, path
+    assert opened == [world.nas, world.nas / "deeper", manual / FILM_DIR]
+
+
+def test_performer_detail_has_its_group_and_recent_receipts(world, host, client):
+    _archived(world, host, client, performer_id="actor")
+    with world.fake:
+        detail = client.get(f"{BASE}/performers/actor").json()
+        assert [loc["id"] for loc in detail["locations"]] == ["actor"]
+        (receipt,) = detail["receipts"]
+        assert receipt["target_path"] == str(world.nas / FILM_DIR)
+        assert client.get(f"{BASE}/performers/nobody").status_code == 404
+
+
 # ── confirm (U4, D05) ────────────────────────────────────────────────────
 def test_manual_confirm_and_detail(world, host, client):
     world.scrape()
@@ -467,6 +664,7 @@ def test_manual_confirm_and_detail(world, host, client):
         "error": None,
         "target_path": str(destination / FILM_DIR),
         "manual": True,
+        "kind": "manual",
     }
 
 

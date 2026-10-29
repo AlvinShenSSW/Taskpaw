@@ -201,6 +201,7 @@ class WorkflowHostLike(Protocol):
         film_id: str,
         performer_id: str | None = None,
         target_dir: str | None = None,
+        **target: str | None,
     ) -> str: ...
 
     def retry(self, film_id: str, stage: str) -> None: ...
@@ -509,11 +510,15 @@ class LocalWorkflowHost:
         film_id: str,
         performer_id: str | None = None,
         target_dir: str | None = None,
+        **target: str | None,
     ) -> str:
-        """确认入库 (F02-P1 C1); raises ConfirmError with the reason when refused."""
+        """确认入库 (F02-P1 C1); raises ConfirmError with the reason when refused.
+        `target`: `Finalizer.confirm`'s category, new actor and second target."""
         if self.finalizer is None:
             raise RuntimeError("媒体流水线尚未启动")
-        approval_id = self.finalizer.confirm(film_id, performer_id, target_dir)
+        approval_id = self.finalizer.confirm(
+            film_id, performer_id, target_dir, **target
+        )
         if self.dispatcher is not None:
             self.dispatcher.wake()
         return approval_id

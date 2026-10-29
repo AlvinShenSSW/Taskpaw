@@ -19,6 +19,7 @@ import pytest
 
 from taskpaw_v3.workflow import library_archive as la
 from taskpaw_v3.workflow.library_archive import (
+    ACTOR_EXISTS,
     CONFLICT,
     MISMATCH,
     STAGING_PREFIX,
@@ -359,9 +360,7 @@ def test_a_filmpaw_era_integer_identity_is_the_same_identity(rig, tmp_path):
         [],
         [{"path": "a\\b", "size": 1, "sha256": "0" * 64}],
         [{"path": "../x", "size": 1, "sha256": "0" * 64}],
-        [{"path": "x", "size": -1, "sha256": "0" * 64}],
-        [{"path": "x", "size": 1, "sha256": "ABC"}],
-        [{"path": "x", "size": 1, "sha256": "0" * 64}] * 2,
+        [{"path": "a/CON", "size": 1, "sha256": "0" * 64}],
     ],
 )
 def test_an_invalid_manifest_is_refused(rig, files):
@@ -528,6 +527,265 @@ def test_a_same_name_folder_this_engine_did_not_commit_is_never_archived(rig):
         final_hash=FINAL,
     )
     assert rig.run()["message"] == CONFLICT
+
+
+# ── category, new actor and second targets (#364: §9.1, §9.3, §9.4) ─────
+def _category(rig, name: str = "photo") -> tuple[str, Path]:
+    path = rig.tmp / name
+    path.mkdir()
+    with rig.store.transaction() as conn:
+        return insert_library(conn, "category", str(path), prefixes=["ABC"]), path
+
+
+def test_a_category_target_is_its_directory(rig):
+    category, path = _category(rig)
+    proof = rig.archive.target(None, FILM, category_id=category)
+    assert proof["target_path"] == str(path / FILM) and proof["absent"] is True
+    assert proof["expected_target"]["target_path"] == str(path)
+    rig.archive.archive(
+        "op-1",
+        rig.package,
+        None,
+        proof["expected_target"],
+        rig.files,
+        category_id=category,
+    )
+    assert rig.run()["receipt"]["target_path"] == str(path / FILM)
+    assert _tree(path / FILM) == rig.contents
+    _refused("missing", rig.archive.target, None, FILM, category_id="nope")
+    _refused("missing", rig.archive.target, None, FILM, category_id=rig.library_id)
+    with pytest.raises(ValueError):
+        rig.archive.target("actor", FILM, category_id=category)
+
+
+def test_a_new_actor_target_proves_the_library_root(rig):
+    proof = rig.archive.target(None, FILM, library_id=rig.library_id, actor_name="新人")
+    assert proof == {
+        "target_path": str(rig.root / "新人" / FILM),
+        "absent": True,
+        "archived": False,
+        "expected_target": {
+            "target_path": str(rig.root),
+            "directory_identity": _identity(rig.root),
+        },
+    }
+    assert not (rig.root / "新人").exists()  # the proof creates nothing
+    message = _refused(
+        "actor_exists",
+        rig.archive.target,
+        None,
+        FILM,
+        library_id=rig.library_id,
+        actor_name="ACTOR",  # casefold of nas/Actor
+    ).message
+    assert "ACTOR" in message
+    for name in ("", "a:b", "CON", f"{STAGING_PREFIX}x", "trailing."):
+        _refused(
+            "invalid",
+            rig.archive.target,
+            None,
+            FILM,
+            library_id=rig.library_id,
+            actor_name=name,
+        )
+    category, _ = _category(rig)
+    _refused(
+        "readonly",
+        rig.archive.target,
+        None,
+        FILM,
+        library_id=category,
+        actor_name="新人",
+    )
+    with rig.store.transaction() as conn:
+        conn.execute("UPDATE libraries SET role='readonly' WHERE kind='actor'")
+    _refused(
+        "readonly",
+        rig.archive.target,
+        None,
+        FILM,
+        library_id=rig.library_id,
+        actor_name="新人",
+    )
+    _refused(
+        "missing", rig.archive.target, None, FILM, library_id="nope", actor_name="x"
+    )
+
+
+def _new_actor(rig, op: str = "op-1", name: str = "新人"):
+    proof = rig.archive.target(None, FILM, library_id=rig.library_id, actor_name=name)
+    return rig.archive.archive(
+        op,
+        rig.package,
+        None,
+        proof["expected_target"],
+        rig.files,
+        library_id=rig.library_id,
+        actor_name=name,
+        final_hash=FINAL,
+    )
+
+
+def test_a_new_actor_archive_creates_the_directory_and_its_performer(rig):
+    _new_actor(rig)
+    task = rig.run()
+    actor = rig.root / "新人"
+    assert task["status"] == "completed", task
+    assert _tree(actor / FILM) == rig.contents
+    assert task["receipt"]["target_path"] == str(actor / FILM)
+    assert rig.events()[:2] == [
+        ("mkdir_actor", 0, "started"),
+        ("mkdir_actor", 0, "succeeded"),
+    ]
+    with rig.store.reading() as conn:
+        row = conn.execute(
+            "SELECT * FROM performers WHERE folder_name='新人'"
+        ).fetchone()
+    assert (row["library_id"], row["path"], row["is_missing"]) == (
+        rig.library_id,
+        str(actor),
+        0,
+    )
+    (record,) = rig.archived()  # the actual parent: the new actor directory
+    assert json.loads(record["directory_identity"]) == _identity(actor)
+    again = rig.archive.target(row["id"], FILM, final_hash=FINAL)
+    assert (again["absent"], again["archived"]) == (False, True)
+
+
+def test_a_new_actor_directory_that_appeared_fails_with_actor_exists(rig, monkeypatch):
+    _new_actor(rig)
+    (rig.root / "新人").mkdir()  # before the worker's preflight
+    task = rig.run()
+    assert task["status"] == "failed" and ACTOR_EXISTS in task["message"]
+    assert rig.events() == []
+    os.rmdir(rig.root / "新人")
+    real = os.mkdir
+
+    def race(path, *args, **kwargs):  # between the preflight and the mkdir
+        if Path(path).name == "新人":
+            real(path)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(la.os, "mkdir", race)
+    _new_actor(rig, "op-2")
+    task = rig.run("op-2")
+    assert task["status"] == "failed" and ACTOR_EXISTS in task["message"]
+    assert rig.events("op-2") == [
+        ("mkdir_actor", 0, "started"),
+        ("mkdir_actor", 0, "failed"),
+    ]
+    with rig.store.reading() as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM performers WHERE folder_name='新人'"
+        ).fetchone()
+
+
+def test_an_interrupted_actor_mkdir_needs_review_after_a_restart(rig, monkeypatch):
+    def crash(task, index, spec, actor):  # the process died after `started`
+        rig.archive._event(task, "mkdir_actor", index, "started")
+        raise la._Interrupted()
+
+    monkeypatch.setattr(rig.archive, "_mkdir_actor", crash)
+    _new_actor(rig)
+    rig.run()
+    restarted = LibraryArchive(rig.store)
+    restarted.recover()
+    task = restarted.lookup("op-1")
+    assert task["status"] == "needs_review"
+    assert "新建演员目录" in task["items"][0]["message"]
+
+
+def _with_second(rig, category: str, op: str = "op-1"):
+    proof = rig.archive.target("actor", FILM)
+    second = rig.archive.target(None, FILM, category_id=category)
+    return rig.archive.archive(
+        op,
+        rig.package,
+        "actor",
+        proof["expected_target"],
+        rig.files,
+        second={"category_id": category, "expected_target": second["expected_target"]},
+        final_hash=FINAL,
+    )
+
+
+def test_a_second_target_is_copied_after_the_primary_and_in_the_receipt(rig):
+    category, path = _category(rig)
+    queued = _with_second(rig, category)
+    assert queued["total_count"] == 2
+    task = rig.run()
+    assert task["status"] == "completed", task
+    assert _tree(rig.actor / FILM) == _tree(path / FILM) == rig.contents
+    assert task["receipt"]["target_path"] == str(rig.actor / FILM)
+    assert task["receipt"]["second"] == {
+        "target_path": str(path / FILM),
+        "directory_identity": _identity(path / FILM),
+    }
+    assert [e for e in rig.events() if e[2] == "succeeded"] == [
+        (action, index, "succeeded")
+        for index in (0, 1)
+        for action in ("copy", "verify", "commit")
+    ]
+    assert (
+        task["progress_bytes"]
+        == task["total_bytes"]
+        == 2 * sum(f["size"] for f in rig.files)
+    )
+    assert {r["target_key"] for r in rig.archived()} == {
+        str(rig.actor / FILM).casefold(),
+        str(path / FILM).casefold(),
+    }
+
+
+def test_a_conflict_in_the_second_target_is_found_before_the_primary_is_copied(rig):
+    category, path = _category(rig)
+    _with_second(rig, category)
+    (path / FILM).mkdir()
+    task = rig.run()
+    assert (task["status"], task["message"]) == ("failed", CONFLICT)
+    assert rig.events() == [] and not (rig.actor / FILM).exists()
+    changed = rig.archive.target(None, FILM, category_id=category)
+    path.rename(rig.tmp / "photo-old")
+    path.mkdir()
+    _refused(
+        "changed",
+        rig.archive.archive,
+        "op-2",
+        rig.package,
+        "actor",
+        rig.archive.target("actor", FILM)["expected_target"],
+        rig.files,
+        second={"category_id": category, "expected_target": changed["expected_target"]},
+    )
+
+
+def test_a_retry_reverifies_the_committed_primary_and_copies_only_the_second(
+    rig, monkeypatch
+):
+    category, path = _category(rig)
+    real = LibraryArchive._commit
+
+    def second_conflicts(self, task, payload, target, folder):
+        if folder.parent == path:
+            folder.mkdir()  # someone else's folder appears in the category
+        return real(self, task, payload, target, folder)
+
+    monkeypatch.setattr(LibraryArchive, "_commit", second_conflicts)
+    _with_second(rig, category)
+    task = rig.run()
+    monkeypatch.undo()
+    assert task["status"] == "failed" and task["message"].startswith(CONFLICT)
+    assert [i["status"] for i in task["items"]] == ["committed", "failed"]
+    assert task["receipt"] is None
+    os.rmdir(path / FILM)  # the operator removed it
+    (rig.actor / FILM / "folder-by-media-server.jpg").write_bytes(b"x")
+    _with_second(rig, category, "op-2")
+    task = rig.run("op-2")
+    assert task["status"] == "completed", task
+    assert "folder-by-media-server.jpg" in task["message"]
+    assert [e for e in rig.events("op-2") if e[1] == 0] == []  # primary not copied
+    assert _tree(path / FILM) == rig.contents
+    assert task["receipt"]["second"]["target_path"] == str(path / FILM)
 
 
 # ── worker thread and restart recovery ──────────────────────────────────

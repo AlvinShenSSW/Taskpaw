@@ -436,6 +436,44 @@ class ReadCommands(WorkflowCore):
                 package_current=bool(intake["package_current"]) if intake else False,
             )
 
+    def archive_receipts(self, auth: AuthProof) -> list[dict[str, Any]]:
+        """归档历史 (#361 §10): every accepted archive receipt, newest first,
+        with its film, bound target, final revision and the latest cleanup
+        status of each scope under the same approval (None: not started)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT r.receipt_id,r.operation_id,r.approval_id,r.accepted_at,"
+                "o.film_id,json_extract(r.body_json,'$.target') AS target,"
+                "json_extract(p.body_json,'$.binding.final_revision') AS final_revision "
+                "FROM receipts r JOIN operations o ON o.operation_id=r.operation_id "
+                "LEFT JOIN approvals p ON p.approval_id=r.approval_id "
+                "WHERE r.kind='archive' ORDER BY r.accepted_at DESC,r.rowid DESC"
+            ).fetchall()
+            cleanups: dict[tuple[str, str], str] = {}
+            for row in self._conn.execute(  # newest wins
+                "SELECT approval_id,scope,status FROM operations "
+                "WHERE kind IN ('cleanup_input','cleanup_workcopy') ORDER BY rowid"
+            ):
+                cleanups[(row["approval_id"], row["scope"])] = row["status"]
+        return [
+            {
+                "receipt_id": row["receipt_id"],
+                "operation_id": row["operation_id"],
+                "film_id": row["film_id"],
+                "accepted_at": row["accepted_at"],
+                "target": json.loads(row["target"]),
+                "final_revision": row["final_revision"],
+                "cleanup": {
+                    scope: cleanups.get((row["approval_id"], scope))
+                    for scope in ("input", "workcopy")
+                },
+            }
+            for row in rows
+        ]
+
     def done_paging(self, auth: AuthProof, page: int = 1) -> dict[str, int]:
         """#302: the completed count and clamped page, without building film rows."""
         with self._lock:
