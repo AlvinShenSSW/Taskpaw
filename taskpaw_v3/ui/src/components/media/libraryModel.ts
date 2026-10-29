@@ -19,8 +19,8 @@ export const SCAN_EVERY: Array<[LibraryRules["scan_every_hours"], string]> = [
 ];
 export const scanEveryText = (hours: number) => (hours === 0 ? "已关闭" : hours === 24 ? "每天" : `每 ${hours} 小时`);
 
-export function useLibraries() {
-  return useQuery({ queryKey: LIBRARIES_KEY, queryFn: api.libraries, retry: false });
+export function useLibraries(enabled = true) {
+  return useQuery({ queryKey: LIBRARIES_KEY, queryFn: api.libraries, retry: false, enabled });
 }
 
 export function useRules() {

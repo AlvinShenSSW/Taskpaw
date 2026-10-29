@@ -18,6 +18,7 @@ import { setLang } from "../i18n";
 import {
   counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, performer, plan, PLANS, preflight, PREFLIGHTS, revisions, row, steps,
 } from "./fixtures/mediaWorkspace";
+import { CAT_K, LIB_A, LIB_B, LIBRARIES, NO_LIBRARIES } from "./fixtures/mediaLibrary";
 
 const wrapWith = (ui: ReactNode) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -47,6 +48,7 @@ function mockApi() {
       target_path: chosen ? `${chosen.unc_path}\\${pf.film_dir}` : null, error_code: chosen ? null : "missing" };
   });
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
+  vi.spyOn(api, "libraries").mockResolvedValue(LIBRARIES);
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
   vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { inbox_root: "D:\\TODO" } });
   vi.spyOn(api, "workflowDevices").mockResolvedValue({
@@ -817,8 +819,11 @@ describe("drawer and 图文确认", () => {
     const m = mockApi();
     wrap(<MediaWorkspace />);
     const dialog = await openReview("星河慢行");
-    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
-    expect(within(dialog).queryByText("选择演员与目标")).toBeNull();
+    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
+    // the sole candidate stays listed, pressed, with its 3:4 folder.jpg slot (#366)
+    const group = within(dialog).getByRole("group", { name: "演员与目标候选" });
+    expect(within(group).getByRole("button", { name: /演员星河/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(group).getByRole("img", { name: "演员星河：没有头像" })).toHaveClass("avatar");
     expect(within(dialog).queryByRole("button", { name: "手动入库" })).toBeNull();
     await waitFor(() => expect(within(dialog).getByText("\\\\nas-a\\actors\\演员星河\\ABF-406")).toBeInTheDocument());
     expect(within(dialog).queryByRole("checkbox")).toBeNull();
@@ -1057,15 +1062,16 @@ describe("图文确认 review fixes", () => {
     mockApi();
     let answer: (pf: TargetPreflight) => Promise<TargetPreflight> = () => new Promise(() => {});
     vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) =>
-      (performer === undefined || id !== "abf-406" ? PREFLIGHTS[id] : answer(PREFLIGHTS["abf-406"])));
+      (performer === undefined || id !== "abf-407" ? PREFLIGHTS[id] : answer(PREFLIGHTS["abf-407"])));
     const { qc } = wrapWith(<MediaWorkspace />);
-    const dialog = await openReview("星河慢行");
-    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
+    const dialog = await openReview("夜航日志");
+    fireEvent.click(await within(dialog).findByRole("button", { name: /演员夜航乙/ }));
+    await waitFor(() => expect(within(dialog).getByText("演员夜航乙", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
     const ok = within(dialog).getByRole("button", { name: "确认入库" });
     expect(await within(dialog).findByText("正在检查目标…")).toBeInTheDocument();
     expect(ok).toBeDisabled();
     const recheck = () => act(() => qc.resetQueries({
-      predicate: (q) => q.queryKey[0] === "mediaTarget" && q.queryKey[1] === "abf-406" && q.queryKey[3] === 1,
+      predicate: (q) => q.queryKey[0] === "mediaTarget" && q.queryKey[1] === "abf-407" && q.queryKey[3] === 3,
     }));
     // an HTTP error is no pass
     answer = async () => { throw new HttpError("服务暂不可用", 503); };
@@ -1132,14 +1138,14 @@ describe("图文确认 review fixes", () => {
     });
     const { qc } = wrapWith(<MediaWorkspace />);
     const dialog = await openReview("星河慢行");
-    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
     const ok = within(dialog).getByRole("button", { name: "确认入库" });
     await waitFor(() => expect(ok).toBeEnabled());
     final = 3;
     await act(() => qc.invalidateQueries({ queryKey: ["mediaFilm", "abf-406"] }));
     expect(await within(dialog).findByText("成品或来源已更新，请重新查看后确认。")).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "重新查看" }));
-    await waitFor(() => expect(within(dialog).getByText("演员海岛", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByText("演员海岛", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
     await waitFor(() => expect(ok).toBeEnabled());
     fireEvent.click(ok);
     const confirm = vi.mocked(api.workflowConfirm);
@@ -1289,7 +1295,8 @@ describe("图文确认 review fixes", () => {
       if (performer !== undefined) {
         return { ...lone, performer_id: String(performer), target_path: "\\\\nas-a\\actors\\演员孤岛\\ABF-408", absent: true };
       }
-      if (one) return lone;
+      // as the backend: the lone candidate is preselected and checked in the same call
+      if (one) return { ...lone, performer_id: "9", target_path: "\\\\nas-a\\actors\\演员孤岛\\ABF-408", absent: true };
       if (first === "failed") throw new HttpError("暂时无法读取", 503);
       return PREFLIGHTS["abf-408"];
     });
@@ -1299,7 +1306,7 @@ describe("图文确认 review fixes", () => {
     await within(dialog).findByRole("searchbox", { name: "搜索已有演员" });
     one = true;
     await act(() => qc.invalidateQueries({ queryKey: ["mediaTarget", "abf-408", null], exact: true }));
-    await waitFor(() => expect(within(dialog).getByText("演员孤岛", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByText("演员孤岛", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
   });
 });
@@ -1340,9 +1347,10 @@ describe("target preflight polling (IR05)", () => {
     mockApi();
     const films = [...FILMS.filter((f) => f.group !== "confirm"), ...Array.from({ length: 12 }, (_, i) => confirmRow(i))];
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    // as the backend: the sole candidate is preselected and checked in the same call
     const target = vi.spyOn(api, "workflowTarget").mockImplementation(async (id) => preflight(id.toUpperCase(), [
       { id: `p-${id}`, name: `演员${id}`, source_label: "NAS-A", unc_path: `\\\\nas-a\\${id}`, has_thumb: false, aliases: [] },
-    ]));
+    ], { performer_id: `p-${id}`, target_path: `\\\\nas-a\\${id}\\${id.toUpperCase()}`, absent: true }));
     wrap(<MediaWorkspace />);
     // on 影片队列 nothing asks for the targets
     fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
@@ -1772,4 +1780,240 @@ it("#305 lets a busy pinned machine accept another controller-queued film", asyn
   await waitFor(() => expect(confirmPlans).toHaveBeenCalledWith(expect.arrayContaining([
     expect.objectContaining({ machine: W.ti70.id }),
   ])));
+});
+
+describe("待确认 dialog targets (#366)", () => {
+  const STAR = "\\\\nas-a\\actors\\演员星河\\ABF-406";
+  const CAT = { ...CAT_K, label: "写真 · ABF", path: "\\\\nas-1\\personal\\写真\\ABF", prefixes: ["ABF"] };
+  const CAT_PATH = "\\\\nas-1\\personal\\写真\\ABF\\ABF-406";
+  const LIBS = { items: [LIB_A, LIB_B, CAT], db_path: "library.db" };
+  // A made-up controller answering finalize.preflight for ABF-406 (§9.6): one archive location of
+  // 演员星河 (preselected) plus a read-only one, the prefix-matched category, the new actor defaults.
+  const backend = (over: { archived?: boolean; actors?: boolean; secondDuplicate?: boolean; hint?: boolean } = {}) => {
+    const items = over.actors === false ? [] : [
+      { ...performer(1, "演员星河", "NAS-A"), has_thumb: true, film_count: 42, role: "archive" as const },
+      { ...performer(2, "演员星河", "NAS-B"), role: "readonly" as const },
+    ];
+    const base = preflight("ABF-406", items, {
+      categories: [{ id: CAT.id, label: CAT.label, path: CAT.path, prefixes: CAT.prefixes, film_count: 86, prefix_match: true }],
+      new_actor: { library_id: LIB_A.id, name: "演员星河" }, second_hint: over.hint === false || !items.length ? null : CAT.id,
+    });
+    return vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen, _dir, other) => {
+      if (id !== "abf-406") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+      const category = other?.category_id ?? (!items.length && chosen === undefined ? CAT.id : null);
+      if (category) {
+        const dup = Boolean(over.secondDuplicate);
+        return { ...base, category_id: category, target_path: CAT_PATH, absent: !dup, archived: false,
+          error_code: dup ? "duplicate" as const : null, message: dup ? "类型目录下已有同名目录：ABF-406" : null };
+      }
+      if (other?.library_id) {
+        const name = other.actor_name ?? "";
+        if (name.startsWith(".")) return { ...base, error_code: "permission" as const, message: "演员目录名不能以 . 开头" };
+        if (name === "演员星河") return { ...base, error_code: "actor_exists" as const, message: `已有同名演员目录：${name}` };
+        return { ...base, target_path: `${LIB_A.path}${name}\\ABF-406`, absent: true, archived: false };
+      }
+      return { ...base, performer_id: "1", target_path: STAR, absent: !over.archived, archived: Boolean(over.archived) };
+    });
+  };
+  const setup = (over: Parameters<typeof backend>[0] = {}, libraries = LIBS) => {
+    const m = mockApi();
+    vi.spyOn(api, "libraries").mockResolvedValue(libraries);
+    vi.spyOn(api, "performers").mockResolvedValue({ items: [] });
+    return { ...m, target: backend(over) };
+  };
+  const openReview = async () => {
+    await go("待确认");
+    const card = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-review="abf-406"]');
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    fireEvent.click(within(card).getByRole("button", { name: /图文核对入库|查看并处理/ }));
+    return screen.findByRole("dialog", { name: "确认影片与入库目标" });
+  };
+  const confirmButton = (dialog: HTMLElement) => within(dialog).getByRole("button", { name: "确认入库" });
+
+  it("candidates show the actor's 3:4 folder.jpg, library, film count; a read-only location is listed only", async () => {
+    setup();
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    const group = await within(dialog).findByRole("group", { name: "演员与目标候选" });
+    const [archive, readonly] = within(group).getAllByRole("button", { name: /演员星河/ });
+    const img = await within(archive).findByRole("img", { name: "演员星河 的 folder.jpg" });
+    expect(img.parentElement).toHaveClass("avatar");
+    expect(api.image).toHaveBeenCalledWith(expect.stringMatching(/\/performers\/1\/thumb$/));
+    expect(archive).toHaveTextContent("NAS-A / \\\\nas-a\\actors\\演员星河");
+    expect(archive).toHaveTextContent("42 部");
+    expect(archive).toHaveAttribute("aria-pressed", "true");
+    expect(readonly).toBeDisabled();
+    expect(readonly).toHaveTextContent("只读片库，仅供参考");
+  });
+
+  it("新建演员目录: prefilled name, archive libraries only, live duplicate warning; created only on confirm", async () => {
+    const { confirm, target } = setup();
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    fireEvent.click(await within(dialog).findByRole("button", { name: /新建演员目录/ }));
+    const name = within(dialog).getByLabelText("演员名（目录名）");
+    expect(name).toHaveValue("演员星河");
+    const library = within(dialog).getByLabelText(/^放到/);
+    expect(within(library).getAllByRole("option").map((o) => o.textContent)).toEqual(["A · 主片库"]);
+    expect(await within(dialog).findByText("主片库里已经有「演员星河」，请直接选它，或换一个名字。")).toHaveClass("t-red");
+    expect(confirmButton(dialog)).toBeDisabled();
+    // the form tells it once (not again in the notice below)
+    fireEvent.change(name, { target: { value: " " } });
+    expect(within(dialog).getByText("请填写演员名。")).toBeInTheDocument();
+    expect(confirmButton(dialog)).toBeDisabled();
+    fireEvent.change(name, { target: { value: ".隐藏" } });
+    expect(await within(dialog).findByText("演员目录名不能以 . 开头")).toBeInTheDocument();
+    fireEvent.change(name, { target: { value: "演员新" } });
+    fireEvent.change(name, { target: { value: "演员新月" } });
+    expect(await within(dialog).findByText("主片库里没有同名目录，可以新建。名字也会记为该演员的正式名，下次直接匹配。")).toBeInTheDocument();
+    expect(within(dialog).getByText("\\\\nas-1\\films\\演员新月\\ABF-406")).toBeInTheDocument();
+    expect(within(dialog).getByText("含新建目录")).toBeInTheDocument();
+    // the check follows the typing (debounced): the half-typed name was never asked
+    const asked = target.mock.calls.flatMap(([, , , other]) => (other?.library_id ? [other.actor_name] : []));
+    expect(asked).toEqual(["演员星河", ".隐藏", "演员新月"]);
+    expect(confirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", undefined, undefined, {
+      new_actor: { library_id: "lib-a", name: "演员新月" },
+    }));
+  });
+
+  it("或改放到类型目录 takes the place of the actor directory; the prefix match reads 本片命中", async () => {
+    const { confirm } = setup();
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    expect(await within(dialog).findByRole("heading", { name: "或改放到类型目录（代替演员目录）" })).toBeInTheDocument();
+    const category = within(within(dialog).getByRole("group", { name: "类型目录" })).getByRole("button", { name: /写真 · ABF/ });
+    expect(category).toHaveTextContent("86 部 · 前缀 ABF · 本片命中");
+    expect(category).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(category);
+    expect(category).toHaveAttribute("aria-pressed", "true");
+    expect(await within(dialog).findByText(CAT_PATH)).toBeInTheDocument();
+    expect(within(dialog).queryByText("第二目标（可选）")).toBeNull();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", undefined, undefined, { category_id: "cat-k" }));
+  });
+
+  it("no actor candidate: the prefix-matched category is preselected, on the card and in the dialog", async () => {
+    const { confirm } = setup({ actors: false });
+    wrap(<MediaWorkspace />);
+    await go("待确认");
+    const card = await waitFor(() => document.querySelector<HTMLElement>('[data-review="abf-406"]') as HTMLElement);
+    expect(await within(card).findByText("类型目录 / 写真 · ABF")).toBeInTheDocument();
+    fireEvent.click(within(card).getByRole("button", { name: "图文核对入库" }));
+    const dialog = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
+    expect(await within(dialog).findByRole("heading", { name: "或放到类型目录" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /写真 · ABF/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByText(CAT_PATH)).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", undefined, undefined, { category_id: "cat-k" }));
+  });
+
+  it("第二目标: the hint is a button, never added by itself; both paths are shown and confirmed", async () => {
+    const { confirm } = setup();
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    expect(await within(dialog).findByText("第二目标（可选）")).toBeInTheDocument();
+    expect(within(dialog).getByText("番号前缀 ABF 对应「写真 · ABF」")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    expect(within(dialog).queryByText(/第 2 份/)).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "加入「写真 · ABF」" }));
+    expect(await within(dialog).findByText(CAT_PATH)).toBeInTheDocument();
+    expect(within(dialog).getByText(STAR)).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "入库到（第 1 份）" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "第 2 份 · 类型目录" })).toBeInTheDocument();
+    expect(within(dialog).getByText("将复制两份：演员目录和类型目录各一份。")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", 1, undefined, { second_category_id: "cat-k" }));
+  });
+
+  it("第二目标 picker and 不要第二目标; a category primary clears the second target", async () => {
+    const { confirm } = setup({ hint: false });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    expect(await within(dialog).findByText("第二目标（可选）")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /^加入/ })).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "选择类型目录" }));
+    fireEvent.click(within(within(dialog).getByRole("group", { name: "第二目标类型目录" })).getByRole("button", { name: /写真 · ABF/ }));
+    expect(await within(dialog).findByText(CAT_PATH)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "不要第二目标" }));
+    expect(within(dialog).queryByText(/第 2 份/)).toBeNull();
+    expect(within(dialog).getByText("第二目标（可选）")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "选择类型目录" }));
+    fireEvent.click(within(within(dialog).getByRole("group", { name: "第二目标类型目录" })).getByRole("button", { name: /写真 · ABF/ }));
+    expect(await within(dialog).findByRole("heading", { name: "第 2 份 · 类型目录" })).toBeInTheDocument();
+    // the category becomes the primary: no second target any more
+    fireEvent.click(within(within(dialog).getByRole("group", { name: "类型目录" })).getByRole("button", { name: /写真 · ABF/ }));
+    await waitFor(() => expect(within(dialog).queryByRole("heading", { name: "第 2 份 · 类型目录" })).toBeNull());
+    expect(within(dialog).queryByText("第二目标（可选）")).toBeNull();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", undefined, undefined, { category_id: "cat-k" }));
+  });
+
+  it("a second target that already holds the film blocks the confirm", async () => {
+    setup({ secondDuplicate: true });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    fireEvent.click(await within(dialog).findByRole("button", { name: "加入「写真 · ABF」" }));
+    expect(await within(dialog).findByText("第 2 份：类型目录下已有同名目录：ABF-406")).toBeInTheDocument();
+    expect(confirmButton(dialog)).toBeDisabled();
+  });
+
+  it("an archived first copy passes: 「第 1 份已入库，本次只复制第二份」 (§9.5, IR3-4)", async () => {
+    const { confirm } = setup({ archived: true });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    expect(await within(dialog).findByText("已入库，本次只核对，不再复制")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(within(dialog).getByRole("button", { name: "加入「写真 · ABF」" }));
+    expect(await within(dialog).findByText("第 1 份已入库，本次只复制第二份")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", 1, undefined, { second_category_id: "cat-k" }));
+  });
+
+  it("reviewStatus: a preselected target that passed is ready, archived or not; unselected candidates ask", () => {
+    const one = [performer(1, "演员星河", "NAS-A")];
+    expect(reviewStatus(preflight("A", one, { performer_id: "1", target_path: "x", absent: false, archived: true }))).toBe("ready");
+    expect(reviewStatus(preflight("A", [], { category_id: "cat-k", target_path: "x", absent: false, archived: true }))).toBe("ready");
+    expect(reviewStatus(preflight("A", [], { category_id: "cat-k", target_path: "x", absent: true, archived: false }))).toBe("ready");
+    // a sole candidate the rules did not preselect (read-only, fuzzy or preselect_single off)
+    expect(reviewStatus(preflight("A", one))).toBe("multi");
+  });
+
+  it("the success state lists both copies", async () => {
+    const { confirm } = setup();
+    let after = false;
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
+      ? detail(id, { can_confirm: false, receipt_id: "R-1", archive: { status: "succeeded", error: null, target_path: STAR, manual: false } })
+      : detail(id)));
+    confirm.mockImplementation(async () => { after = true; return { approval_id: "a1" }; });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    fireEvent.click(await within(dialog).findByRole("button", { name: "加入「写真 · ABF」" }));
+    await within(dialog).findByText(CAT_PATH);
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    const receipt = within(await screen.findByRole("dialog", { name: "入库完成" }));
+    expect(receipt.getByText("成品已入库 · 两份都已校验")).toBeInTheDocument();
+    expect(receipt.getByText(`第 1 份：${STAR}`)).toBeInTheDocument();
+    expect(receipt.getByText(`第 2 份：${CAT_PATH}`)).toBeInTheDocument();
+  });
+
+  it("first run: 待确认 says there is no library and links to 片库与规则", async () => {
+    setup({}, NO_LIBRARIES);
+    wrap(<MediaWorkspace />);
+    await go("待确认");
+    expect(await screen.findByText("还没有片库，暂时无法推荐入库位置。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "去设置片库" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "片库与规则" })).toBeInTheDocument();
+  });
 });
