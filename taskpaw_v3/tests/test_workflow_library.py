@@ -137,7 +137,7 @@ def test_a_network_path_is_refused_like_workflow_db(path):
 
 
 def test_normalize_is_filmpaw_s():
-    assert normalize(" 倉木華 ") == "仓木华"
+    assert normalize(" 張小雨 ") == "张小雨"
     assert normalize("張") == "张"
     assert normalize("ＡＢＣ（Ｘ）") == "abc(x)"
 
@@ -630,9 +630,9 @@ def test_without_pillow_thumbnails_are_skipped(store, tmp_path, monkeypatch):
 # ── search (§6) ──────────────────────────────────────────────────────────
 @pytest.fixture
 def library(store, tmp_path):
-    """Two actor libraries; 仓木华 in both (one name group, two locations)."""
-    a = actor_library(store, tmp_path, "倉木華", "Alice", "葵・つかさ", "X", name="a")
-    b = actor_library(store, tmp_path, "仓木华", "Bob_1", name="b")
+    """Two actor libraries; 张小雨 in both (one name group, two locations)."""
+    a = actor_library(store, tmp_path, "張小雨", "Alice", "夏目・ゆい", "X", name="a")
+    b = actor_library(store, tmp_path, "张小雨", "Bob_1", name="b")
     scan_library(store, a)
     scan_library(store, b)
     return store, a, b
@@ -644,8 +644,8 @@ def names(result):
 
 def test_search_matches_contains_and_reverse_containment(library):
     store, a, b = library
-    result = store.search("仓木")
-    assert sorted(names(result)) == ["仓木华", "倉木華"] and result["total"] == 2
+    result = store.search("张小")
+    assert sorted(names(result)) == ["张小雨", "張小雨"] and result["total"] == 2
     item = result["items"][0]
     assert set(item) >= {
         "id",
@@ -657,7 +657,7 @@ def test_search_matches_contains_and_reverse_containment(library):
     }
     assert item["fuzzy"] is False and item["library_id"] in (a, b)
     # the query contains the name (≥2 characters); a single-character name does not
-    assert sorted(names(store.search("仓木华 ABC-123"))) == ["仓木华", "倉木華"]
+    assert sorted(names(store.search("张小雨 ABC-123"))) == ["张小雨", "張小雨"]
     assert names(store.search("X ABC")) == []
     assert names(store.search("x")) == ["X"]
 
@@ -679,9 +679,9 @@ def test_an_alias_hit_returns_every_location_of_the_group(library):
         ["爱丽丝"],
         1,
     )
-    kura = store.search("仓木华")["items"][0]
+    kura = store.search("张小雨")["items"][0]
     store.add_alias(kura["id"], "Hana")
-    assert sorted(names(store.search("hana"))) == ["仓木华", "倉木華"]
+    assert sorted(names(store.search("hana"))) == ["张小雨", "張小雨"]
     assert names(store.search("hana", aliases=False)) == []
 
 
@@ -693,11 +693,11 @@ def test_reorder_sets_the_actor_priority_that_preselects_a_location(library, tmp
     assert (by_id[a]["position"], by_id[b]["position"]) == (1, 2)
 
     def chosen():
-        selected = store.candidates(["仓木华"], "X")["selected"]
+        selected = store.candidates(["张小雨"], "X")["selected"]
         assert selected["kind"] == "performer"
         return next(
             item["library_id"]
-            for item in store.search("仓木华")["items"]
+            for item in store.search("张小雨")["items"]
             if item["id"] == selected["id"]
         )
 
@@ -715,10 +715,10 @@ def test_reorder_sets_the_actor_priority_that_preselects_a_location(library, tmp
 
 def test_fuzzy_hits_are_listed_and_flagged(library):
     store, _, _ = library
-    assert names(store.search("葵つかさ")) == []
-    result = store.search("葵 つかさ", fuzzy=True)
-    assert names(result) == ["葵・つかさ"] and result["items"][0]["fuzzy"] is True
-    exact = store.search("葵・つかさ", fuzzy=True)
+    assert names(store.search("夏目ゆい")) == []
+    result = store.search("夏目 ゆい", fuzzy=True)
+    assert names(result) == ["夏目・ゆい"] and result["items"][0]["fuzzy"] is True
+    exact = store.search("夏目・ゆい", fuzzy=True)
     assert exact["items"][0]["fuzzy"] is False
 
 
@@ -733,7 +733,7 @@ def test_missing_performers_are_excluded_unless_asked(library, tmp_path):
 
 def test_filters_library_and_paging(library, tmp_path):
     store, a, b = library
-    assert sorted(names(store.search(filter="multi"))) == ["仓木华", "倉木華"]
+    assert sorted(names(store.search(filter="multi"))) == ["张小雨", "張小雨"]
     alice = store.search("alice")["items"][0]
     store.add_alias(alice["id"], "A")
     assert names(store.search(filter="alias")) == ["Alice"]
@@ -743,7 +743,7 @@ def test_filters_library_and_paging(library, tmp_path):
     assert names(store.search(filter="missing")) == ["Bob_1"]
     assert sorted(names(store.search(library_id=b, include_missing=True))) == [
         "Bob_1",
-        "仓木华",
+        "张小雨",
     ]
     expect(422, store.search, library_id="nope")
     expect(422, store.search, filter="odd")
@@ -764,7 +764,7 @@ def test_filters_library_and_paging(library, tmp_path):
 
 def test_performer_detail_lists_every_location(library):
     store, a, b = library
-    item = store.search("倉木華")["items"][0]
+    item = store.search("張小雨")["items"][0]
     store.add_alias(item["id"], "Hana")
     detail = store.performer(item["id"])
     assert detail["id"] == item["id"]
@@ -998,7 +998,7 @@ def fake_filmpaw(tmp_path: Path, roots: list[tuple[str, str | None, int]]) -> Pa
             )
     conn.executemany(
         "INSERT INTO aliases(name_norm, alias, alias_norm) VALUES (?,?,?)",
-        [("仓木华", "Hana", "hana"), ("alice", "爱丽丝", "爱丽丝")],
+        [("张小雨", "Hana", "hana"), ("alice", "爱丽丝", "爱丽丝")],
     )
     conn.commit()
     conn.close()
