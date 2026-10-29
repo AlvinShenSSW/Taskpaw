@@ -433,29 +433,31 @@ function Candidates({ candidates, selected, actor, locked, onSelect, newActor }:
   candidates: Performer[] | null; selected: Performer | null; actor: string; locked: boolean; onSelect: (p: Performer) => void;
   newActor: { chosen: boolean; onSelect: () => void } | null;
 }) {
-  const [text, setText] = useState(actor);
+  // CX5-4: the search is always offered (the preview's 搜索已有演员或别名); with no candidate it starts
+  // from the NFO actor. Its results join the candidates and never change the preselection.
+  const [typed, setTyped] = useState<string | null>(null);
+  const manual = candidates !== null && candidates.length === 0;
+  const text = typed ?? (manual ? actor : "");
   const [query, setQuery] = useState("");
   useEffect(() => { const h = setTimeout(() => setQuery(text.trim()), 300); return () => clearTimeout(h); }, [text]);
-  const manual = candidates !== null && candidates.length === 0;
   const found = useQuery({
-    queryKey: ["mediaPerformers", query], queryFn: () => api.performers(query), enabled: manual && query !== "", retry: false,
+    queryKey: ["mediaPerformers", query], queryFn: () => api.performers(query), enabled: candidates !== null && query !== "", retry: false,
   });
   if (candidates === null) return <p className="small muted">正在查找演员与目标…</p>;
-  const list = manual ? found.data?.items ?? [] : candidates;
+  const results = query ? found.data?.items ?? [] : [];
+  const list = [...candidates, ...results.filter((p) => !candidates.some((c) => String(c.id) === String(p.id)))];
   return (
     <>
       <h3>选择演员与目标</h3>
-      {manual && (
-        <div className="search-wrap" style={{ marginTop: 12 }}>
-          <Icon of={SearchIcon} />
-          <input className="input search" style={{ width: "100%" }} type="search" value={text}
-            placeholder="搜索已有演员" aria-label="搜索已有演员" onChange={(e) => setText(e.target.value)} />
-        </div>
-      )}
-      {manual && found.data && list.length === 0 && (
+      <div className="search-wrap" style={{ marginTop: 12 }}>
+        <Icon of={SearchIcon} />
+        <input className="input search" style={{ width: "100%" }} type="search" value={text}
+          placeholder="搜索已有演员或别名" aria-label="搜索已有演员或别名" onChange={(e) => setTyped(e.target.value)} />
+      </div>
+      {query && found.data && results.length === 0 && (
         <p className="small muted spacer-top">{newActor ? "没有匹配的演员。可以新建演员目录，或放到类型目录。" : "没有匹配的演员。不会自动新建演员目录。"}</p>
       )}
-      {manual && found.error && <p className="small t-red spacer-top">演员搜索失败：{errorText(found.error)}</p>}
+      {query && found.error && <p className="small t-red spacer-top">演员搜索失败：{errorText(found.error)}</p>}
       <div className="candidate-list" role="group" aria-label="演员与目标候选">
         {list.map((p) => {
           // a read-only location is listed for information only (§9.6)

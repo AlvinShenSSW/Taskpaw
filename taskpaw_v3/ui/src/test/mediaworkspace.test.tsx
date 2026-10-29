@@ -965,7 +965,7 @@ describe("drawer and 图文确认", () => {
     const performers = vi.spyOn(api, "performers").mockResolvedValue({ items: [] });
     wrap(<MediaWorkspace />);
     const dialog = await openReview("未命名的岛");
-    const box = await within(dialog).findByRole("searchbox", { name: "搜索已有演员" });
+    const box = await within(dialog).findByRole("searchbox", { name: "搜索已有演员或别名" });
     fireEvent.change(box, { target: { value: "演员新岛" } });
     await waitFor(() => expect(performers).toHaveBeenCalledWith("演员新岛"));
     expect(await within(dialog).findByText("没有匹配的演员。不会自动新建演员目录。")).toBeInTheDocument();
@@ -1303,7 +1303,7 @@ describe("图文确认 review fixes", () => {
     vi.spyOn(api, "performers").mockResolvedValue({ items: [] });
     const { qc } = wrapWith(<MediaWorkspace />);
     const dialog = await openReview("未命名的岛");
-    await within(dialog).findByRole("searchbox", { name: "搜索已有演员" });
+    await within(dialog).findByRole("searchbox", { name: "搜索已有演员或别名" });
     one = true;
     await act(() => qc.invalidateQueries({ queryKey: ["mediaTarget", "abf-408", null], exact: true }));
     await waitFor(() => expect(within(dialog).getByText("演员孤岛", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
@@ -2046,6 +2046,38 @@ describe("待确认 dialog targets (#366)", () => {
     expect(within(dialog).getByRole("button", { name: /新建演员目录/ })).toBeDisabled();
     expect(within(within(dialog).getByRole("group", { name: "类型目录" })).getByRole("button", { name: /写真 · ABF/ })).toBeDisabled();
     within(within(dialog).getByRole("group", { name: "演员与目标候选" })).getAllByRole("button").forEach((b) => expect(b).toBeDisabled());
+  });
+
+  it("CX5-4: beside NFO candidates the search finds the existing actor the new-actor form names", async () => {
+    const { confirm, target } = setup();
+    const FAR = { ...performer(5, "演员远山", "NAS-1"), id: "p-far", unc_path: "\\\\nas-1\\films\\演员远山", role: "archive" as const };
+    const FAR_PATH = "\\\\nas-1\\films\\演员远山\\ABF-406";
+    const inner = target.getMockImplementation() as typeof api.workflowTarget;
+    target.mockImplementation(async (id, chosen, dir, other) => {
+      if (id === "abf-406" && other?.actor_name === "演员远山") {
+        return { ...await inner(id), error_code: "actor_exists" as const, message: "已有同名演员目录：演员远山" };
+      }
+      if (id === "abf-406" && String(chosen) === "p-far") {
+        return { ...await inner(id), performer_id: "p-far", target_path: FAR_PATH, absent: true, archived: false };
+      }
+      return inner(id, chosen, dir, other);
+    });
+    vi.spyOn(api, "performers").mockImplementation(async (q) => ({ items: q === "演员远山" ? [FAR] : [] }));
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    fireEvent.click(await within(dialog).findByRole("button", { name: /新建演员目录/ }));
+    fireEvent.change(within(dialog).getByLabelText("演员名（目录名）"), { target: { value: "演员远山" } });
+    expect(await within(dialog).findByText("主片库里已经有「演员远山」，请直接选它，或换一个名字。")).toBeInTheDocument();
+    expect(confirmButton(dialog)).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("searchbox", { name: "搜索已有演员或别名" }), { target: { value: "演员远山" } });
+    const group = within(dialog).getByRole("group", { name: "演员与目标候选" });
+    fireEvent.click(await within(group).findByRole("button", { name: /演员远山/ }));
+    // the NFO candidates stay listed beside the search result
+    expect(within(group).getAllByRole("button", { name: /演员星河/ })).toHaveLength(2);
+    await waitFor(() => expect(within(dialog).getByText(FAR_PATH)).toBeInTheDocument());
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", "p-far"));
   });
 
   it("CX5-2: after a failed second copy the created actor is preselected (archived), not created again", async () => {
