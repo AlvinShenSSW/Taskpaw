@@ -79,6 +79,12 @@ type Choice =
   | { kind: "new_actor" }
   | { kind: "manual"; dir: string };
 type Category = Pick<TargetCategory, "id" | "label" | "path" | "prefixes">;
+// What one 「确认入库」 sent (CX5-1): the request and its receipt are built from this snapshot, never
+// from the controls as they are when the answer arrives.
+interface Submitted {
+  choice: Choice; newActor: { library_id: string; name: string } | null;
+  primary: string | null; second: { id: string; path: string | null } | null;
+}
 
 function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }) {
   const ws = useWorkspace();
@@ -104,8 +110,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const [phase, setPhase] = useState<"review" | "submitted">("review");
   // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
   const [submittedAt, setSubmittedAt] = useState(0);
-  // the second copy confirmed with it, for the receipt (the film detail names the first one only)
-  const [boundSecond, setBoundSecond] = useState<string | null>(null);
+  // the targets that 「确认入库」 sent, for the receipt (the film detail names the first one only)
+  const [bound, setBound] = useState<Submitted | null>(null);
   const actor = film?.actors[0] ?? "";
   // Candidates: the preflight's (the library searched for every NFO actor); while it is offline
   // (null) or the preflight failed, a manual search is offered instead.
@@ -186,6 +192,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   });
   const hint = canSecond ? secondCats.find((c) => c.id === target.data?.second_hint) ?? null : null;
   const choose = (next: Choice) => {
+    if (locked) return;
     // the same target again asks the NAS again
     if (sel && sameChoice(sel, next)) void preflight.refetch();
     // a category or a manual directory takes no second target
@@ -197,24 +204,23 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     if (path !== null) choose({ kind: "manual", dir: path });
   };
   const confirm = useMutation({
-    mutationFn: () => {
-      const extra = second ? { second_category_id: second.id } : undefined;
-      if (sel?.kind === "manual") return api.workflowConfirm(filmId, undefined, sel.dir);
-      if (sel?.kind === "category") return api.workflowConfirm(filmId, undefined, undefined, { category_id: sel.id });
-      if (sel?.kind === "new_actor") {
-        return api.workflowConfirm(filmId, undefined, undefined, { new_actor: { library_id: form.library_id, name }, ...extra });
-      }
-      const id = (selected as Performer).id;
-      return extra ? api.workflowConfirm(filmId, id, undefined, extra) : api.workflowConfirm(filmId, id);
+    mutationFn: ({ choice: c, newActor: n, second: s }: Submitted) => {
+      const extra = s ? { second_category_id: s.id } : undefined;
+      if (c.kind === "manual") return api.workflowConfirm(filmId, undefined, c.dir);
+      if (c.kind === "category") return api.workflowConfirm(filmId, undefined, undefined, { category_id: c.id });
+      if (c.kind === "new_actor") return api.workflowConfirm(filmId, undefined, undefined, { new_actor: n ?? undefined, ...extra });
+      return extra ? api.workflowConfirm(filmId, c.performer.id, undefined, extra) : api.workflowConfirm(filmId, c.performer.id);
     },
-    onSuccess: () => {
+    onSuccess: (_answer, submitted) => {
       setPhase("submitted");
       setSubmittedAt(detail.dataUpdatedAt);
-      setBoundSecond(second ? secondPf.data?.target_path ?? null : null);
+      setBound(submitted);
       void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
       void qc.invalidateQueries({ queryKey: mediaFilmKey(filmId) });
     },
   });
+  // while 「确认入库」 is on its way the targets stay as they were sent (CX5-1)
+  const locked = confirm.isPending;
   const open = useMutation({ mutationFn: () => api.workflowOpen(filmId, "output"), onError: (e) => ws.toast(errorText(e)) });
   const play = useMutation({ mutationFn: () => api.workflowPlay(filmId), onError: (e) => ws.toast(errorText(e)) });
   // The phase follows the refreshed detail: an archive that then fails (and the film is
@@ -222,11 +228,16 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const archiveStatus = film?.archive.status ?? null;
   const reopened = phase === "submitted" && film !== undefined && detail.dataUpdatedAt > submittedAt
     && (archiveStatus === "unknown" || (archiveStatus === "failed" && film.can_confirm));
+  // CX5-2: back in review the targets are asked again — after a failed second copy the new actor
+  // directory exists (the preflight then selects its performer, archived), so a new-actor choice
+  // made before is dropped instead of being sent again.
   useEffect(() => {
     if (!reopened) return;
     setPhase("review");
     confirm.reset();
-  }, [reopened, confirm]);
+    if (choice?.kind === "new_actor") { setChoice(null); setNewActor(null); }
+    void qc.invalidateQueries({ queryKey: ["mediaTarget", filmId] });
+  }, [reopened, confirm, choice, qc, filmId]);
 
   if (detail.isLoading || !film) {
     return (
@@ -236,7 +247,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       </>
     );
   }
-  if (phase === "submitted" && !reopened) return <Receipt film={film} second={boundSecond} onClose={onClose} />;
+  if (phase === "submitted" && !reopened) return <Receipt film={film} bound={bound} onClose={onClose} />;
 
   const status: StatusKey | undefined = archiveStatus === "unknown" ? "unknown" : item?.status;
   // the chosen target's own answer only: never an older or another target's
@@ -303,16 +314,16 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
             <p>{film.marks.chinese_subtitles ? "修复成品 · 中文字幕已核对" : "修复成品 · 无语音，不加中文字幕标识"}</p>
           </div>
         </div>
-        <Candidates candidates={candidates} selected={selected} actor={actor}
+        <Candidates candidates={candidates} selected={selected} actor={actor} locked={locked}
           onSelect={(p) => choose({ kind: "performer", performer: p, rev: final })}
           newActor={target.data?.new_actor ? { chosen: isNew, onSelect: () => choose({ kind: "new_actor" }) } : null} />
         {isNew && (
           <div className="new-form">
             <label className="field" htmlFor="rv-new-name">演员名（目录名）
-              <input id="rv-new-name" className="input" value={form.name} onChange={(e) => setNewActor({ ...form, name: e.target.value })} />
+              <input id="rv-new-name" className="input" disabled={locked} value={form.name} onChange={(e) => setNewActor({ ...form, name: e.target.value })} />
             </label>
             <label className="field" htmlFor="rv-new-lib">放到
-              <select id="rv-new-lib" value={form.library_id} onChange={(e) => setNewActor({ ...form, library_id: e.target.value })}>
+              <select id="rv-new-lib" disabled={locked} value={form.library_id} onChange={(e) => setNewActor({ ...form, library_id: e.target.value })}>
                 {archiveLibs.map((l) => (
                   <option key={l.id} value={l.id}>{letter[l.id]} · {l.label}{offline(l) ? "（离线）" : ""}</option>
                 ))}
@@ -330,7 +341,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
             <h3>{(candidates?.length ?? 0) > 0 ? "或改放到类型目录（代替演员目录）" : "或放到类型目录"}</h3>
             <div className="candidate-list" role="group" aria-label="类型目录">
               {categories.map((c) => (
-                <CategoryButton key={c.id} category={c} pressed={sel?.kind === "category" && sel.id === c.id}
+                <CategoryButton key={c.id} category={c} locked={locked} pressed={sel?.kind === "category" && sel.id === c.id}
                   onClick={() => choose({ kind: "category", id: c.id })} />
               ))}
             </div>
@@ -338,7 +349,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
         )}
         {inTauri() && !ws.readOnly && (
           <div className="spacer-top">
-            <button type="button" className="btn ghost" onClick={() => void chooseDirectory()}>手动入库</button>
+            <button type="button" className="btn ghost" disabled={locked} onClick={() => void chooseDirectory()}>手动入库</button>
           </div>
         )}
         {archiveStatus === "failed" && film.can_confirm && (
@@ -364,7 +375,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
         </div>
         {canSecond && (
           <SecondTarget categories={secondCats} hint={hint} number={film.number || film.name} second={second}
-            path={secondPf.data?.target_path ?? null} onSet={setSecondId} onClear={() => setSecondId(null)} />
+            path={secondPf.data?.target_path ?? null} locked={locked} onSet={setSecondId} onClear={() => setSecondId(null)} />
         )}
         <details open>
           <summary className="link-btn">最终文件包 · {film.files.length} 个文件</summary>
@@ -386,7 +397,13 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
           {changed && <button type="button" className="btn ghost" onClick={() => { setSeenRev(film.revisions); confirm.reset(); }}>重新查看</button>}
           <button type="button" className="btn primary" disabled={Boolean(blocked) || confirm.isPending}
-            onClick={() => { if (hasTarget && !blocked) confirm.mutate(); }}>确认入库</button>
+            onClick={() => {
+              if (!sel || blocked) return;
+              confirm.mutate({
+                choice: sel, newActor: isNew ? { library_id: form.library_id, name } : null, primary: targetPath,
+                second: second ? { id: second.id, path: secondPf.data?.target_path ?? null } : null,
+              });
+            }}>确认入库</button>
         </div>
       </div>
     </>
@@ -412,8 +429,8 @@ function targetCheck(data: TargetPreflight | undefined, error: unknown): string 
   return "";
 }
 
-function Candidates({ candidates, selected, actor, onSelect, newActor }: {
-  candidates: Performer[] | null; selected: Performer | null; actor: string; onSelect: (p: Performer) => void;
+function Candidates({ candidates, selected, actor, locked, onSelect, newActor }: {
+  candidates: Performer[] | null; selected: Performer | null; actor: string; locked: boolean; onSelect: (p: Performer) => void;
   newActor: { chosen: boolean; onSelect: () => void } | null;
 }) {
   const [text, setText] = useState(actor);
@@ -446,7 +463,7 @@ function Candidates({ candidates, selected, actor, onSelect, newActor }: {
             p.fuzzy ? "相似名" : null, p.role === "readonly" ? "只读片库，仅供参考" : null].filter(Boolean).join(" · ");
           return (
             <button key={p.id} type="button" className="candidate" aria-pressed={String(selected?.id) === String(p.id)}
-              disabled={p.role === "readonly"} onClick={() => onSelect(p)}>
+              disabled={locked || p.role === "readonly"} onClick={() => onSelect(p)}>
               <ActorThumb id={String(p.id)} hasThumb={p.has_thumb} name={p.name} />
               <div style={{ minWidth: 0 }}>
                 <strong>{p.name}</strong>
@@ -457,7 +474,7 @@ function Candidates({ candidates, selected, actor, onSelect, newActor }: {
           );
         })}
         {newActor && (
-          <button type="button" className="candidate new" aria-pressed={newActor.chosen} onClick={newActor.onSelect}>
+          <button type="button" className="candidate new" aria-pressed={newActor.chosen} disabled={locked} onClick={newActor.onSelect}>
             <div className="avatar" aria-hidden="true"><Icon of={AddIcon} /></div>
             <div><strong>新建演员目录</strong><span>点「确认入库」时才创建</span></div>
           </button>
@@ -467,13 +484,13 @@ function Candidates({ candidates, selected, actor, onSelect, newActor }: {
   );
 }
 
-function CategoryButton({ category, pressed, onClick }: {
-  category: Category & Partial<Pick<TargetCategory, "film_count" | "prefix_match">>; pressed?: boolean; onClick: () => void;
+function CategoryButton({ category, pressed, locked, onClick }: {
+  category: Category & Partial<Pick<TargetCategory, "film_count" | "prefix_match">>; pressed?: boolean; locked: boolean; onClick: () => void;
 }) {
   const meta = [category.film_count != null ? `${category.film_count} 部` : null,
     category.prefixes.length ? `前缀 ${category.prefixes.join("、")}` : null].filter(Boolean).join(" · ");
   return (
-    <button type="button" className="candidate" aria-pressed={pressed} onClick={onClick}>
+    <button type="button" className="candidate" aria-pressed={pressed} disabled={locked} onClick={onClick}>
       <div className="kicon" aria-hidden="true"><Icon of={FolderOpenIcon} /></div>
       <div style={{ minWidth: 0 }}>
         <strong>{category.label}</strong>
@@ -487,8 +504,8 @@ function CategoryButton({ category, pressed, onClick }: {
 }
 
 // 「第二目标（可选）」: the prefix hint is a button, never added by itself (§8 `second_target_hint`).
-function SecondTarget({ categories, hint, number, second, path, onSet, onClear }: {
-  categories: Category[]; hint: Category | null; number: string; second: Category | null; path: string | null;
+function SecondTarget({ categories, hint, number, second, path, locked, onSet, onClear }: {
+  categories: Category[]; hint: Category | null; number: string; second: Category | null; path: string | null; locked: boolean;
   onSet: (id: string) => void; onClear: () => void;
 }) {
   const [picking, setPicking] = useState(false);
@@ -497,7 +514,7 @@ function SecondTarget({ categories, hint, number, second, path, onSet, onClear }
       <div className="target-box second">
         <div className="section-h">
           <h3><Icon of={FolderOpenIcon} />第 2 份 · 类型目录</h3>
-          <button type="button" className="btn small ghost" onClick={onClear}><Icon of={CloseIcon} />不要第二目标</button>
+          <button type="button" className="btn small ghost" disabled={locked} onClick={onClear}><Icon of={CloseIcon} />不要第二目标</button>
         </div>
         <div className="target-path">{path ?? "正在检查目标…"}</div>
         <p className="tiny muted spacer-top">同一个成品包再复制一份。两份都校验通过、写下回执后，才清理来源。</p>
@@ -513,12 +530,12 @@ function SecondTarget({ categories, hint, number, second, path, onSet, onClear }
         {hint && prefix && <p className="tiny t-blue">番号前缀 {prefix} 对应「{hint.label}」</p>}
       </div>
       <div className="actions">
-        {hint && <button type="button" className="btn small primary" onClick={() => onSet(hint.id)}><Icon of={AddIcon} />加入「{hint.label}」</button>}
-        <button type="button" className="btn small" aria-expanded={picking} onClick={() => setPicking(!picking)}>{picking ? "收起" : "选择类型目录"}</button>
+        {hint && <button type="button" className="btn small primary" disabled={locked} onClick={() => onSet(hint.id)}><Icon of={AddIcon} />加入「{hint.label}」</button>}
+        <button type="button" className="btn small" aria-expanded={picking} disabled={locked} onClick={() => setPicking(!picking)}>{picking ? "收起" : "选择类型目录"}</button>
       </div>
       {picking && (
         <div className="candidate-list" role="group" aria-label="第二目标类型目录" style={{ flex: "1 1 100%", margin: 0 }}>
-          {categories.map((c) => <CategoryButton key={c.id} category={c} onClick={() => { onSet(c.id); setPicking(false); }} />)}
+          {categories.map((c) => <CategoryButton key={c.id} category={c} locked={locked} onClick={() => { onSet(c.id); setPicking(false); }} />)}
         </div>
       )}
     </div>
@@ -527,7 +544,8 @@ function SecondTarget({ categories, hint, number, second, path, onSet, onClear }
 
 // After 「确认入库」: 「已确认，等待归档」 until the receipt, then 入库完成 or 已入库 · 待清理; with a
 // second target both copies are listed.
-function Receipt({ film, second, onClose }: { film: FilmDetail; second: string | null; onClose: () => void }) {
+function Receipt({ film, bound, onClose }: { film: FilmDetail; bound: Submitted | null; onClose: () => void }) {
+  const second = bound?.second?.path ?? null;
   const ws = useWorkspace();
   const archive = runningArchiveStep(film);
   const archived = film.archive.status === "succeeded" || Boolean(film.receipt_id);
@@ -542,7 +560,7 @@ function Receipt({ film, second, onClose }: { film: FilmDetail; second: string |
         {archived ? (
           <div className="receipt">
             <h3><Icon of={CheckIcon} /> 成品已入库{second ? " · 两份都已校验" : ""}</h3>
-            <p>{second ? "第 1 份：" : ""}{film.archive.target_path ?? ""}</p>
+            <p>{second ? "第 1 份：" : ""}{film.archive.target_path ?? bound?.primary ?? ""}</p>
             {second && <p>第 2 份：{second}</p>}
             {film.receipt_id && <p className="mono">回执 {film.receipt_id}</p>}
           </div>
