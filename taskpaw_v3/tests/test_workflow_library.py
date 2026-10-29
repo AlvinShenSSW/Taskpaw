@@ -341,6 +341,36 @@ def test_a_row_born_after_the_snapshot_is_not_marked_missing(
     assert result.missing == 1
 
 
+def test_a_row_revived_after_the_snapshot_stays_present(store, tmp_path, monkeypatch):
+    """CXb5: an archive mkdir revives a missing actor's row (ON CONFLICT(path))
+    after the scan listed the root; the scan must not mark it missing again."""
+    lib = actor_library(store, tmp_path, "Alice", "Old")
+    scan_library(store, lib)
+    base = Path(store.library(lib)["path"])
+    shutil.rmtree(base / "Old")
+    scan_library(store, lib)
+    assert performers(store, lib)["Old"]["is_missing"] == 1
+    real = library_scan.list_dirs
+    revived = []
+
+    def list_then_revive(path):
+        names = real(path)
+        if not revived:  # the archive recreates Old after the listing
+            revived.append(path)
+            with store.transaction() as conn:
+                conn.execute(
+                    "UPDATE performers SET is_missing=0 WHERE library_id=?"
+                    " AND folder_name='Old'",
+                    (lib,),
+                )
+        return names
+
+    monkeypatch.setattr(library_scan, "list_dirs", list_then_revive)
+    result = scan_library(store, lib)
+    assert performers(store, lib)["Old"]["is_missing"] == 0
+    assert result.missing == 0
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows attributes")
 def test_scan_skips_hidden_and_system_directories(store, tmp_path):
     import ctypes
