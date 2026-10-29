@@ -465,7 +465,7 @@ export interface LibraryRules {
   scan_on_start: boolean; scan_every_hours: 0 | 2 | 6 | 12 | 24;
 }
 export interface LibraryPerformer extends Performer {
-  id: string; alias_ids: number[]; library_id: string; role: LibraryRole; is_missing: boolean;
+  id: string; name_norm: string; alias_ids: number[]; library_id: string; role: LibraryRole; is_missing: boolean;
   film_count: number | null; fuzzy: boolean;
 }
 export type PerformerFilter = "multi" | "alias" | "missing" | "nothumb";
@@ -755,6 +755,23 @@ async function get<T>(role: "agent" | "hub", path: string, signal?: AbortSignal)
   return res.json() as Promise<T>;
 }
 
+// The library's GETs (#361) keep the backend's `detail`, as send() does: 「不是可读的 Filmpaw 片库…」
+// says more than "path → 422". The plain get() stays as it is for its other callers.
+async function libraryGet<T>(path: string): Promise<T> {
+  const { baseUrl, controlToken } = cfg("agent");
+  const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
+  checkUnauthorized("agent", res);
+  if (!res.ok) {
+    let detail = `${path} → ${res.status}`;
+    try {
+      const j: unknown = await res.json();
+      if (j && typeof j === "object" && "detail" in j && typeof j.detail === "string") detail = j.detail;
+    } catch { /* non-JSON error body */ }
+    throw new HttpError(detail, res.status);
+  }
+  return res.json() as Promise<T>;
+}
+
 const FILM_ERROR_CODES = new Set([
   "invalid_parameters", "unknown_server", "agent_disabled", "agent_offline",
   "film_list_unavailable", "agent_auth_failed", "agent_timeout",
@@ -1019,7 +1036,7 @@ export const api = {
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,
   thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
   // #361 §10: 片库与规则 and 设置 · 片库 (controller only)
-  libraries: () => get<LibraryList>("agent", `${LIBRARY}/libraries`),
+  libraries: () => libraryGet<LibraryList>(`${LIBRARY}/libraries`),
   libraryAdd: (body: LibraryBody) => send<Library>("agent", "POST", `${LIBRARY}/libraries`, body),
   libraryUpdate: (id: string, patch: LibraryPatch) => send<Library>("agent", "PATCH", `${LIBRARY}/libraries/${seg(id)}`, patch),
   libraryRemove: (id: string) => send<void>("agent", "DELETE", `${LIBRARY}/libraries/${seg(id)}`),
@@ -1027,29 +1044,30 @@ export const api = {
   libraryOrder: (ids: string[]) => send<LibraryList>("agent", "PUT", `${LIBRARY}/order`, { ids }),
   libraryScan: (id: string) => send<ScanStatus>("agent", "POST", `${LIBRARY}/libraries/${seg(id)}/scan`),
   libraryScanAll: () => send<ScanStatus>("agent", "POST", `${LIBRARY}/scan-all`),
-  libraryScanStatus: () => get<ScanStatus>("agent", `${LIBRARY}/scan-status`),
-  // the 演员 tab lists missing directories too (the route's default leaves them out, §10)
+  libraryScanStatus: () => libraryGet<ScanStatus>(`${LIBRARY}/scan-status`),
+  // the 演员 tab lists missing directories too (the route's default leaves them out, §10) and pages
+  // over name groups, each with every location (#365)
   libraryPerformers: (query: PerformerQuery) => {
-    const qs = new URLSearchParams({ include_missing: "true" });
+    const qs = new URLSearchParams({ include_missing: "true", group: "true" });
     for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== "") qs.set(key, String(value));
-    return get<PerformerPage>("agent", `/control/workflow/performers?${qs}`);
+    return libraryGet<PerformerPage>(`/control/workflow/performers?${qs}`);
   },
-  libraryPerformer: (id: string) => get<PerformerDetail>("agent", `/control/workflow/performers/${seg(id)}`),
+  libraryPerformer: (id: string) => libraryGet<PerformerDetail>(`/control/workflow/performers/${seg(id)}`),
   libraryAddAlias: (performerId: string, alias: string) =>
     send<{ id: number; alias: string }>("agent", "POST", `${LIBRARY}/performers/${seg(performerId)}/aliases`, { alias }),
   libraryDeleteAlias: (aliasId: number) => send<void>("agent", "DELETE", `${LIBRARY}/aliases/${aliasId}`),
-  libraryRules: () => get<LibraryRules>("agent", `${LIBRARY}/rules`),
+  libraryRules: () => libraryGet<LibraryRules>(`${LIBRARY}/rules`),
   librarySaveRules: (changes: Partial<LibraryRules>) => send<LibraryRules>("agent", "PUT", `${LIBRARY}/rules`, changes),
   libraryImportPreview: (path = "") =>
-    get<ImportPreview>("agent", `${LIBRARY}/import/preview${path ? `?${new URLSearchParams({ path })}` : ""}`),
+    libraryGet<ImportPreview>(`${LIBRARY}/import/preview${path ? `?${new URLSearchParams({ path })}` : ""}`),
   libraryImport: (path = "") => send<ImportResult>("agent", "POST", `${LIBRARY}/import`, path ? { path } : {}),
   libraryHistory: (filter: HistoryFilter | null, q: string, page: number) => {
     const qs = new URLSearchParams({ page: String(page) });
     if (filter) qs.set("filter", filter);
     if (q) qs.set("q", q);
-    return get<HistoryPage>("agent", `${LIBRARY}/history?${qs}`);
+    return libraryGet<HistoryPage>(`${LIBRARY}/history?${qs}`);
   },
-  libraryReceipt: (receiptId: string) => get<HistoryReceipt>("agent", `${LIBRARY}/history/${seg(receiptId)}`),
+  libraryReceipt: (receiptId: string) => libraryGet<HistoryReceipt>(`${LIBRARY}/history/${seg(receiptId)}`),
   // 打开目录: only a library root's subtree or a receipt's target (403 otherwise)
   libraryOpen: (path: string) => send<void>("agent", "POST", `${LIBRARY}/open`, { path }),
   image,

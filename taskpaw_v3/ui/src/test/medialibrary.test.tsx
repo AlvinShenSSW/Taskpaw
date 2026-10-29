@@ -1,10 +1,11 @@
 // #365 (EPIC #361 L3): 片库与规则 (NAS 片库, 演员, 归档规则, 归档历史) and 设置 over the library routes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api, HttpError, type LibraryList } from "../api";
+import { SCAN_IDLE_MS } from "../components/media/libraryModel";
 import { LibraryPage } from "../components/media/LibraryPage";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { SettingsPage } from "../components/media/SettingsPage";
@@ -13,7 +14,7 @@ import { theme } from "../theme";
 import { setLang } from "../i18n";
 import {
   CAT_K, HARU_DETAIL, HISTORY, IMPORT_PREVIEW, IMPORT_RESULT, LIB_A, LIBRARIES, NO_LIBRARIES, PERFORMERS, RECEIPT,
-  ROW_SECOND, RULES, SCAN_IDLE,
+  performer, ROW_SECOND, RULES, SCAN_IDLE,
 } from "./fixtures/mediaLibrary";
 import { FILMS_RESPONSE, PLANS } from "./fixtures/mediaWorkspace";
 
@@ -60,7 +61,7 @@ const card = (name: string) => screen.findByRole("article", { name });
 const tab = async (name: string) => fireEvent.click(await screen.findByRole("tab", { name }));
 
 beforeEach(() => { setLang("zh-CN"); });
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("片库与规则 · first run", () => {
   it("offers the Filmpaw import and manual add, then imports after the preview and follows the scans", async () => {
@@ -224,7 +225,7 @@ describe("片库与规则 · 演员", () => {
     const mio = screen.getByRole("row", { name: "Mio 详情" });
     expect(within(mio).getByRole("img", { name: "Mio：没有头像" })).toHaveClass("none");
     expect(within(screen.getByRole("row", { name: "Nagi 详情" })).getByText(/已缺失/)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /^有别名\s*4$/ })).toBeInTheDocument();  // counts from `total`
+    expect(await screen.findByRole("button", { name: /^有别名\s*3$/ })).toBeInTheDocument();  // counts from `total`
 
     fireEvent.click(screen.getByRole("button", { name: /^有别名/ }));
     await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ filter: "alias", page: 1, page_size: 50 })));
@@ -325,6 +326,74 @@ describe("片库与规则 · 归档规则 · 片库优先级", () => {
     await waitFor(() => expect(within(prio).getByText("A · 第二片库").closest("li")).toHaveTextContent(/^1/));
     expect(within(prio).getByText("C · 主片库").closest("li")).toHaveTextContent(/^2/);
     expect(m.saveRules).not.toHaveBeenCalled();
+  });
+
+  it("IR4-4: a refused order reads the libraries again", async () => {
+    mockLibrary();
+    const second = { ...LIB_A, id: "lib-c", label: "第二片库", path: "\\\\nas-3\\films\\", position: 3 };
+    libraries = { ...LIBRARIES, items: [LIB_A, second, CAT_K] };
+    vi.spyOn(api, "libraryOrder").mockRejectedValue(new HttpError("顺序必须恰好包含每个演员片库一次", 422));
+    const ws = mount(<LibraryPage />);
+    await tab("归档规则");
+    const prio = await screen.findByRole("list", { name: "片库优先级" });
+    const reads = vi.mocked(api.libraries).mock.calls.length;
+    fireEvent.click(within(prio).getByRole("button", { name: "上移 第二片库" }));
+    await waitFor(() => expect(ws.toast).toHaveBeenCalledWith("顺序必须恰好包含每个演员片库一次"));
+    await waitFor(() => expect(vi.mocked(api.libraries).mock.calls.length).toBeGreaterThan(reads));
+  });
+});
+
+describe("L3 review fixes", () => {
+  it("CX3-1/CX3-2: one row per name group (name_norm), whatever the display names", async () => {
+    const m = mockLibrary();
+    const trad = performer({ id: "p-z1", name: "張小雨", name_norm: "张小雨", library_id: "lib-a", film_count: 3 });
+    const simp = performer({ id: "p-z2", name: "张小雨", name_norm: "张小雨", library_id: "lib-b", film_count: 4 });
+    m.performers.mockResolvedValue({ items: [trad, simp], total: 1, page: 1, page_size: 50 });
+    mount(<LibraryPage />);
+    await tab("演员");
+    const row = await screen.findByRole("row", { name: "張小雨 详情" });
+    expect(row.querySelectorAll(".loc-chip")).toHaveLength(2);
+    expect(within(row).getByText("7")).toBeInTheDocument();
+    expect(screen.queryByRole("row", { name: "张小雨 详情" })).toBeNull();
+    expect(screen.getByText("显示 1 / 1 位")).toBeInTheDocument();
+  });
+
+  it("CX3-1: the 演员 listing asks the route for whole name groups", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ items: [], total: 0, page: 1, page_size: 50 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.libraryPerformers({ filter: "alias" });
+    const url = new URL(String((fetchMock.mock.calls[0] as unknown[])[0]));
+    expect(url.pathname).toBe("/control/workflow/performers");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ include_missing: "true", group: "true", filter: "alias" });
+  });
+
+  it("CX3-3: an idle scanner is still asked, so a scan the backend started shows up", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockLibrary();
+      mount(<LibraryPage />);
+      const a = within(await card("主片库"));
+      expect(a.queryByText("正在扫描演员目录…")).toBeNull();
+      const reads = vi.mocked(api.libraryScanStatus).mock.calls.length;
+      vi.mocked(api.libraryScanStatus).mockResolvedValue({ running: "lib-a", queued: [], results: {} });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SCAN_IDLE_MS); });
+      expect(vi.mocked(api.libraryScanStatus).mock.calls.length).toBeGreaterThan(reads);
+      expect(await a.findByText("正在扫描演员目录…")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("IR4-2: a refused import preview shows the backend's reason", async () => {
+    const m = mockLibrary();
+    libraries = NO_LIBRARIES;
+    m.preview.mockRestore();
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      Response.json({ detail: "不是可读的 Filmpaw 片库：file is not a database" }, { status: 422 })));
+    mount(<LibraryPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "从 Filmpaw 导入" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("无法读取 Filmpaw 片库：不是可读的 Filmpaw 片库：file is not a database")).toBeInTheDocument();
   });
 });
 

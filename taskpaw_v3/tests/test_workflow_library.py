@@ -662,6 +662,32 @@ def test_search_matches_contains_and_reverse_containment(library):
     assert names(store.search("x")) == ["X"]
 
 
+def test_group_mode_pages_whole_name_groups(library):
+    """#365: the 演员 tab pages over name groups, each with all its locations."""
+    store, a, b = library
+    flat = store.search(page_size=5)
+    assert flat["total"] == 6  # locations; 张小雨 straddles pages 1 and 2
+    assert [i["name_norm"] for i in flat["items"]].count("张小雨") == 1
+    whole = store.search(group=True, page_size=100)
+    assert whole["total"] == 5  # 張小雨 / 张小雨 are one group (name_norm)
+    for size in (1, 2, 4):
+        pages = [
+            store.search(group=True, page=n, page_size=size)
+            for n in range(1, -(-5 // size) + 1)
+        ]
+        assert all(p["total"] == 5 for p in pages)
+        seen: dict[str, int] = {}
+        for n, p in enumerate(pages):
+            for item in p["items"]:
+                assert seen.setdefault(item["name_norm"], n) == n  # one page
+        assert len(seen) == 5
+    group = store.search(group=True, page=3, page_size=2)["items"]
+    assert {i["name"] for i in group} == {"張小雨", "张小雨"}
+    assert {i["library_id"] for i in group} == {a, b}
+    assert store.search("张小", group=True)["total"] == 1
+    assert store.search(group=True, library_id=b)["total"] == 2
+
+
 def test_search_escapes_like_wildcards(library):
     store, _, _ = library
     assert names(store.search("%")) == []

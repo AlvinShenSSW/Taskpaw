@@ -304,6 +304,7 @@ class LibraryArchive:
         filter: str | None = None,
         page: int = 1,
         page_size: int = PAGE_SIZE_DEFAULT,
+        group: bool = False,
     ) -> dict[str, Any]:
         """The library search envelope `{items, total, page, page_size}`."""
         return self._db().search(
@@ -313,6 +314,7 @@ class LibraryArchive:
             filter=filter,
             page=page,
             page_size=page_size,
+            group=group,
         )
 
     def thumb(self, performer_id: str) -> tuple[bytes, str] | None:

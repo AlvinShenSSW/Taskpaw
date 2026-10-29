@@ -11,6 +11,8 @@ export const PERFORMERS_KEY = ["libraryPerformers"] as const;
 export const PERFORMER_KEY = ["libraryPerformer"] as const;
 export const HISTORY_KEY = ["libraryHistory"] as const;
 const SCAN_POLL_MS = 1500;
+// idle, the scanner is still asked: a scheduled or recovery scan starts without the UI (§6)
+export const SCAN_IDLE_MS = 30_000;
 
 export const SCAN_EVERY: Array<[LibraryRules["scan_every_hours"], string]> = [
   [0, "关闭"], [2, "每 2 小时"], [6, "每 6 小时"], [12, "每 12 小时"], [24, "每天"],
@@ -27,12 +29,13 @@ export function useRules() {
 
 export const scanBusy = (s: ScanStatus | undefined) => Boolean(s && (s.running || s.queued.length));
 
-// The scanner's state, polled while a scan runs or waits; once it settles the counts are read again.
+// The scanner's state, polled fast while a scan runs or waits and slowly otherwise; once it settles
+// the counts are read again.
 export function useScanStatus() {
   const qc = useQueryClient();
   const status = useQuery({
     queryKey: SCAN_KEY, queryFn: api.libraryScanStatus, retry: false,
-    refetchInterval: (q) => (scanBusy(q.state.data) ? SCAN_POLL_MS : false),
+    refetchInterval: (q) => (scanBusy(q.state.data) ? SCAN_POLL_MS : SCAN_IDLE_MS),
   });
   const busy = scanBusy(status.data);
   const was = useRef(busy);

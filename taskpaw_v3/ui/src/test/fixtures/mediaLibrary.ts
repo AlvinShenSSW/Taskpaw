@@ -35,14 +35,15 @@ export const performer = (over: Partial<LibraryPerformer> & Pick<LibraryPerforme
   source_label: over.library_id === "lib-b" ? "备份库" : "主片库",
   unc_path: `${over.library_id === "lib-b" ? LIB_B.path : LIB_A.path}${over.name}`,
   has_thumb: true, aliases: [], alias_ids: [], role: over.library_id === "lib-b" ? "readonly" : "archive",
-  is_missing: false, film_count: 10, fuzzy: false, ...over,
+  is_missing: false, film_count: 10, fuzzy: false, name_norm: over.name.toLowerCase(), ...over,
 });
 
 export const HARU_A = performer({ id: "p-haru-a", name: "Haru", library_id: "lib-a", aliases: ["ハル"], alias_ids: [7], film_count: 42 });
 export const HARU_B = performer({ id: "p-haru-b", name: "Haru", library_id: "lib-b", aliases: ["ハル"], alias_ids: [7], film_count: 12 });
 export const MIO = performer({ id: "p-mio", name: "Mio", library_id: "lib-a", has_thumb: false, film_count: 18 });
 export const NAGI = performer({ id: "p-nagi", name: "Nagi", library_id: "lib-a", is_missing: true, film_count: 5 });
-export const PERFORMERS: PerformerPage = { items: [HARU_A, HARU_B, MIO, NAGI], total: 4, page: 1, page_size: 50 };
+// the grouped listing: `total` counts name groups (Haru's two locations are one)
+export const PERFORMERS: PerformerPage = { items: [HARU_A, HARU_B, MIO, NAGI], total: 3, page: 1, page_size: 50 };
 
 const row = (over: Partial<HistoryRow> & Pick<HistoryRow, "receipt_id" | "number" | "target_path">): HistoryRow => ({
   film_id: `film-${over.receipt_id}`, operation_id: `op-${over.receipt_id}`, accepted_at: "2026-10-30T11:32:00Z",

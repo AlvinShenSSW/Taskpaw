@@ -48,7 +48,8 @@ export function RulesTab({ libraries }: { libraries: Library[] }) {
       void qc.invalidateQueries({ queryKey: RULES_KEY });  // an unset 新演员 default follows the order
       ws.toast("规则已保存");
     },
-    onError: (e) => ws.toast(errorText(e)),
+    // a refused order (another window changed the libraries) shows the stored one again
+    onError: (e) => { void qc.invalidateQueries({ queryKey: LIBRARIES_KEY }); ws.toast(errorText(e)); },
   });
   const r = rules.data;
   if (rules.isLoading) return <p className="muted">正在读取归档规则…</p>;

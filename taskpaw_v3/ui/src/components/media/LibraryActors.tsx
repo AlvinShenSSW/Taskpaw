@@ -19,16 +19,12 @@ const FILTERS: Array<["all" | PerformerFilter, string]> = [
   ["all", "全部"], ["multi", "多个位置"], ["alias", "有别名"], ["missing", "目录已缺失"], ["nothumb", "没有头像"],
 ];
 
-// One row per name: the route returns one item per location, ordered by name, so a name's
-// locations are adjacent.
+// One row per name group (the backend's `name_norm`, so 張 and 张 are one): the grouped listing
+// pages over groups and returns every location of each, ordered by `name_norm`.
 function byName(items: LibraryPerformer[]): LibraryPerformer[][] {
-  const out: LibraryPerformer[][] = [];
-  for (const p of items) {
-    const last = out[out.length - 1];
-    if (last && last[0].name.toLowerCase() === p.name.toLowerCase()) last.push(p);
-    else out.push([p]);
-  }
-  return out;
+  const groups = new Map<string, LibraryPerformer[]>();
+  for (const p of items) groups.set(p.name_norm, [...(groups.get(p.name_norm) ?? []), p]);
+  return [...groups.values()];
 }
 
 const sumFilms = (locations: LibraryPerformer[]) => locations.reduce((n, p) => n + (p.film_count ?? 0), 0);
@@ -105,7 +101,7 @@ export function ActorsTab({ libraries }: { libraries: Library[] }) {
           </table>
         </div>
         <Pager page={page} total={list.data?.total ?? 0} size={PAGE_SIZE} onPage={setPage}>
-          <span>显示 {rows.length} 位 · 共 {list.data?.total ?? 0} 个演员目录</span>
+          <span>显示 {rows.length} / {list.data?.total ?? 0} 位</span>
           <span>缩略图取演员目录下的 folder.jpg · 同名演员共用一组别名</span>
         </Pager>
       </div>
