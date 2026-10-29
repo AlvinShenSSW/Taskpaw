@@ -64,10 +64,12 @@ export function Pager({ page, total, size, onPage, children }: {
   page: number; total: number; size: number; onPage: (page: number) => void; children: ReactNode;
 }) {
   const pages = Math.max(1, Math.ceil(total / size));
+  // The total can shrink under the viewer (a refetch, a removed library): never stay on a page past the last one.
+  useEffect(() => { if (page > pages) onPage(pages); }, [page, pages, onPage]);
   return (
     <div className="pager">
       {children}
-      {pages > 1 && (
+      {(pages > 1 || page > 1) && (
         <span className="actions">
           <button type="button" className="btn small ghost" disabled={page <= 1} onClick={() => onPage(page - 1)}>上一页</button>
           <span className="mono">{page} / {pages}</span>

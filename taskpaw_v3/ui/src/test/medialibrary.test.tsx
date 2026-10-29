@@ -71,7 +71,7 @@ describe("片库与规则 · first run", () => {
     mount(<LibraryPage />);
     expect(await screen.findByRole("heading", { name: "还没有片库" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "手动添加片库" })).toBeInTheDocument();
-    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getByRole("tab", { name: "NAS 片库" })).toHaveAttribute("aria-selected", "true");
     fireEvent.click(screen.getByRole("button", { name: "从 Filmpaw 导入" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText(IMPORT_PREVIEW.path)).toBeInTheDocument();
@@ -394,6 +394,40 @@ describe("L3 review fixes", () => {
     fireEvent.click(await screen.findByRole("button", { name: "从 Filmpaw 导入" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("无法读取 Filmpaw 片库：不是可读的 Filmpaw 片库：file is not a database")).toBeInTheDocument();
+  });
+
+  it("CX3-4: with no libraries, 归档历史 stays reachable and the empty-state buttons still work", async () => {
+    const m = mockLibrary();
+    libraries = NO_LIBRARIES;
+    mount(<LibraryPage />);
+    expect(await screen.findByRole("heading", { name: "还没有片库" })).toBeInTheDocument();
+    await tab("归档历史");
+    expect(await screen.findByRole("row", { name: "OAE-198 回执" })).toBeInTheDocument();
+    expect(m.history).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "还没有片库" })).toBeNull();
+    await tab("NAS 片库");
+    fireEvent.click(await screen.findByRole("button", { name: "手动添加片库" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("CX3-5: a total that shrinks under the viewer falls back to the last page, with a working 上一页", async () => {
+    const m = mockLibrary();
+    const many = { ...PERFORMERS, total: 120, page_size: 50 };
+    let total = 120;
+    m.performers.mockImplementation(async (q) => {
+      if (q.page_size === 1) return { ...PERFORMERS, items: PERFORMERS.items.slice(0, 1), page_size: 1 };
+      return (q.page ?? 1) > Math.ceil(total / 50) ? { ...many, items: [], total, page: q.page ?? 1 } : { ...many, total, page: q.page ?? 1 };
+    });
+    mount(<LibraryPage />);
+    await tab("演员");
+    fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ page: 2 })));
+    total = 20;  // the data shrinks to one page; page 3 is then past the end
+    await act(async () => { await vi.waitFor(() => expect(screen.getByText("2 / 3")).toBeInTheDocument()); });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ page: 3 })));
+    await waitFor(() => expect(m.performers).toHaveBeenLastCalledWith(expect.objectContaining({ page: 1 })));
+    expect(await screen.findByRole("row", { name: "Haru 详情" })).toBeInTheDocument();
   });
 });
 

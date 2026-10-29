@@ -51,23 +51,24 @@ export function LibraryPage() {
   const libraries = useLibraries();
   const items = libraries.data?.items;
 
+  // No libraries yet: the first-run state stands in for the library tabs; 归档规则 and 归档历史 (receipts outlive a library) stay reachable.
+  const firstRun = (
+    <div className="panel empty">
+      <Icon of={StorageOutlinedIcon} />
+      <h2>还没有片库</h2>
+      <p className="small">TaskPaw 需要知道 NAS 上的演员目录，才能为影片推荐入库位置。如果这台电脑上有 Filmpaw 的片库数据，可以直接导入。</p>
+      <div className="actions">
+        <button type="button" className="btn primary" onClick={() => setImporting(true)}><Icon of={FileDownloadOutlinedIcon} />从 Filmpaw 导入</button>
+        <button type="button" className="btn" onClick={() => setForm({ kind: "actor" })}><Icon of={AddIcon} />手动添加片库</button>
+      </div>
+      <p className="tiny muted spacer-top">导入只读取 Filmpaw 的数据，不会修改它。之后两边各自独立。</p>
+    </div>
+  );
+
   let body;
   if (libraries.isLoading) body = <div className="panel empty"><p>正在读取片库…</p></div>;
   else if (libraries.error || !items) body = <Notice tone="red" icon={WarningAmberIcon}>无法读取片库：{errorText(libraries.error)}</Notice>;
-  else if (items.length === 0) {
-    body = (
-      <div className="panel empty">
-        <Icon of={StorageOutlinedIcon} />
-        <h2>还没有片库</h2>
-        <p className="small">TaskPaw 需要知道 NAS 上的演员目录，才能为影片推荐入库位置。如果这台电脑上有 Filmpaw 的片库数据，可以直接导入。</p>
-        <div className="actions">
-          <button type="button" className="btn primary" onClick={() => setImporting(true)}><Icon of={FileDownloadOutlinedIcon} />从 Filmpaw 导入</button>
-          <button type="button" className="btn" onClick={() => setForm({ kind: "actor" })}><Icon of={AddIcon} />手动添加片库</button>
-        </div>
-        <p className="tiny muted spacer-top">导入只读取 Filmpaw 的数据，不会修改它。之后两边各自独立。</p>
-      </div>
-    );
-  } else {
+  else {
     body = (
       <>
         <div className="subtabs" role="tablist" aria-label="片库与规则">
@@ -76,7 +77,8 @@ export function LibraryPage() {
           ))}
         </div>
         <div role="tabpanel" aria-label={TABS.find(([key]) => key === tab)?.[1]}>
-          {tab === "nas" ? <NasTab items={items} onForm={setForm} onRemove={setRemoving} />
+          {items.length === 0 && (tab === "nas" || tab === "actors") ? firstRun
+            : tab === "nas" ? <NasTab items={items} onForm={setForm} onRemove={setRemoving} />
             : tab === "actors" ? <ActorsTab libraries={items} />
               : tab === "rules" ? <RulesTab libraries={items} /> : <HistoryTab libraries={items} />}
         </div>
