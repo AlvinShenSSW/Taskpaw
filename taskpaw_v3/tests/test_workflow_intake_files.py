@@ -160,6 +160,16 @@ def test_windows_metadata_streams_are_not_film_data(package):
         assert {"Thumbs.db", "movie.mp4"} <= set(source.entries)
 
 
+def test_a_non_empty_encryptable_stream_is_still_refused(package):
+    """Codex 4.0.1 P2: only Explorer's 0-byte marker is metadata."""
+    _, directory, _, _ = package
+    with open(str(directory / "movie.mp4") + ":encryptable", "wb") as writer:
+        writer.write(b"data that was never archived")
+    with pytest.raises(files.IntakeFileError, match="alternate_stream"):
+        with held(package):
+            pytest.fail("must refuse")
+
+
 @pytest.mark.parametrize(
     "relative",
     ["../outside", "Actor/../Film", "Actor/Film:ads", "Actor/Film.", "Actor/Film "],

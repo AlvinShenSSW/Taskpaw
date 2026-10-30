@@ -31,12 +31,14 @@ class IntakeFileError(OSError):
         super().__init__(code)
 
 
-# Windows writes these on its own and they carry no film data: Explorer marks
-# Thumbs.db `:encryptable` (0 bytes) and a downloaded file gets the Mark of the
-# Web `:Zone.Identifier`. Any other alternate stream is still refused.
-_METADATA_STREAMS = frozenset(
-    {"::$data", ":encryptable:$data", ":zone.identifier:$data"}
-)
+def _metadata_stream(name: str, size: int) -> bool:
+    """Streams Windows writes on its own, with no film data: Explorer's 0-byte
+    Thumbs.db `:encryptable` marker and a download's Mark of the Web. Any other
+    alternate stream (a non-empty `:encryptable` too) is still refused."""
+    name = name.casefold()
+    return name in ("::$data", ":zone.identifier:$data") or (
+        name == ":encryptable:$data" and size == 0
+    )
 
 
 class _Basic(ctypes.Structure):
@@ -301,7 +303,7 @@ class WindowsFiles:
             self.check(False)
         try:
             while True:
-                if value.name.casefold() not in _METADATA_STREAMS:
+                if not _metadata_stream(value.name, value.size):
                     raise IntakeFileError("alternate_stream")
                 if not self.kernel.FindNextStreamW(handle, ctypes.byref(value)):
                     if _last_error() != 38:

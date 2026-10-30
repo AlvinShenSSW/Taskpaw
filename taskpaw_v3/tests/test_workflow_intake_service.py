@@ -129,6 +129,25 @@ def test_an_alternate_stream_needs_attention_and_names_the_file(service, package
     assert (view.state, view.reason) == ("needs_attention", "alternate_stream")
     (row,) = h.store.list_intake_board(h.operator)
     assert row.unassigned_paths == ("movie.mp4",)
+    other = package[1] / "other.xyz"  # an earlier grouping diagnostic ...
+    other.write_bytes(b"unknown")
+    os.remove(stream)
+    h.clock.value += timedelta(seconds=30)
+    mono[0] += 30
+    obj.scan_once()
+    (row,) = h.store.list_intake_board(h.operator)
+    assert row.unassigned_paths == ("other.xyz",)
+    other.unlink()  # ... never hides the current failure (Codex 4.0.1 P2)
+    with open(stream, "wb") as writer:
+        writer.write(b"owned alternate stream")
+    h.clock.value += timedelta(seconds=30)
+    mono[0] += 30
+    obj.scan_once()
+    (row,) = h.store.list_intake_board(h.operator)
+    assert (row.grouping_reasons, row.unassigned_paths) == (
+        ("alternate_stream",),
+        ("movie.mp4",),
+    )
     os.remove(stream)  # the operator fixes the folder: the next scan admits it
     h.clock.value += timedelta(seconds=30)
     mono[0] += 30
