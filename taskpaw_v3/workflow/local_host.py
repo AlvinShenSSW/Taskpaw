@@ -29,6 +29,8 @@ from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
 from .fleet_live import FleetLive
 from .intake_protocol import ProbeArtifact
+from .library_scan import LibraryScanner
+from .library_store import LibraryStore
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
@@ -300,6 +302,10 @@ class LocalWorkflowHost:
         # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
         self.cancels: set[str] = set()
         self.scheduler: Any = None  # P2-3 R13: the routing pass's thread
+        # #362: the controller's NAS library index and its scanner thread
+        self.library: LibraryStore | None = None
+        self.library_scanner: LibraryScanner | None = None
+        self.library_reason = ""
         # P2-4 R1: the last pass's decision; its waiting reasons reach the board
         self.last_pass: Any = None
         # the controller's free disk for the C8 gate (tests inject a figure)
@@ -406,12 +412,29 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.scheduler.start()
+            if self._stopping.is_set():
+                return
+            self._start_library()
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)
         except Exception as exc:  # never fatal to the agent (C4)
             log.exception("media workflow failed to start")
             self.state, self.reason = "failed", str(exc) or type(exc).__name__
+
+    def _start_library(self) -> None:
+        """`library.db` beside `workflow.db`; a failure here leaves the
+        workflow running and the 片库 routes answering with the reason."""
+        try:
+            self.library = LibraryStore.open(self.data_dir / "library.db")
+            self.library_scanner = LibraryScanner(self.library)
+            self.library_scanner.start()
+        except Exception as exc:
+            log.exception("library index failed to start")
+            if self.library is not None:
+                self.library.close()
+            self.library, self.library_scanner = None, None
+            self.library_reason = f"片库启动失败：{exc}"
 
     def stop(self, timeout: float = 60.0) -> None:
         """Stop everything; keep the store open unless every user stopped (R5).
@@ -441,6 +464,10 @@ class LocalWorkflowHost:
                 self._download_lock.release()
         else:
             confirmed = False
+        if self.library_scanner is not None:  # a scan in progress finishes first
+            confirmed &= self.library_scanner.stop(
+                timeout=max(1.0, deadline - time.monotonic())
+            )
         if self.scheduler is not None:  # R13: before the dispatcher it wakes
             confirmed &= self.scheduler.stop(timeout=min(timeout, 30.0))
         if self.dispatcher is not None:
@@ -463,6 +490,9 @@ class LocalWorkflowHost:
             return
         if self.runtime is not None:
             self.runtime.close()
+        if self.library is not None:
+            self.library.close()
+            self.library = None
         self.state = "stopped"
 
     def confirm(

@@ -314,6 +314,9 @@ def create_control_app(
         worker_api_host=config.bind_host,
         worker_provider=worker_provider,
     )
+    from taskpaw_v3.agent.server.library_routes import register_library_routes
+
+    register_library_routes(app, config.workflow, workflow_provider)  # #362 片库
 
     from taskpaw_v3.agent.server.workflow_settings import register_workflow_settings
 

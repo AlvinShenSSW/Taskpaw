@@ -1,0 +1,734 @@
+<title>TaskPaw 片库与设置</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600&display=swap">
+<style>
+/* Layout: the real 媒体处理中心 shell (scope banner, 205px rail, content) inside a thin demo bar.
+   Single dark theme on purpose: TaskPaw V3 is dark-only; values copied from mediaStyles.ts. */
+:root{
+  --page:#070C17;--bg:#0B1120;--surface:#111A2E;--low:#0D1626;--line:#263650;--text:#F8FAFC;--muted:#A8B5C7;
+  --green:#22C55E;--green-light:#97E8B4;--blue:#75D2FA;--amber:#FBC76A;--red:#FDA4AF;--on-green:#06210F;
+  --demo:#C4B5FD;--demo-bg:#8B5CF614;--demo-line:#8B5CF640;
+  --sans:"Fira Sans","Noto Sans SC",system-ui,"Microsoft YaHei",sans-serif;
+  --mono:"Fira Code",Consolas,"Noto Sans SC","Microsoft YaHei",monospace;
+  color-scheme:dark;
+}
+body{background:var(--page);color:var(--text);font:14px/1.6 var(--sans);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 40px}
+*,*::before,*::after{box-sizing:border-box}
+button,input,select{font:inherit}
+button{cursor:pointer;color:inherit}
+button:disabled{cursor:not-allowed;opacity:.5}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+h1,h2,h3,h4,p{margin:0}
+h1,h2,h3{text-wrap:balance}
+h2{font-size:17px;font-weight:600}h3{font-size:15px;font-weight:600}
+.muted{color:var(--muted)}.small{font-size:12px}.tiny{font-size:11px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.t-green{color:var(--green-light)}.t-amber{color:var(--amber)}.t-blue{color:var(--blue)}.t-red{color:var(--red)}
+.icon{width:19px;height:19px;flex:none;vertical-align:middle}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+
+/* demo bar (not part of the product) */
+.demo-bar{max-width:1600px;margin:0 auto 12px;display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:10px 14px;border:1px dashed var(--demo-line);border-radius:10px;background:var(--demo-bg);color:var(--demo);font-size:12px}
+.demo-bar strong{font-weight:600;letter-spacing:.3px}
+.demo-bar .seg{background:transparent;border-color:var(--demo-line)}
+.demo-bar .seg-opt{min-height:34px;color:#cbbff5}
+.demo-bar .seg-opt[aria-checked=true]{background:#8b5cf622;border-color:#8b5cf677;color:#ece6ff}
+.legend{display:inline-flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--demo);display:inline-block;flex:none}
+
+/* shell */
+.mw-root{max-width:1600px;margin:0 auto;position:relative;background:radial-gradient(1000px 650px at 80% -200px,#38bdf80b,transparent),var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.scope-banner{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 25px;background:#22c55e06;border-bottom:1px solid #223c33;font-size:11px;color:#b5cdbf;flex-wrap:wrap}
+.health{display:flex;gap:6px;flex-wrap:wrap}
+.workspace-shell{display:grid;grid-template-columns:205px minmax(0,1fr);min-height:760px}
+.workspace-rail{padding:22px 13px;background:#0e1727;border-right:1px solid var(--line)}
+.workspace-heading{padding:0 13px 18px;margin-bottom:11px;border-bottom:1px solid var(--line)}
+.workspace-heading strong{display:block;font-size:14px}
+.nav-group{display:flex;flex-direction:column;gap:5px}
+.nav-item{min-height:46px;display:flex;align-items:center;gap:12px;color:var(--muted);padding:10px 13px;border:1px solid transparent;border-radius:8px;font-size:13px;background:transparent;text-align:left;width:100%;transition:background .16s,color .16s;position:relative}
+.nav-item:hover{background:#ffffff05;color:var(--text)}
+.nav-item[aria-current=page]{background:#22c55e10;border-color:#22c55e36;color:#9be7b5}
+.nav-count{margin-left:auto;min-width:22px;text-align:center;background:#263650;border-radius:5px;font:11px/20px var(--mono);color:#cedbea;padding:0 4px}
+.nav-later{margin-left:auto;font-size:9px;line-height:1.6;padding:1px 6px;border:1px solid #344861;border-radius:4px;color:#97a9bf}
+.nav-item .dot{position:absolute;left:4px;top:50%;margin-top:-3.5px}
+.content{padding:27px;width:100%;min-width:0}
+.mobile-nav{display:none}
+
+.page-title{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.page-title h1{font-size:20px;line-height:1.4;font-weight:600}
+.page-title-main{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;min-width:0}
+.page-sub{font-size:12px;color:var(--muted)}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.btn{min-height:44px;padding:9px 14px;display:inline-flex;justify-content:center;align-items:center;gap:8px;border:1px solid #344861;border-radius:8px;background:#17243a;color:#e1eaf5;font-size:12px;font-weight:500;line-height:1.5;transition:background .16s,border-color .16s;text-decoration:none;white-space:nowrap}
+.btn:hover:not(:disabled){background:#20324b;border-color:#4c6584}
+.btn.primary{background:var(--green);color:var(--on-green);border-color:var(--green);font-weight:650}
+.btn.primary:hover:not(:disabled){background:#4bd37e}
+.btn.ghost{background:transparent}
+.btn.danger{color:#fecdd3;border-color:#8c4052;background:#4c213233}
+.btn.small{font-size:11px;padding:6px 10px;min-height:36px}
+.btn .icon{width:16px;height:16px}
+.icon-btn{width:44px;height:44px;padding:0;flex:none}
+.icon-btn.small{width:36px;height:36px;min-height:36px}
+.link-btn{min-height:36px;padding:4px 2px;border:0;background:none;display:inline-flex;align-items:center;gap:6px;color:var(--blue);font-size:12px}
+
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid #344861;border-radius:5px;background:#1b2940;color:#c8d7e9;font-size:11px;line-height:1.6;white-space:nowrap}
+.chip.green{background:#22c55e0e;border-color:#22c55e42;color:var(--green-light)}
+.chip.blue{background:#38bdf80c;border-color:#38bdf83d;color:var(--blue)}
+.chip.amber{background:#f59e0b0d;border-color:#f59e0b42;color:var(--amber)}
+.chip.red{background:#fb71850d;border-color:#fb718548;color:var(--red)}
+.chip .icon{width:12px;height:12px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+
+.panel{border:1px solid var(--line);border-radius:12px;background:linear-gradient(170deg,var(--surface),var(--low));min-width:0;overflow:hidden}
+.panel-head{padding:16px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.panel-head p{font-size:11px;color:var(--muted);margin-top:3px}
+.panel-body{padding:20px}
+.notice{padding:12px 15px;border:1px solid #3d536d;background:#1a2b414d;border-radius:8px;color:#c0d4e9;font-size:12px;display:flex;gap:10px;align-items:flex-start}
+.notice .icon{margin-top:1px;width:17px;height:17px}
+.notice.amber{color:#f9d492;border-color:#6a5229;background:#60451c20}
+.notice.green{color:#a7e9bc;border-color:#315641;background:#1b542420}
+.notice.red{color:#fec0c9;border-color:#6e3544;background:#59233120}
+.stack{display:flex;flex-direction:column;gap:18px;min-width:0}
+.empty{padding:56px 24px;text-align:center;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:8px}
+.empty .icon{width:36px;height:36px;color:#7fb69b;margin-bottom:6px}
+.empty h2{color:var(--text)}
+
+.input,select{background:#0d1728;border:1px solid #3b4d66;border-radius:8px;min-height:44px;color:#e0e9f5;padding:9px 12px;max-width:100%;font-size:13px}
+.input::placeholder{color:#8fa2b9}
+.search-wrap{position:relative}
+.search-wrap .icon{position:absolute;left:12px;top:13px;width:17px;height:17px;color:var(--muted)}
+.search{width:250px;padding-left:38px}
+.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.filter-pill{min-height:40px;padding:6px 13px;border:1px solid #33455d;border-radius:7px;background:transparent;color:var(--muted);font-size:12px}
+.filter-pill[aria-pressed=true]{border-color:#48805d;background:#22c55e0d;color:#a0e8b9}
+.filter-pill .n{font-family:var(--mono);margin-left:4px;opacity:.8}
+.seg{display:flex;flex-wrap:wrap;gap:4px;padding:3px;border:1px solid #33455d;border-radius:9px;background:#0d1728}
+.seg-opt{flex:1 1 auto;min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);font-size:12px;line-height:1.4;transition:background .16s,color .16s}
+.seg-opt:hover{background:#ffffff08;color:var(--text)}
+.seg-opt[aria-checked=true]{border-color:#48805d;background:#22c55e14;color:#a0e8b9;font-weight:500}
+.rec-tag{font-size:9px;line-height:1.5;padding:1px 5px;border-radius:4px;border:1px solid #22c55e42;background:#22c55e0e;color:var(--green-light)}
+
+.subtabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto}
+.subtab{min-height:44px;padding:8px 16px;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);font-size:13px;display:inline-flex;gap:8px;align-items:center;white-space:nowrap;margin-bottom:-1px}
+.subtab:hover{color:var(--text)}
+.subtab[aria-selected=true]{color:#a7ecbf;border-bottom-color:var(--green)}
+.subtab .nav-count{margin-left:0}
+
+/* NAS libraries */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.stat{padding:16px 18px}
+.stat .label{font-size:11px;color:var(--muted)}
+.stat strong{display:block;font:500 28px/1.5 var(--mono);letter-spacing:-.5px}
+.stat strong em{font:12px var(--sans);color:var(--muted);margin-left:6px;font-style:normal}
+.stat .note{font-size:11px;color:var(--muted)}
+.lib-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.lib-card{padding:20px;display:flex;flex-direction:column;gap:16px}
+.lib-card.offline{border-color:#5b3442}
+.lib-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.lib-name{display:flex;gap:12px;min-width:0}
+.lib-icon{width:42px;height:42px;border:1px solid #324862;border-radius:9px;display:grid;place-items:center;color:#91b2ce;flex:none;font:600 14px var(--mono)}
+.lib-card.offline .lib-icon{color:var(--red);border-color:#6e3544}
+.path{font:12px/1.6 var(--mono);color:#b9cbe0;overflow-wrap:anywhere}
+.facts{display:grid;grid-template-columns:96px minmax(0,1fr);gap:9px 14px;font-size:12px;margin:0}
+.facts dt{color:var(--muted)}
+.facts dd{margin:0;overflow-wrap:anywhere}
+.lib-foot{display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:14px;margin-top:auto}
+.progress{height:5px;background:#27364b;border-radius:5px;overflow:hidden}
+.progress span{height:100%;background:#91bdff;display:block;border-radius:5px;transition:width .3s}
+.scan-line{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px}
+.add-card{border:1px dashed #3b4f6a;border-radius:12px;background:transparent;min-height:240px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--muted);font-size:13px;transition:border-color .16s,color .16s}
+.add-card:hover{border-color:#4c8a63;color:var(--green-light)}
+.add-card .icon{width:28px;height:28px}
+
+/* actors */
+.table-wrap{overflow-x:auto}
+table.grid{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}
+table.grid th{font-weight:500;color:var(--muted);text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.3px;white-space:nowrap}
+table.grid td{padding:12px 14px;border-bottom:1px solid #26365080;vertical-align:middle}
+table.grid tbody tr{cursor:pointer;transition:background .14s}
+table.grid tbody tr:hover{background:#ffffff05}
+table.grid tbody tr:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+table.grid tr:last-child td{border-bottom:0}
+.who{display:flex;align-items:center;gap:12px;min-width:0}
+/* actor thumbnail = folder.jpg in the actor's directory, portrait 3:4 */
+.avatar{width:54px;height:72px;border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;font:600 20px var(--sans);color:#0b1120c8;flex:none;overflow:hidden;border:1px solid #ffffff1a;text-align:center}
+.avatar.lg{width:144px;height:192px;font-size:48px;border-radius:12px}
+.avatar.none{background:#1c2b43;color:#8fa3bb;border:1px dashed #3b4f6a;font-size:10px}
+.avatar span{display:none;font:500 11px/1.4 var(--sans);padding:0 8px}
+.avatar.lg span{display:block}
+.aliases{font-size:11px;color:var(--muted);margin-top:2px}
+.loc-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:5px;font-size:11px;border:1px solid #344861;background:#16233a;color:#c8d7e9;white-space:nowrap}
+.loc-chip b{font:600 11px var(--mono);color:#e6eef8}
+.loc-chip.off{border-color:#6e354480;color:#d8a9b3}
+.loc-chip.miss{border-style:dashed;color:var(--amber);border-color:#6a5229}
+.pager{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);gap:12px;flex-wrap:wrap}
+
+/* rules */
+.rules-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:18px;align-items:start}
+.rule-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid #26365099}
+.rule-row:last-child{border-bottom:0;padding-bottom:0}
+.rule-row:first-child{padding-top:0}
+.rule-row h3{font-size:13px;font-weight:500}
+.rule-row p{font-size:11px;color:var(--muted);margin-top:3px}
+.toggle{position:relative;width:44px;height:26px;flex:none;border-radius:13px;border:1px solid #3b4d66;background:#0d1728;transition:background .16s,border-color .16s;padding:0}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#8fa2b9;transition:transform .16s,background .16s}
+.toggle[aria-checked=true]{background:#22c55e30;border-color:#3c8a59}
+.toggle[aria-checked=true]::after{transform:translateX(18px);background:var(--green-light)}
+.prio{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.prio li{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid #2d405a;border-radius:9px;background:#0c1729}
+.prio .rank{font:600 13px var(--mono);color:var(--green-light);width:18px;text-align:center}
+.prio .grow{flex:1;min-width:0}
+.prio li.ro{opacity:.7}
+.prio li.ro .rank{color:var(--muted)}
+.fixed{display:flex;flex-direction:column;gap:10px}
+.fixed-rule{display:flex;gap:12px;padding:13px 14px;border:1px solid #2a3b54;border-radius:9px;background:#0e1829}
+.fixed-rule .icon{width:16px;height:16px;color:#8fa9c4;margin-top:2px}
+.fixed-rule h3{font-size:12px}
+.fixed-rule p{font-size:11px;color:var(--muted);margin-top:3px}
+.field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#c9d6e7;min-width:0}
+.field .hint{font-size:11px;color:var(--muted)}
+.field .input,.field select{width:100%}
+.example{margin-top:10px;padding:10px 12px;border-radius:8px;background:#0c1729;border:1px solid #2d405a;font-size:11px;color:var(--muted)}
+.example .path{color:#a7e8bc;font-size:11px}
+
+/* history */
+.state{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}
+.state::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+
+/* settings */
+.settings-layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:24px;align-items:start}
+.settings-toc{position:sticky;top:16px;display:flex;flex-direction:column;gap:2px}
+.settings-toc a{color:var(--muted);text-decoration:none;font-size:12px;padding:8px 12px;border-radius:7px;border-left:2px solid transparent}
+.settings-toc a:hover{color:var(--text);background:#ffffff05}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 18px}
+.form-grid .wide{grid-column:1/-1}
+.path-field{display:flex;gap:8px}
+.path-field .input{flex:1;min-width:0;font-family:var(--mono);font-size:12px}
+.found{font-size:11px;display:flex;gap:6px;align-items:center}
+.changed .input,.changed select{border-color:#6b8fb8;background:#0f1d33}
+.save-bar{position:sticky;bottom:0;margin-top:20px;padding:14px 18px;border:1px solid #3b506c;border-radius:10px;background:#101a2cf2;backdrop-filter:blur(6px);display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;box-shadow:0 -10px 30px #0008}
+.import-line{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;padding:14px;border:1px solid #2d405a;border-radius:9px;background:#0c1729}
+
+/* review */
+.review-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.review-card{display:flex;gap:18px;padding:20px}
+.review-card .body{display:flex;flex-direction:column;gap:7px;min-width:0;flex:1}
+.review-card p{font-size:12px;color:var(--muted)}
+.cover{flex:none;border-radius:8px;overflow:hidden;position:relative;display:flex;align-items:flex-end;padding:8px;border:1px solid #2b3d57;font:600 10px var(--mono);color:#ffffffd0;letter-spacing:.5px}
+.cover.review{width:88px;height:117px}
+.cover.confirm{width:108px;height:144px}
+.keyline{display:flex;gap:8px;align-items:center;font-size:12px;color:#c9d7e9}
+.keyline .icon{width:15px;height:15px}
+
+/* modal + drawer */
+.overlay{position:fixed;inset:0;background:#02050cb8;backdrop-filter:blur(3px);z-index:30;display:flex;align-items:center;justify-content:center;padding:max(12px,env(safe-area-inset-top,0px)) max(12px,env(safe-area-inset-right,0px)) max(12px,env(safe-area-inset-bottom,0px)) max(12px,env(safe-area-inset-left,0px));animation:fade .16s ease}
+.overlay.right{justify-content:flex-end;padding:0}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.modal{border:1px solid #3b506c;border-radius:14px;background:#101a2c;box-shadow:0 25px 100px #000a;display:flex;flex-direction:column;overflow:hidden;max-height:calc(100dvh - 24px);width:min(760px,100%)}
+.modal.narrow{width:min(560px,100%)}
+.drawer{border:1px solid #3b506c;border-right:0;border-radius:14px 0 0 14px;background:#101a2c;width:min(640px,100%);height:100dvh;display:flex;flex-direction:column;overflow:hidden;animation:slide .2s ease}
+@keyframes slide{from{transform:translateX(30px)}to{transform:none}}
+.modal-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:18px 22px;border-bottom:1px solid var(--line);flex:none}
+.modal-head p{font-size:11px;color:var(--muted);margin-top:3px}
+.modal-body{padding:22px;overflow:auto;min-height:0;flex:1;display:flex;flex-direction:column;gap:18px}
+.modal-foot{display:flex;gap:10px;justify-content:space-between;align-items:center;padding:15px 22px;border-top:1px solid var(--line);background:#0e1727;flex-wrap:wrap;flex:none}
+.modal-foot>p{font-size:11px;color:var(--muted);max-width:340px}
+.confirmation-layout{display:grid;grid-template-columns:108px minmax(0,1fr);gap:20px}
+.confirmation-layout h3{font-size:20px;margin-bottom:6px}
+.confirmation-layout p{font-size:12px;color:var(--muted);margin-top:6px}
+.eyebrow-id{font-size:10px;letter-spacing:1.4px;color:var(--muted);margin-bottom:7px}
+.section-h{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap}
+.candidate-list{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
+.candidate{padding:12px;border:1px solid #3c506a;background:#0d1728;border-radius:8px;text-align:left;font-size:11px;min-height:72px;display:flex;gap:10px;align-items:flex-start;transition:border-color .16s,background .16s}
+.candidate:hover{border-color:#56708f}
+.candidate[aria-pressed=true]{border-color:#45885d;background:#22c55e0a}
+.candidate .avatar{width:48px;height:64px;font-size:17px;border-radius:7px}
+.candidate strong{display:block;font-size:12px}
+.candidate span{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+.candidate .kicon{width:48px;height:64px;border-radius:7px;display:grid;place-items:center;flex:none;border:1px solid #38bdf83d;background:#38bdf80c;color:var(--blue)}
+.candidate.new{border-style:dashed}
+.second-add{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border:1px dashed #3b4f6a;border-radius:9px}
+.target-box.second{border-color:#38bdf85a}
+.target-box.second h3{color:var(--blue)}
+.target-box.second .target-path{background:#0f2433;border-color:#24506a;color:#a5ddf7}
+.candidate.new .avatar{background:#1b2a40;color:var(--green-light);border:1px dashed #3c8a59}
+.new-form{padding:16px;border:1px solid #345c47;border-radius:9px;background:#0b1727;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.new-form .wide{grid-column:1/-1}
+.target-box{background:#0b1727;border:1px solid #345c47;border-radius:9px;padding:16px}
+.target-box h3{font-size:12px;color:var(--green-light);display:flex;gap:6px;align-items:center}
+.target-path{padding:11px;background:#142b24;border:1px solid #284c3b;border-radius:6px;font:12px/1.7 var(--mono);color:#a7e8bc;margin-top:10px;overflow-wrap:anywhere}
+.target-path .new-seg{color:#fde68a;border-bottom:1px dashed #fde68a88}
+details summary{cursor:pointer;color:var(--blue);font-size:12px;min-height:32px;display:flex;align-items:center}
+.package-list{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-direction:column}
+.package-list li{display:flex;justify-content:space-between;gap:12px;font-size:11px;color:#c2d3e5;padding:7px 0;border-bottom:1px solid #2636509c;overflow-wrap:anywhere}
+.package-list li:last-child{border:0}
+.receipt{border:1px solid #2d6241;border-radius:9px;padding:16px;background:#22c55e09}
+.receipt h3{color:var(--green-light);margin-bottom:6px;display:flex;gap:8px;align-items:center}
+.receipt p{font-size:12px;color:var(--muted)}
+.files-table{width:100%;border-collapse:collapse;font-size:11px}
+.files-table th,.files-table td{text-align:left;padding:8px 6px;border-bottom:1px solid #2636509c;vertical-align:top;overflow-wrap:anywhere}
+.files-table th{color:var(--muted);font-weight:500}
+.alias-edit{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.alias-chip{display:inline-flex;align-items:center;gap:2px;padding:2px 2px 2px 9px;border:1px solid #3c506a;border-radius:6px;background:#16233a;font-size:12px}
+.alias-chip button{width:26px;height:26px;border:0;background:none;color:var(--muted);display:grid;place-items:center;border-radius:5px}
+.alias-chip button:hover{background:#ffffff10;color:var(--text)}
+.alias-chip .icon{width:13px;height:13px}
+.alias-add{display:flex;gap:8px;margin-top:10px}
+.alias-add .input{flex:1;min-width:0}
+.loc-list{display:flex;flex-direction:column;gap:8px}
+.loc-item{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;border:1px solid #2d405a;border-radius:9px;background:#0c1729;flex-wrap:wrap}
+.steps{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--muted)}
+.steps b{color:var(--green-light);font-weight:600}
+.check-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.check-list li{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #2d405a;border-radius:9px;background:#0c1729;font-size:12px}
+.check-list input{width:18px;height:18px;accent-color:var(--green);flex:none}
+.check-list .grow{flex:1;min-width:0}
+.run-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
+.run-list li{display:flex;gap:12px;align-items:flex-start;font-size:12px}
+.run-list .mark{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;flex:none;border:1px solid #3b4d66;color:var(--muted)}
+.run-list .mark.done{background:#22c55e22;border-color:#3c8a59;color:var(--green-light)}
+.run-list .mark.run{border-color:var(--blue);color:var(--blue)}
+.run-list .mark .icon{width:13px;height:13px}
+.run-list .grow{flex:1;min-width:0}
+.untouched{padding:40px 24px;text-align:center;color:var(--muted);border:1px dashed #33455d;border-radius:12px;display:flex;flex-direction:column;gap:6px;align-items:center}
+.toast{position:fixed;right:max(20px,env(safe-area-inset-right,0px));bottom:max(20px,env(safe-area-inset-bottom,0px));z-index:40;padding:12px 16px;border-radius:9px;background:#14301f;border:1px solid #2f6a44;color:#bdf2cf;font-size:13px;display:flex;gap:8px;align-items:center;box-shadow:0 10px 30px #0009;animation:fade .2s ease;max-width:calc(100% - 40px)}
+.toast .icon{width:16px;height:16px}
+
+@media(max-width:1250px){.lib-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.rules-grid{grid-template-columns:1fr}}
+@media(max-width:1080px){.workspace-shell{grid-template-columns:180px minmax(0,1fr)}.settings-layout{grid-template-columns:1fr}.settings-toc{display:none}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:900px){.workspace-shell{display:block}.workspace-rail{display:none}.mobile-nav{display:flex;gap:6px;overflow-x:auto;padding:10px 14px;border-bottom:1px solid var(--line);background:#0e1727}.mobile-nav .nav-item{width:auto;min-height:40px;white-space:nowrap;padding:8px 12px}.mobile-nav .nav-item .dot{left:2px}.content{padding:22px}.review-grid{grid-template-columns:1fr}}
+@media(max-width:640px){.scope-banner{padding:9px 14px}.content{padding:18px 14px}.lib-grid,.form-grid,.new-form,.candidate-list{grid-template-columns:1fr}.stats{gap:10px}.search{width:100%}.search-wrap{flex:1 1 100%}.confirmation-layout{grid-template-columns:76px minmax(0,1fr);gap:14px}.cover.confirm{width:76px;height:101px}.review-card{padding:16px;gap:13px}.cover.review{width:66px;height:88px}.modal-body{padding:16px}.modal-head,.modal-foot{padding:14px 16px}.modal-foot .actions{width:100%;justify-content:flex-end}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+
+<div class="demo-bar" role="region" aria-label="演示说明">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><strong>UI 预览 · 虚构数据</strong><span>不连接真实 NAS 或文件；所有按钮只改变本页状态。</span><span class="legend"><span class="dot"></span>本次改动的页面</span></div>
+  <div class="seg" role="radiogroup" aria-label="演示场景" id="scenario-seg"></div>
+</div>
+
+<div class="mw-root" id="app"></div>
+<div id="layer"></div>
+
+<script>
+(function(){
+const P={grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+film:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/>',
+review:'<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+alert:'<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+monitor:'<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+laptop:'<rect x="4" y="4" width="16" height="11" rx="2"/><path d="M2 19h20"/>',
+folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+lan:'<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v4M5 16v-4h14v4"/>',
+sliders:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+plus:'<path d="M12 5v14M5 12h14"/>',
+refresh:'<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
+edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+trash:'<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
+x:'<path d="M18 6 6 18M6 6l12 12"/>',
+chev:'<path d="m9 18 6-6-6-6"/>',
+lock:'<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+userplus:'<circle cx="10" cy="8" r="4"/><path d="M2 21a8 8 0 0 1 14-5.3M19 14v6M16 17h6"/>',
+db:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+import:'<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+check:'<path d="M20 6 9 17l-5-5"/>',
+up:'<path d="m18 15-6-6-6 6"/>',down:'<path d="m6 9 6 6 6-6"/>',
+open:'<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+receipt:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15l2 2 4-4"/>',
+server:'<rect x="3" y="3" width="18" height="8" rx="2"/><rect x="3" y="13" width="18" height="8" rx="2"/><path d="M7 7h.01M7 17h.01"/>',
+info:'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+tag:'<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><path d="M7.5 7.5h.01"/>',
+clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'};
+const I=(n,cls)=>`<svg class="icon${cls?' '+cls:''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]||''}</svg>`;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $=s=>document.querySelector(s);
+
+const LIBS=[
+ {id:'A',name:'主片库',path:'\\\\nas-demo-1\\films',role:'archive',online:true,performers:238,films:3120,free:'2.1 TB',scanned:'今天 09:12',took:'38 秒',missing:3},
+ {id:'B',name:'第二片库',path:'\\\\nas-demo-2\\library',role:'archive',online:true,performers:142,films:1204,free:'640 GB',scanned:'今天 09:13',took:'21 秒',missing:0},
+ {id:'C',name:'备份库',path:'\\\\nas-demo-3\\backup',role:'readonly',online:false,performers:96,films:880,free:'—',scanned:'10-27 22:40',took:'17 秒',missing:0}];
+const CATS=[
+ {id:'K1',kind:'cat',name:'写真 · OAE',path:'\\\\nas-demo-1\\personal\\写真\\OAE',prefixes:['OAE'],films:86,last:'10-30'},
+ {id:'K2',kind:'cat',name:'单体',path:'\\\\nas-demo-1\\personal\\Video Collections\\单体',prefixes:[],films:214,last:'10-28'}];
+const HUES=[150,200,30,280,340,95,250,15,180,310,60,220];
+const ACTORS=[
+ {id:1,name:'Haru',aliases:['ハル','Haruka H.'],locs:[{lib:'A',films:42},{lib:'C',films:12}],last:'10-29',thumb:true},
+ {id:2,name:'Mio',aliases:['澪'],locs:[{lib:'A',films:18},{lib:'B',films:9}],last:'10-30',thumb:true},
+ {id:3,name:'Rin',aliases:[],locs:[{lib:'B',films:27}],last:'10-25',thumb:true},
+ {id:4,name:'Kaede',aliases:['楓','Kaede M.','かえで'],locs:[{lib:'A',films:63}],last:'10-28',thumb:true},
+ {id:5,name:'Nagi',aliases:[],locs:[{lib:'A',films:5,missing:true}],last:'09-14',thumb:false},
+ {id:6,name:'Yuzu',aliases:['柚子'],locs:[{lib:'C',films:31}],last:'10-27',thumb:true},
+ {id:7,name:'Tsubasa',aliases:[],locs:[{lib:'B',films:14}],last:'10-22',thumb:true},
+ {id:8,name:'Hina',aliases:['ひな'],locs:[{lib:'A',films:22},{lib:'B',films:3}],last:'10-30',thumb:true},
+ {id:9,name:'Aoi',aliases:[],locs:[{lib:'A',films:8}],last:'10-11',thumb:false},
+ {id:10,name:'Shiori',aliases:['栞'],locs:[{lib:'B',films:40}],last:'10-26',thumb:true},
+ {id:11,name:'Kotone',aliases:[],locs:[{lib:'A',films:2,missing:true}],last:'08-30',thumb:false},
+ {id:12,name:'Natsu',aliases:['夏'],locs:[{lib:'A',films:11}],last:'10-19',thumb:true}];
+const HISTORY=[
+ {id:'R-20261030-0012',at:'10-30 11:32',code:'OAE-198',actor:'Haru',lib:'A',second:'K1',files:5,size:'2.2 GB',dur:'2 分 31 秒',clean:'done',kind:'match'},
+ {id:'R-20261030-0010',at:'10-30 11:05',code:'OAE-203',actor:'—',lib:'K1',files:5,size:'1.6 GB',dur:'1 分 12 秒',clean:'done',kind:'cat'},
+ {id:'R-20261030-0009',at:'10-30 10:41',code:'DEMO-121',actor:'Haru',lib:'A',files:6,size:'7.8 GB',dur:'4 分 12 秒',clean:'done',kind:'match'},
+ {id:'R-20261030-0008',at:'10-30 09:58',code:'DEMO-117',actor:'Sora',lib:'B',files:5,size:'4.1 GB',dur:'2 分 40 秒',clean:'done',kind:'new'},
+ {id:'R-20261030-0007',at:'10-30 09:20',code:'DEMO-116',actor:'Mio',lib:'A',files:6,size:'6.3 GB',dur:'3 分 51 秒',clean:'pending',kind:'match',why:'来源文件被占用（另一程序打开了 source.mp4）'},
+ {id:'R-20261029-0012',at:'10-29 22:05',code:'DEMO-112',actor:'Kaede',lib:'A',files:7,size:'11.2 GB',dur:'6 分 02 秒',clean:'done',kind:'match'},
+ {id:'R-20261029-0011',at:'10-29 21:17',code:'DEMO-110',actor:'—',lib:'B',files:4,size:'2.9 GB',dur:'1 分 58 秒',clean:'done',kind:'manual',manualPath:'\\\\nas-demo-2\\library\\_合集\\DEMO-110'},
+ {id:'R-20261029-0010',at:'10-29 20:44',code:'DEMO-109',actor:'Hina',lib:'B',files:6,size:'5.5 GB',dur:'3 分 10 秒',clean:'done',kind:'match'},
+ {id:'R-20261028-0006',at:'10-28 18:31',code:'DEMO-104',actor:'Shiori',lib:'B',files:6,size:'8.0 GB',dur:'4 分 33 秒',clean:'done',kind:'match'},
+ {id:'R-20261028-0005',at:'10-28 17:02',code:'DEMO-103',actor:'Rin',lib:'B',files:5,size:'3.7 GB',dur:'2 分 21 秒',clean:'done',kind:'match'}];
+const FILMS=[
+ {id:'DEMO-118',actor:'Sena',title:'虚构示例影片 118',res:'4K · 修复',subs:true,files:6,inputs:3,hue:210},
+ {id:'DEMO-125',actor:'Mio',title:'虚构示例影片 125',res:'1080p · 修复',subs:true,files:6,inputs:2,hue:330},
+ {id:'DEMO-126',actor:'Kaede',title:'虚构示例影片 126',res:'1080p · 修复',subs:false,files:5,inputs:2,hue:40},
+ {id:'OAE-207',actor:'Yuna',title:'虚构示例写真 207',res:'1080p · 修复',subs:false,files:5,inputs:2,hue:100},
+ {id:'OAE-211',actor:'Haru',title:'虚构示例写真 211',res:'4K · 修复',subs:false,files:5,inputs:2,hue:130}];
+const SETTINGS0={role:'controller',inbox_root:'D:\\INBOX',output_dir:'D:\\Media\\成品',data_dir:'D:\\TaskPaw\\work',ffprobe_path:'C:\\Tools\\ffmpeg\\bin\\ffprobe.exe',jasna_exe_path:'C:\\Tools\\Jasna\\jasna.exe',whisperjav_exe_path:'C:\\Tools\\WhisperJAV\\whisperjav.exe',ltx_gpu:'rtx-5060-8g',mdcx_python:'C:\\Tools\\Miko\\.venv\\Scripts\\python.exe',mdcx_root:'C:\\Tools\\Miko',mdcx_profile:'C:\\Tools\\Miko\\config\\workflow.ini',remote_workers:true,worker_api_port:'5680',scan_every:'6',scan_on_start:true};
+
+const S={scenario:'daily',page:'library-nas',libs:clone(LIBS),cats:clone(CATS),actors:clone(ACTORS),history:clone(HISTORY),films:clone(FILMS),
+ aQ:'',aFilter:'all',aLib:'',hQ:'',hFilter:'all',
+ rules:{multi:'priority',order:['A','B','C'],alias:true,preselect:true,fuzzy:true,allowNew:true,newLib:'B',newName:'actor',prefix:true,secondHint:true,catAlways:true},
+ set:clone(SETTINGS0),saved:clone(SETTINGS0),imported:'10-30 09:10',scan:{},overlay:null,toast:null,confirmed:{}};
+function clone(o){return JSON.parse(JSON.stringify(o))}
+const lib=id=>S.libs.find(l=>l.id===id)||S.cats.find(c=>c.id===id);
+const hue=name=>HUES[[...name].reduce((a,c)=>a+c.charCodeAt(0),0)%HUES.length];
+const avatar=(a,cls='')=>a.thumb===false?`<div class="avatar none ${cls}" aria-hidden="true">${I('userplus')}<span>目录里没有 folder.jpg</span></div>`:`<div class="avatar ${cls}" title="${esc(a.name)}\\folder.jpg" style="background:radial-gradient(70% 45% at 50% 34%,hsl(${hue(a.name)} 55% 80%),transparent 70%),linear-gradient(170deg,hsl(${hue(a.name)} 50% 64%),hsl(${hue(a.name)+30} 40% 34%))" aria-hidden="true">${esc(a.name[0])}<span style="color:#0b1120a0">folder.jpg</span></div>`;
+const histPath=h=>h.manualPath||(h.kind==='cat'?`${lib(h.lib).path}\\${h.code}`:`${lib(h.lib).path}\\${h.actor}\\${h.code}`);
+const secondPath=h=>`${lib(h.second).path}\\${h.code}`;
+function openBtns(h,big){const one=(p,l)=>`<button type="button" class="btn small${big?' primary':''}" data-act="toast" data-msg="${esc('已打开 '+p)}" title="${esc(p)}">${I('open')}${l}</button>`;return h.second?one(histPath(h),big?'打开演员目录':'演员目录')+one(secondPath(h),big?`打开「${esc(lib(h.second).name)}」`:'类型目录'):one(histPath(h),big?'打开归档目录':'打开目录')}
+const firstRun=()=>S.scenario==='first';
+
+const NAV=[['overview','概览','grid'],['pending','待处理','list',2],['queue','影片队列','film',4],['review','待确认','review',3,true],['exceptions','异常','alert',1],['devices','设备','monitor'],['local','本机','laptop'],['library','片库与规则','folder',null,true],['bridge','Mac 信息桥','lan',null,false,true],['prefs','设置','sliders',null,true]];
+const TABS=[['library-nas','NAS 片库'],['library-actors','演员'],['library-rules','归档规则'],['library-history','归档历史']];
+const top=()=>S.page.startsWith('library')?'library':S.page;
+
+function navItems(){return NAV.map(([k,l,ic,n,changed,later])=>`<button type="button" class="nav-item" data-act="nav" data-k="${k==='library'?'library-nas':k}" ${top()===k?'aria-current="page"':''}>${changed?'<span class="dot" title="本次改动"></span>':''}${I(ic)}<span>${l}</span>${n!=null&&!(k==='review'&&firstRun())?`<span class="nav-count">${k==='review'?S.films.filter(f=>!S.confirmed[f.id]).length:n}</span>`:''}${later?'<span class="nav-later">后续</span>':''}</button>`).join('')}
+
+function render(){
+ const keep=document.activeElement&&document.activeElement.id?{id:document.activeElement.id,s:document.activeElement.selectionStart}:null;
+ $('#scenario-seg').innerHTML=[['daily','日常使用'],['first','首次使用（还没有片库）']].map(([k,l])=>`<button type="button" class="seg-opt" role="radio" aria-checked="${S.scenario===k}" data-act="scenario" data-k="${k}">${l}</button>`).join('');
+ const label=NAV.find(n=>n[0]===top())[1];
+ const off=S.libs.filter(l=>!l.online).length;
+ $('#app').innerHTML=`<div class="scope-banner"><span>TaskPaw / 媒体处理中心 / ${label}</span><div class="health" aria-label="运行状态"><span class="chip green">${I('check')}主控正常</span><span class="chip green">本机 Agent 正常</span>${firstRun()?'<span class="chip amber">尚未设置片库</span>':off?`<span class="chip amber">${off} 个片库离线</span>`:'<span class="chip green">片库全部在线</span>'}</div></div>
+ <nav class="mobile-nav" aria-label="媒体处理中心导航（窄屏）">${navItems()}</nav>
+ <div class="workspace-shell"><aside class="workspace-rail"><div class="workspace-heading"><strong>媒体处理中心</strong><span class="small muted">主控 · 本机</span></div><nav class="nav-group" aria-label="媒体处理中心导航">${navItems()}</nav></aside>
+ <main class="content" id="main" tabindex="-1">${page()}</main></div>`;
+ $('#layer').innerHTML=overlay()+(S.toast?`<div class="toast" role="status">${I('check')}${esc(S.toast)}</div>`:'');
+ if(keep){const el=document.getElementById(keep.id);if(el){el.focus();try{if(keep.s!=null)el.setSelectionRange(keep.s,keep.s)}catch(e){}}}
+}
+function page(){
+ const t=top();
+ if(t==='library')return libraryPage();
+ if(t==='prefs')return prefsPage();
+ if(t==='review')return reviewPage();
+ if(t==='bridge')return `<div class="page-title"><h1>Mac 信息桥</h1></div><div class="untouched">${I('lan')}<h2 style="color:var(--text)">保持现状</h2><p class="small">这次先不做，导航里继续标「后续」。</p></div>`;
+ const l=NAV.find(n=>n[0]===t)[1];
+ return `<div class="page-title"><h1>${l}</h1></div><div class="untouched">${I('info')}<h2 style="color:var(--text)">本次不改动</h2><p class="small">沿用现有页面。本预览只涉及带紫点的三个页面：待确认、片库与规则、设置。</p><button type="button" class="btn small" data-act="nav" data-k="library-nas">去看片库与规则</button></div>`;
+}
+
+/* ---------- 片库与规则 ---------- */
+function libraryPage(){
+ const head=`<div class="page-title"><div class="page-title-main"><h1>片库与规则</h1><span class="page-sub">TaskPaw 自己的片库索引 · 不需要 Filmpaw 运行</span></div></div>`;
+ if(firstRun())return head+`<div class="panel"><div class="empty">${I('db')}<h2>还没有片库</h2><p class="small" style="max-width:460px">TaskPaw 需要知道 NAS 上的演员目录，才能为影片推荐入库位置。在这台电脑上找到了 Filmpaw 的片库数据，可以直接导入。</p><div class="actions" style="justify-content:center;margin-top:10px"><button type="button" class="btn primary" data-act="import-open">${I('import')}从 Filmpaw 导入</button><button type="button" class="btn" data-act="lib-add">${I('plus')}手动添加片库</button></div><p class="tiny muted" style="margin-top:6px">导入只读取 Filmpaw 的数据，不会修改它。之后两边各自独立。</p></div></div>`;
+ const counts={'library-actors':S.actors.length,'library-history':S.history.length};
+ const tabs=`<div class="subtabs" role="tablist" aria-label="片库与规则">${TABS.map(([k,l])=>`<button type="button" class="subtab" role="tab" aria-selected="${S.page===k}" data-act="nav" data-k="${k}">${l}${counts[k]?`<span class="nav-count">${counts[k]}</span>`:''}</button>`).join('')}</div>`;
+ const body={'library-nas':nasTab,'library-actors':actorsTab,'library-rules':rulesTab,'library-history':historyTab}[S.page]();
+ return head+tabs+body;
+}
+function nasTab(){
+ const on=S.libs.filter(l=>l.online);
+ const perf=S.actors.length?S.libs.reduce((a,l)=>a+l.performers,0):0;
+ const stats=`<div class="stats"><div class="panel stat"><div class="label">片库</div><strong>${S.libs.length}<em>${on.length} 在线</em></strong><div class="note">${S.libs.filter(l=>l.role==='archive').length} 个可作入库目标 · 另有 ${S.cats.length} 个类型目录</div></div><div class="panel stat"><div class="label">演员目录</div><strong>${perf}</strong><div class="note">同名演员在多个片库时分别计数</div></div><div class="panel stat"><div class="label">目录已缺失</div><strong class="${S.libs.some(l=>l.missing)?'t-amber':''}">${S.libs.reduce((a,l)=>a+l.missing,0)}</strong><div class="note">保留记录，不会删除</div></div><div class="panel stat"><div class="label">自动扫描</div><strong style="font-size:20px;line-height:2.1">${S.saved.scan_every==='0'?'已关闭':S.saved.scan_every==='24'?'每天':`每 ${S.saved.scan_every} 小时`}</strong><div class="note">${S.saved.scan_every==='0'?'':'下次 15:12 · '}<button type="button" class="link-btn" style="min-height:0;padding:0;font-size:11px" data-act="nav" data-k="prefs">在设置中修改</button></div></div></div>`;
+ const cards=S.libs.map(l=>{
+  const sc=S.scan[l.id];
+  const pct=sc?Math.min(100,Math.round(sc/l.performers*100)):0;
+  return `<article class="panel lib-card${l.online?'':' offline'}" aria-label="${esc(l.name)}">
+  <div class="lib-top"><div class="lib-name"><div class="lib-icon">${l.id}</div><div style="min-width:0"><h3>${esc(l.name)}</h3><div class="path">${esc(l.path)}</div></div></div></div>
+  <div class="chips">${l.online?'<span class="chip green">在线</span>':'<span class="chip red">离线</span>'}${l.role==='archive'?'<span class="chip blue">入库目标</span>':`<span class="chip">${I('lock')}只读 · 不作入库目标</span>`}</div>
+  ${l.online?'':`<div class="notice red">${I('alert')}<div>连不上这台 NAS。演员保留上次索引（${l.scanned}），不会标记为缺失；恢复后自动重新扫描。</div></div>`}
+  <dl class="facts"><dt>演员目录</dt><dd class="mono">${l.performers}${l.missing?` <span class="t-amber">· ${l.missing} 个已缺失</span>`:''}</dd><dt>影片目录</dt><dd class="mono">${l.films.toLocaleString()}</dd><dt>可用空间</dt><dd class="mono">${l.free}</dd><dt>最后扫描</dt><dd>${l.scanned} <span class="muted">· 用时 ${l.took}</span></dd></dl>
+  ${sc?`<div><div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="扫描进度"><span style="width:${pct}%"></span></div><div class="scan-line"><span>正在扫描演员目录…</span><span class="mono">${sc}/${l.performers}</span></div></div>`:''}
+  <div class="lib-foot"><button type="button" class="btn small" data-act="scan" data-id="${l.id}" ${sc||!l.online?'disabled':''}>${I('refresh')}${sc?'扫描中':'重新扫描'}</button><button type="button" class="btn small ghost" data-act="lib-edit" data-id="${l.id}">${I('edit')}编辑</button><button type="button" class="btn small ghost" data-act="toast" data-msg="已在资源管理器中打开（演示）" ${l.online?'':'disabled'}>${I('open')}打开</button><button type="button" class="btn small ghost" data-act="lib-remove" data-id="${l.id}" style="margin-left:auto" aria-label="移除 ${esc(l.name)}">${I('trash')}</button></div></article>`}).join('');
+ const catCards=S.cats.map(c=>`<article class="panel lib-card" aria-label="${esc(c.name)}"><div class="lib-name"><div class="lib-icon">${I('folder')}</div><div style="min-width:0"><h3>${esc(c.name)}</h3><div class="path">${esc(c.path)}</div></div></div><div class="chips"><span class="chip green">在线</span><span class="chip blue">影片直接放入</span>${c.prefixes.map(p=>`<span class="chip">${I('tag')}前缀 ${esc(p)}</span>`).join('')||'<span class="chip">无前缀 · 只手动指派</span>'}</div><dl class="facts"><dt>影片目录</dt><dd class="mono">${c.films}</dd><dt>最近入库</dt><dd class="mono">${c.last}</dd></dl><div class="lib-foot"><button type="button" class="btn small" data-act="toast" data-msg="${esc('已打开 '+c.path)}">${I('open')}打开</button><button type="button" class="btn small ghost" data-act="lib-edit" data-id="${c.id}">${I('edit')}编辑</button><button type="button" class="btn small ghost" data-act="lib-remove" data-id="${c.id}" style="margin-left:auto" aria-label="移除 ${esc(c.name)}">${I('trash')}</button></div></article>`).join('');
+ return `<div class="stack">${stats}
+ <div class="toolbar"><div><h2>演员片库</h2><p class="small muted">根目录的下一级是演员目录：片库\\演员\\影片。目录消失只标为「已缺失」，从不删除记录。</p></div><div class="actions"><button type="button" class="btn" data-act="scan-all">${I('refresh')}全部重新扫描</button><button type="button" class="btn primary" data-act="lib-add">${I('plus')}添加片库</button></div></div>
+ <div class="lib-grid">${cards}<button type="button" class="add-card" data-act="lib-add">${I('plus')}<span>添加片库</span><span class="tiny">NAS 共享目录或本机目录</span></button></div>
+ <div class="toolbar" style="margin-top:12px"><div><h2>类型目录</h2><p class="small muted">不属于任何演员的影片（写真、合集、单体等）直接放进去：类型目录\\影片。设了番号前缀的会自动推荐。</p></div><div class="actions"><button type="button" class="btn primary" data-act="cat-add">${I('plus')}添加类型目录</button></div></div>
+ <div class="lib-grid">${catCards}<button type="button" class="add-card" data-act="cat-add" style="min-height:200px">${I('plus')}<span>添加类型目录</span><span class="tiny">例如 写真\\某系列、Video Collections\\单体</span></button></div></div>`;
+}
+function actorRows(){
+ const q=S.aQ.trim().toLowerCase();
+ return S.actors.filter(a=>{
+  if(q&&!(a.name.toLowerCase().includes(q)||a.aliases.some(x=>x.toLowerCase().includes(q))))return false;
+  if(S.aLib&&!a.locs.some(l=>l.lib===S.aLib))return false;
+  if(S.aFilter==='multi')return a.locs.length>1;
+  if(S.aFilter==='missing')return a.locs.some(l=>l.missing);
+  if(S.aFilter==='alias')return a.aliases.length>0;
+  if(S.aFilter==='nothumb')return a.thumb===false;
+  return true});
+}
+function locChip(l){const L=lib(l.lib);return `<span class="loc-chip${l.missing?' miss':!L.online?' off':''}" title="${esc(L.name)}"><b>${l.lib}</b>${l.films} 部${l.missing?' · 已缺失':!L.online?' · 离线':''}</span>`}
+function actorsTab(){
+ const all=S.actors;
+ const f=[['all','全部',all.length],['multi','多个位置',all.filter(a=>a.locs.length>1).length],['alias','有别名',all.filter(a=>a.aliases.length).length],['missing','目录已缺失',all.filter(a=>a.locs.some(l=>l.missing)).length],['nothumb','没有头像',all.filter(a=>a.thumb===false).length]];
+ const rows=actorRows();
+ return `<div class="stack"><div class="toolbar"><div class="filters"><div class="search-wrap">${I('search')}<input id="actor-q" class="input search" type="search" placeholder="搜索名字或别名" aria-label="搜索名字或别名" value="${esc(S.aQ)}" data-bind="aQ"></div><select id="actor-lib" aria-label="按片库筛选" data-bind="aLib"><option value="">全部片库</option>${S.libs.map(l=>`<option value="${l.id}" ${S.aLib===l.id?'selected':''}>${l.id} · ${esc(l.name)}</option>`).join('')}</select></div><div class="filters">${f.map(([k,l,n])=>`<button type="button" class="filter-pill" aria-pressed="${S.aFilter===k}" data-act="afilter" data-k="${k}">${l}<span class="n">${n}</span></button>`).join('')}</div></div>
+ <div class="panel"><div class="table-wrap"><table class="grid"><thead><tr><th>演员</th><th>位置</th><th>影片</th><th>最近入库</th><th><span class="sr-only">打开</span></th></tr></thead><tbody>${rows.map(a=>`<tr tabindex="0" data-act="actor" data-id="${a.id}"><td><div class="who">${avatar(a)}<div style="min-width:0"><strong>${esc(a.name)}</strong>${a.aliases.length?`<div class="aliases">别名：${a.aliases.map(esc).join('、')}</div>`:''}</div></div></td><td><div class="chips">${a.locs.map(locChip).join('')}</div></td><td class="mono">${a.locs.reduce((s,l)=>s+l.films,0)}</td><td class="mono muted">${a.last}</td><td style="width:40px;color:var(--muted)">${I('chev')}</td></tr>`).join('')||`<tr><td colspan="5"><div class="empty" style="padding:30px">${I('search')}<p>没有符合条件的演员。</p></div></td></tr>`}</tbody></table></div><div class="pager"><span>显示 ${rows.length} / ${all.length} 位 · 示例数据</span><span>缩略图取演员目录下的 folder.jpg · 同名演员共用一组别名</span></div></div></div>`;
+}
+function rulesTab(){
+ const r=S.rules;
+ const tog=(k,h,p)=>`<div class="rule-row"><div><h3 id="r-${k}">${h}</h3><p>${p}</p></div><button type="button" class="toggle" role="switch" aria-checked="${r[k]}" aria-labelledby="r-${k}" data-act="rule-tog" data-k="${k}"></button></div>`;
+ const prio=r.order.map((id,i)=>{const l=lib(id);const ro=l.role!=='archive';return `<li class="${ro?'ro':''}"><span class="rank">${ro?'—':i+1}</span><div class="grow"><strong class="small">${l.id} · ${esc(l.name)}</strong><div class="path tiny">${esc(l.path)}</div></div>${ro?'<span class="chip">只读</span>':`<button type="button" class="btn ghost icon-btn small" aria-label="上移 ${esc(l.name)}" data-act="prio" data-id="${id}" data-d="-1" ${i===0?'disabled':''}>${I('up')}</button><button type="button" class="btn ghost icon-btn small" aria-label="下移 ${esc(l.name)}" data-act="prio" data-id="${id}" data-d="1" ${i>=r.order.filter(x=>lib(x).role==='archive').length-1?'disabled':''}>${I('down')}</button>`}</li>`}).join('');
+ const nl=lib(r.newLib);
+ return `<div class="rules-grid"><div class="stack">
+ <section class="panel"><div class="panel-head"><div><h2>演员在多个片库时</h2><p>预选哪个位置作为入库目标；待确认里随时可以改选</p></div></div><div class="panel-body"><div class="seg" role="radiogroup" aria-label="多位置时的默认目标">${[['priority','按片库优先级'],['most','影片最多的位置'],['recent','最近入库的位置']].map(([k,l])=>`<button type="button" class="seg-opt" role="radio" aria-checked="${r.multi===k}" data-act="rule-multi" data-k="${k}">${l}${k==='priority'?' <span class="rec-tag">推荐</span>':''}</button>`).join('')}</div>
+ ${r.multi==='priority'?`<p class="tiny muted" style="margin-top:14px">片库优先级（同时决定「新演员」下拉里的顺序）</p><ol class="prio">${prio}</ol>`:`<div class="example">例：Mio 在 A 有 18 部、在 B 有 9 部 → 预选 <b>${r.multi==='most'?'A（影片最多）':'B（10-30 最近一次入库到 B）'}</b></div>`}</div></section>
+ <section class="panel"><div class="panel-head"><div><h2>匹配</h2><p>根据 Miko 刮削出的演员名，在片库里找候选</p></div></div><div class="panel-body">${tog('alias','用别名匹配','名字对不上时，再查每位演员的别名。')}${tog('preselect','只有一个候选时自动预选','仍然需要你点「确认入库」，不会自动归档。')}${tog('fuzzy','显示相近名字','大小写、空格、全角半角不同的名字也列为候选，但不预选。')}</div></section>
+ <section class="panel"><div class="panel-head"><div><h2>新演员</h2><p>片库里还没有这位演员时</p></div></div><div class="panel-body">${tog('allowNew','确认时允许新建演员目录','在待确认里选片库、填名字；点「确认入库」时才创建，不会自动新建。')}
+ ${r.allowNew?`<div class="form-grid" style="margin-top:16px"><label class="field" for="new-lib">默认放到<select id="new-lib" data-bind="rules.newLib">${S.libs.filter(l=>l.role==='archive').map(l=>`<option value="${l.id}" ${r.newLib===l.id?'selected':''}>${l.id} · ${esc(l.name)}</option>`).join('')}</select></label><label class="field" for="new-name">目录名<select id="new-name" data-bind="rules.newName"><option value="actor" ${r.newName==='actor'?'selected':''}>Miko 刮削出的演员名</option><option value="ask" ${r.newName==='ask'?'selected':''}>每次手动填写</option></select></label></div><div class="example">例：<span class="path">${esc(nl.path)}\\<span style="color:#fde68a">Sena</span>\\DEMO-118</span></div>`:''}</div></section>
+ <section class="panel"><div class="panel-head"><div><h2>类型目录</h2><p>写真系列、合集、单体等；番号前缀在「NAS 片库 → 类型目录」里设置</p></div></div><div class="panel-body">${tog('prefix','演员不在片库时，按番号前缀预选类型目录','例：OAE-207 的演员不在你的收藏里 → 预选「写真 · OAE」。没命中前缀就不预选，由你来选。')}${tog('secondHint','演员已在片库时，前缀命中就提示「第二目标」','例：OAE-211 默认进演员自己的目录，下方提示可以再复制一份到「写真 · OAE」；加不加由你决定。')}${tog('catAlways','待确认里总是列出类型目录','有演员匹配时，也可以改放到类型目录，代替演员目录。')}</div></section>
+ </div><div class="stack">
+ <section class="panel"><div class="panel-head"><div><h2>固定规则</h2><p>保护片库的底线，不提供开关</p></div>${I('lock')}</div><div class="panel-body fixed">${[
+  ['正式片库只追加','不覆盖、不删除、不移动 NAS 上已有的任何文件。'],
+  ['同名影片目录已存在就拒绝','目标目录（演员目录或类型目录）下已有同名影片目录时不入库，放进「异常」由你核对。'],
+  ['逐个文件校验后才算入库','复制完逐个比对 SHA-256，全部一致并写下回执才算完成。'],
+  ['先有回执，再清理来源','只清理本次收件清单里的文件；文件变了或被占用就保留为「已入库 · 待清理」。'],
+  ['有第二目标时两份都要成功','两份都校验通过、写下回执后才清理来源；只重试失败的那一份，已成功的不再复制。'],
+  ['只重试没完成的那一步','清理失败只重试清理，不重新复制，也不重新修复或刮削。'],
+  ['只读片库不作入库目标','只读片库只用来匹配和查重，不会往里写。']
+ ].map(([h,p])=>`<div class="fixed-rule">${I('lock')}<div><h3>${h}</h3><p>${p}</p></div></div>`).join('')}</div></section>
+ </div></div>`;
+}
+function historyTab(){
+ const q=S.hQ.trim().toLowerCase();
+ const all=S.history;
+ const f=[['all','全部',all.length],['pending','待清理',all.filter(h=>h.clean==='pending').length],['new','新建演员',all.filter(h=>h.kind==='new').length],['cat','类型目录',all.filter(h=>h.kind==='cat').length],['manual','手动入库',all.filter(h=>h.kind==='manual').length]];
+ const rows=all.filter(h=>(!q||h.code.toLowerCase().includes(q)||h.actor.toLowerCase().includes(q))&&(S.hFilter==='all'||(S.hFilter==='pending'?h.clean==='pending':h.kind===S.hFilter)));
+ return `<div class="stack"><div class="toolbar"><div class="search-wrap">${I('search')}<input id="hist-q" class="input search" type="search" placeholder="搜索番号或演员" aria-label="搜索番号或演员" value="${esc(S.hQ)}" data-bind="hQ"></div><div class="filters">${f.map(([k,l,n])=>`<button type="button" class="filter-pill" aria-pressed="${S.hFilter===k}" data-act="hfilter" data-k="${k}">${l}<span class="n">${n}</span></button>`).join('')}</div></div>
+ <div class="panel"><div class="table-wrap"><table class="grid"><thead><tr><th>完成时间</th><th>影片</th><th>演员 · 片库</th><th>文件</th><th>校验</th><th>来源清理</th><th>归档目录</th><th><span class="sr-only">回执</span></th></tr></thead><tbody>${rows.map(h=>`<tr tabindex="0" data-act="receipt" data-id="${h.id}"><td class="mono muted">${h.at}</td><td><strong class="mono">${h.code}</strong>${h.kind==='new'?' <span class="chip green">新建演员</span>':h.kind==='manual'?' <span class="chip">手动入库</span>':h.kind==='cat'?' <span class="chip blue">类型目录</span>':''}${h.second?` <span class="chip blue">+ ${esc(lib(h.second).name)}</span>`:''}</td><td>${h.kind==='cat'?`<span class="muted">类型 ·</span> ${esc(lib(h.lib).name)}`:`${esc(h.actor)} <span class="muted">· ${h.lib}</span>`}</td><td class="mono">${h.files} 个 · ${h.size}${h.second?' ×2':''}</td><td><span class="t-green small">${h.files}/${h.files} 一致</span></td><td>${h.clean==='done'?'<span class="state t-green">已清理</span>':'<span class="state t-amber">待清理</span>'}</td><td><div class="actions" style="gap:6px;flex-wrap:nowrap">${openBtns(h)}</div></td><td style="width:40px;color:var(--muted)">${I('chev')}</td></tr>`).join('')||`<tr><td colspan="8"><div class="empty" style="padding:30px"><p>没有符合条件的记录。</p></div></td></tr>`}</tbody></table></div><div class="pager"><span>显示 ${rows.length} 条 · 回执永久保留</span><span>待清理的影片也会出现在「异常」页</span></div></div></div>`;
+}
+
+/* ---------- 设置 ---------- */
+const FIELD_LABEL={inbox_root:'INBOX 目录',output_dir:'成品目录',data_dir:'工作目录',ffprobe_path:'ffprobe',jasna_exe_path:'Jasna',whisperjav_exe_path:'WhisperJAV',ltx_gpu:'LTX 显卡预设',mdcx_python:'Miko Python',mdcx_root:'Miko 目录',mdcx_profile:'Miko 配置',worker_api_port:'工作机接口端口',role:'本机角色',remote_workers:'允许 GPU 工作机接入',scan_every:'自动重新扫描',scan_on_start:'启动时扫描'};
+const RESTART=['role','inbox_root','output_dir','data_dir','ffprobe_path','jasna_exe_path','whisperjav_exe_path','ltx_gpu','mdcx_python','mdcx_root','mdcx_profile','remote_workers','worker_api_port'];
+function dirty(){return Object.keys(S.set).filter(k=>S.set[k]!==S.saved[k])}
+function pathField(k,file){const ch=S.set[k]!==S.saved[k];return `<div class="field${ch?' changed':''}"><label for="f-${k}">${FIELD_LABEL[k]}${ch?' <span class="t-blue tiny">· 已修改</span>':''}</label><div class="path-field"><input id="f-${k}" class="input" value="${esc(S.set[k])}" data-bind="set.${k}"><button type="button" class="btn" data-act="pick" data-k="${k}">${file?'更改':'选择'}</button></div>${file?`<span class="found t-green">${I('check')}已找到</span>`:''}</div>`}
+function prefsPage(){
+ const s=S.set,d=dirty(),restart=d.some(k=>RESTART.includes(k));
+ const sec=(id,h,p,inner)=>`<section class="panel" id="${id}" style="scroll-margin-top:16px"><div class="panel-head"><div><h2>${h}</h2><p>${p}</p></div></div><div class="panel-body">${inner}</div></section>`;
+ return `<div class="page-title"><div class="page-title-main"><h1>设置</h1><span class="page-sub">与 TaskPaw「设置 → 媒体工作流」是同一份配置，在哪边改都一样</span></div></div>
+ <div class="settings-layout"><nav class="settings-toc" aria-label="设置分区"><a href="#s-role">本机角色</a><a href="#s-dirs">目录</a><a href="#s-tools">处理工具</a><a href="#s-miko">Miko 刮削</a><a href="#s-library">片库</a><a href="#s-workers">GPU 工作机接入</a></nav>
+ <div class="stack">
+ ${sec('s-role','本机角色','改角色要重启 TaskPaw；还有在途影片时会拒绝，并告诉你先暂停派发',`<div class="seg" role="radiogroup" aria-label="本机角色">${[['controller','媒体主控'],['worker','GPU 工作机'],['off','不参与（普通 Agent，仅监控）']].map(([k,l])=>`<button type="button" class="seg-opt" role="radio" aria-checked="${s.role===k}" data-act="set-role" data-k="${k}">${l}</button>`).join('')}</div>`)}
+ ${sec('s-dirs','目录','INBOX 是唯一的收件目录：按「演员 / 影片 / 文件」或「影片 / 文件」放进来即可',`<div class="form-grid"><div class="wide">${pathField('inbox_root')}</div>${pathField('output_dir')}${pathField('data_dir')}</div>`)}
+ ${sec('s-tools','处理工具','修复、字幕和媒体检查用到的程序',`<div class="form-grid">${pathField('jasna_exe_path',1)}${pathField('whisperjav_exe_path',1)}${pathField('ffprobe_path',1)}<div class="field${s.ltx_gpu!==S.saved.ltx_gpu?' changed':''}"><label for="f-ltx">LTX 显卡预设</label><select id="f-ltx" data-bind="set.ltx_gpu"><option value="rtx-5060-8g" ${s.ltx_gpu==='rtx-5060-8g'?'selected':''}>RTX 5060 · 8 GB（1080p）</option><option value="rtx-5060ti-16g" ${s.ltx_gpu==='rtx-5060ti-16g'?'selected':''}>RTX 5060 Ti · 16 GB（4K）</option><option value="rtx-5070ti-16g" ${s.ltx_gpu==='rtx-5070ti-16g'?'selected':''}>RTX 5070 Ti · 16 GB（4K）</option></select><span class="hint">本机实测：8 GB 显存</span></div></div>`)}
+ ${sec('s-miko','Miko 刮削','成品的 NFO、海报和目录封面由 Miko 生成',`<div class="form-grid"><div class="wide">${pathField('mdcx_root')}</div>${pathField('mdcx_python',1)}${pathField('mdcx_profile',1)}</div>`)}
+ ${sec('s-library','片库','NAS 片库本身在「片库与规则」里管理；这里是扫描和数据',`<div class="stack" style="gap:16px"><div class="form-grid"><div class="field${s.scan_every!==S.saved.scan_every?' changed':''}"><label for="f-scan">自动重新扫描</label><select id="f-scan" data-bind="set.scan_every">${[['0','关闭'],['2','每 2 小时'],['6','每 6 小时'],['12','每 12 小时'],['24','每天']].map(([v,l])=>`<option value="${v}" ${s.scan_every===v?'selected':''}>${l}</option>`).join('')}</select><span class="hint">离线的片库会跳过，恢复在线后补扫</span></div><div class="field"><span>启动时扫描</span><div style="display:flex;align-items:center;gap:12px;min-height:44px"><button type="button" class="toggle" role="switch" aria-checked="${s.scan_on_start}" aria-label="启动时扫描" data-act="set-tog" data-k="scan_on_start"></button><span class="small muted">TaskPaw 启动后扫描一次全部在线片库</span></div></div></div>
+ <dl class="facts"><dt>片库数据</dt><dd class="mono">%APPDATA%\\TaskPaw\\workflow\\library.db</dd><dt>当前规模</dt><dd>${firstRun()?'空':`${S.libs.length} 个片库 · ${S.cats.length} 个类型目录 · ${S.libs.reduce((a,l)=>a+l.performers,0)} 个演员目录 ·${S.actors.reduce((a,x)=>a+x.aliases.length,0)} 个别名`}</dd></dl>
+ <div class="import-line"><div><strong class="small">从 Filmpaw 导入</strong><p class="tiny muted">${firstRun()||!S.imported?'这台电脑上有 Filmpaw 片库：3 个片库、476 个演员目录、58 组别名。':`上次导入 ${S.imported} · 3 个片库、58 组别名。再次导入只补充新的片库和别名，不会覆盖你在 TaskPaw 里的修改。`}</p></div><button type="button" class="btn" data-act="import-open">${I('import')}${firstRun()?'导入':'再次导入'}</button></div></div>`)}
+ ${sec('s-workers','GPU 工作机接入','其他电脑作为 GPU 工作机连到这台主控（设备页本次不改）',`<div class="form-grid"><div class="field"><span>允许 GPU 工作机接入</span><div style="display:flex;align-items:center;gap:12px;min-height:44px"><button type="button" class="toggle" role="switch" aria-checked="${s.remote_workers}" aria-label="允许 GPU 工作机接入" data-act="set-tog" data-k="remote_workers"></button><span class="small muted">${s.remote_workers?'已允许':'已关闭'}</span></div></div><div class="field${s.worker_api_port!==S.saved.worker_api_port?' changed':''}"><label for="f-port">工作机接口端口</label><input id="f-port" class="input mono" inputmode="numeric" value="${esc(s.worker_api_port)}" data-bind="set.worker_api_port"></div></div>`)}
+ ${d.length?`<div class="save-bar" role="region" aria-label="未保存的修改"><div><strong class="small">${d.length} 项修改未保存</strong><p class="tiny muted">${d.map(k=>FIELD_LABEL[k]).join('、')}${restart?' · 保存后重启 TaskPaw 生效':' · 保存后立即生效'}</p></div><div class="actions"><button type="button" class="btn ghost" data-act="set-reset">放弃修改</button><button type="button" class="btn primary" data-act="set-save">保存</button></div></div>`:''}
+ </div></div>`;
+}
+
+/* ---------- 待确认 ---------- */
+function cover(f,cls){return `<div class="cover ${cls}" style="background:linear-gradient(160deg,hsl(${f.hue} 45% 34%),hsl(${f.hue+40} 40% 16%))" aria-hidden="true">${f.id}</div>`}
+function candidatesFor(f){
+ const a=S.actors.find(x=>x.name===f.actor);
+ if(!a||firstRun())return [];
+ return a.locs.filter(l=>lib(l.lib).role==='archive').map(l=>({actor:a,lib:l.lib,films:l.films,path:`${lib(l.lib).path}\\${a.name}`}));
+}
+function preselect(f,c){
+ if(!c.length||!S.rules.preselect&&c.length===1)return null;
+ if(c.length===1)return 0;
+ if(S.rules.multi==='most')return c.reduce((b,x,i)=>x.films>c[b].films?i:b,0);
+ if(S.rules.multi==='recent')return Math.max(0,c.findIndex(x=>x.lib==='B'));
+ return c.reduce((b,x,i)=>S.rules.order.indexOf(x.lib)<S.rules.order.indexOf(c[b].lib)?i:b,0);
+}
+function catMatch(f){return S.rules.prefix?S.cats.find(c=>c.prefixes.some(p=>f.id.toUpperCase().startsWith(p.toUpperCase()))):null}
+function defaultSel(f){if(firstRun())return null;const c=candidatesFor(f);if(c.length)return preselect(f,c);const m=catMatch(f);return m?'cat:'+m.id:null}
+function secondHint(f){return S.rules.secondHint&&!firstRun()&&candidatesFor(f).length?catMatch(f):null}
+function selPath(f,sel){if(sel==null)return null;if(String(sel).startsWith('cat:'))return `${lib(sel.slice(4)).path}\\${f.id}`;if(sel==='new')return `${lib(S.rules.newLib).path}\\${f.actor}\\${f.id}`;const c=candidatesFor(f)[sel];return c?`${c.path}\\${f.id}`:null}
+function reviewPage(){
+ const list=S.films.filter(f=>!S.confirmed[f.id]);
+ return `<div class="page-title"><div class="page-title-main"><h1>待确认</h1><span class="page-sub">点一次「确认入库」，剩下的由后台完成</span></div></div>
+ ${firstRun()?`<div class="notice amber" style="margin-bottom:18px">${I('alert')}<div>还没有片库，暂时无法推荐入库位置。<button type="button" class="link-btn" style="min-height:0;padding:0" data-act="nav" data-k="library-nas">去设置片库</button></div></div>`:''}
+ <div class="review-grid">${list.map(f=>{const c=candidatesFor(f);const sel=defaultSel(f);const isCat=String(sel).startsWith('cat:');const path=selPath(f,sel);const hint=secondHint(f);return `<article class="panel review-card">${cover(f,'review')}<div class="body"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 class="mono">${f.id}</h3>${isCat?'<span class="chip blue">类型目录 · 番号前缀命中</span>':!f.actor?'<span class="chip amber">没有演员</span>':c.length===0?'<span class="chip amber">片库里没有这位演员</span>':c.length>1?`<span class="chip blue">${c.length} 个位置 · 已按规则预选</span>`:'<span class="chip green">唯一匹配</span>'}${hint?`<span class="chip">${I('tag')}可加第二目标 · ${esc(hint.name)}</span>`:''}</div><p>${f.title} · ${f.res}${f.subs?' · 中文字幕':''}</p><div class="keyline">${I('userplus')}演员：${f.actor?`<strong>${esc(f.actor)}</strong>`:'<span class="muted">未刮削到</span>'}</div><div class="keyline">${I('folder')}${path?`<span class="mono tiny">${esc(path)}</span>`:'<span class="muted">待选择目标</span>'}</div><div class="actions" style="margin-top:6px"><button type="button" class="btn primary" data-act="review" data-id="${f.id}">图文确认</button></div></div></article>`}).join('')||`<div class="panel" style="grid-column:1/-1"><div class="empty">${I('check')}<h2>都确认完了</h2><p class="small">新的影片准备好后会出现在这里。切换上方场景可重置演示。</p></div></div>`}</div>`;
+}
+
+/* ---------- overlays ---------- */
+function modalHead(id,t,sub){return `<div class="modal-head"><div><h2 id="${id}">${t}</h2>${sub?`<p>${sub}</p>`:''}</div><button type="button" class="btn ghost icon-btn" aria-label="关闭" data-act="close">${I('x')}</button></div>`}
+function overlay(){
+ const o=S.overlay;if(!o)return '';
+ if(o.type==='actor')return drawer(actorDrawer(o));
+ if(o.type==='receipt')return drawer(receiptDrawer(o));
+ const inner={review:reviewModal,libform:libForm,libremove:libRemove,import:importModal}[o.type](o);
+ return `<div class="overlay" data-act="backdrop"><div class="modal${o.type==='review'?'':' narrow'}" role="dialog" aria-modal="true" aria-labelledby="dlg-title">${inner}</div></div>`;
+}
+function drawer(inner){return `<div class="overlay right" data-act="backdrop"><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="dlg-title">${inner}</aside></div>`}
+
+function reviewModal(o){
+ const f=S.films.find(x=>x.id===o.id);
+ if(o.done)return modalHead('dlg-title','已确认，等待归档',f.id)+`<div class="modal-body"><div class="receipt">${I('check')}<h3>${o.archived?'成品已入库':'后台正在复制并校验'}</h3><p>${o.archived?(o.dual?`两份都已校验 · 回执 <span class="mono">R-20261030-0011</span> · 演员目录和「${esc(lib(o.second).name)}」各 ${f.files}/${f.files} 个文件一致`:`回执 <span class="mono">R-20261030-0011</span> · ${f.files}/${f.files} 个文件一致`):'完成后在「片库与规则 → 归档历史」可以查到回执。'}</p>${o.newDir?`<p style="margin-top:6px">已新建演员目录 <span class="mono">${esc(o.newDir)}</span>，下次扫描前就能在「演员」里看到。</p>`:''}</div></div><div class="modal-foot"><p>来源清理在回执写下后自动进行。</p><div class="actions"><button type="button" class="btn ghost" data-act="nav-close" data-k="library-history">查看归档历史</button><button type="button" class="btn primary" data-act="close">继续下一部</button></div></div>`;
+ const c=candidatesFor(f);
+ if(o.sel===undefined)o.sel=defaultSel(f);
+ const m=catMatch(f),isCat=String(o.sel).startsWith('cat:');
+ const isNew=o.sel==='new';
+ if(o.newName===undefined)o.newName=S.rules.newName==='actor'?f.actor:'';
+ if(o.newLib===undefined)o.newLib=S.rules.newLib;
+ const nl=lib(o.newLib);
+ const clash=isNew&&S.actors.some(a=>a.name.toLowerCase()===o.newName.trim().toLowerCase()&&a.locs.some(l=>l.lib===o.newLib));
+ const target=isNew?(o.newName.trim()?`${esc(nl.path)}\\<span class="new-seg">${esc(o.newName.trim())}</span>\\${f.id}`:null):isCat?`${esc(lib(o.sel.slice(4)).path)}\\${f.id}`:o.sel!=null&&c[o.sel]?`${esc(c[o.sel].path)}\\${f.id}`:null;
+ const ok=target&&!clash;
+ const why=m&&o.sel==='cat:'+m.id?`番号前缀 ${esc(m.prefixes[0])} 命中`:c.length>1&&typeof o.sel==='number'?(S.rules.multi==='priority'?'按片库优先级预选':S.rules.multi==='most'?'按影片最多的位置预选':'按最近入库的位置预选'):'';
+ const catSection=S.cats.length&&(S.rules.catAlways||!c.length||m)?`<div><div class="section-h"><span>${c.length?'或改放到类型目录（代替演员目录）':'或放到类型目录'}</span></div><div class="candidate-list" role="group" aria-label="类型目录">${S.cats.map(k=>`<button type="button" class="candidate" aria-pressed="${o.sel==='cat:'+k.id}" data-act="rv-sel" data-i="cat:${k.id}"><div class="kicon" aria-hidden="true">${I('folder')}</div><div style="min-width:0"><strong>${esc(k.name)}</strong><span class="mono">${esc(k.path)}</span><span>${k.films} 部${k.prefixes.length?` · 前缀 ${k.prefixes.map(esc).join('、')}`:''}${m&&m.id===k.id?' · <b class="t-green">本片命中</b>':''}</span></div></button>`).join('')}</div></div>`:'';
+ if(o.second===undefined)o.second=null;
+ const canSecond=!isCat&&!!target&&S.cats.length>0,hint=secondHint(f),sc=o.second&&canSecond?lib(o.second):null;
+ const secondSection=!canSecond?'':sc?`<div class="target-box second"><div class="section-h"><h3>${I('folder')}第 2 份 · 类型目录</h3><button type="button" class="btn small ghost" data-act="rv-second-off">${I('x')}不要第二目标</button></div><div class="target-path">${esc(sc.path)}\\${f.id}</div><p class="tiny muted" style="margin-top:10px">同一个成品包再复制一份。两份都校验通过、写下回执后，才清理来源。</p></div>`
+  :`<div class="second-add"><div style="min-width:0;flex:1 1 260px"><strong class="small">第二目标（可选）</strong><p class="tiny muted">再复制一份到某个类型目录，例如写真系列。</p>${hint?`<p class="tiny t-blue" style="margin-top:4px">番号前缀 ${esc(hint.prefixes[0])} 对应「${esc(hint.name)}」</p>`:''}</div><div class="actions">${hint?`<button type="button" class="btn small primary" data-act="rv-second" data-k="${hint.id}">${I('plus')}加入「${esc(hint.name)}」</button>`:''}<button type="button" class="btn small" data-act="rv-second-pick">${o.pickSecond?'收起':'选择类型目录'}</button></div>${o.pickSecond?`<div class="candidate-list" style="flex:1 1 100%;margin-top:0">${S.cats.map(k=>`<button type="button" class="candidate" data-act="rv-second" data-k="${k.id}"><div class="kicon" aria-hidden="true">${I('folder')}</div><div style="min-width:0"><strong>${esc(k.name)}</strong><span class="mono">${esc(k.path)}</span></div></button>`).join('')}</div>`:''}</div>`;
+ return modalHead('dlg-title','确认影片与入库目标','入库完成后自动清理本次收件来源')+`<div class="modal-body">
+ <div class="confirmation-layout">${cover(f,'confirm')}<div style="min-width:0"><div class="eyebrow-id">${f.id} · MIKO 最终封面</div><h3>${f.title}</h3><div class="chips"><span class="chip green">本次后处理已完成</span><span class="chip">${f.res}</span></div><p>刮削出的演员：<strong style="color:var(--text)">${esc(f.actor)}</strong></p><p>${f.subs?'修复成品 · 中文字幕已核对':'修复成品 · 无语音，不加中文字幕标识'}</p></div></div>
+ <div><div class="section-h"><span>选择演员与目标</span>${why?`<span class="chip blue">${why}</span>`:''}</div>
+ ${!f.actor?`<div class="notice" style="margin-top:10px">${I('info')}<div>Miko 没有刮削到演员。${m?`番号前缀对应类型目录「${esc(m.name)}」，已预选。`:'可以放到类型目录，或搜索已有演员。'}</div></div>`:c.length===0?`<div class="notice amber" style="margin-top:10px">${I('info')}<div>片库里没有「${esc(f.actor)}」${S.rules.alias?'，别名里也没有':''}。${m?`番号前缀对应类型目录「${esc(m.name)}」，已预选。`:'可以放到类型目录、新建演员目录，或搜索已有演员。'}</div></div>`:''}
+ <div class="search-wrap" style="margin-top:10px">${I('search')}<input id="rv-q" class="input search" style="width:100%" type="search" placeholder="搜索已有演员或别名" aria-label="搜索已有演员或别名"></div>
+ <div class="candidate-list" role="group" aria-label="演员与目标候选">${c.map((x,i)=>`<button type="button" class="candidate" aria-pressed="${o.sel===i}" data-act="rv-sel" data-i="${i}">${avatar(x.actor)}<div style="min-width:0"><strong>${esc(x.actor.name)} · ${x.lib} ${esc(lib(x.lib).name)}</strong><span class="mono">${esc(x.path)}</span><span>${x.films} 部${x.actor.aliases.length?` · 别名：${x.actor.aliases.map(esc).join('、')}`:''}</span></div></button>`).join('')}
+ ${S.rules.allowNew?`<button type="button" class="candidate new" aria-pressed="${isNew}" data-act="rv-sel" data-i="new"><div class="avatar" aria-hidden="true">${I('plus')}</div><div><strong>新建演员目录</strong><span>点「确认入库」时才创建</span></div></button>`:''}</div>
+ ${isNew?`<div class="new-form" style="margin-top:12px"><label class="field" for="nf-name">演员名（目录名）<input id="nf-name" class="input" value="${esc(o.newName)}" data-bind="overlay.newName"></label><label class="field" for="nf-lib">放到<select id="nf-lib" data-bind="overlay.newLib">${S.rules.order.map(id=>lib(id)).filter(l=>l.role==='archive').map(l=>`<option value="${l.id}" ${o.newLib===l.id?'selected':''}>${l.id} · ${esc(l.name)}${l.online?'':'（离线）'}</option>`).join('')}</select></label><p class="wide tiny ${clash?'t-red':'muted'}">${clash?`${esc(nl.name)}里已经有「${esc(o.newName.trim())}」，请直接选它，或换一个名字。`:o.newName.trim()?`${esc(nl.name)}里没有同名目录，可以新建。名字也会记为该演员的正式名，下次直接匹配。`:'请填写演员名。'}</p></div>`:''}</div>
+ ${catSection}
+ <div class="target-box"><h3>${I('folder')}入库到${sc?'（第 1 份）':''}${isNew&&target?' <span class="chip amber" style="margin-left:4px">含新建目录</span>':isCat?' <span class="chip blue" style="margin-left:4px">类型目录</span>':''}</h3><div class="target-path">${target||'尚未选择完整目标'}</div><p class="tiny muted" style="margin-top:10px">保留所有已有片源；同名冲突不会覆盖。</p></div>
+ ${secondSection}
+ <details><summary>最终文件包 · ${f.files} 个文件</summary><ul class="package-list"><li><span>${f.id}.mp4</span><span class="mono">7.1 GB</span></li><li><span>${f.id}.zh.srt</span><span class="mono">84 KB</span></li><li><span>${f.id}.nfo</span><span class="mono">6 KB</span></li><li><span>poster.jpg</span><span class="mono">412 KB</span></li><li><span>fanart.jpg</span><span class="mono">1.2 MB</span></li><li><span>folder.jpg</span><span class="mono">236 KB</span></li></ul></details>
+ <details><summary>入库后清理：主控 INBOX / ${f.id} · ${f.inputs} 个来源文件</summary><p class="tiny muted" style="margin-top:6px">只处理本次收件来源；若文件发生变化或仍被占用，将保留并显示待清理。</p></details>
+ </div><div class="modal-foot"><p>${ok?(sc?'将复制两份：演员目录和类型目录各一份。':'一次确认即可，剩余步骤由后台完成。'):'选好演员与目标后再确认。'}</p><div class="actions"><button type="button" class="btn ghost" data-act="toast" data-msg="已打开成品文件夹（演示）">打开文件夹</button><button type="button" class="btn ghost" data-act="toast" data-msg="手动入库：选择任意目录（沿用现有功能）">手动入库</button><button type="button" class="btn primary" data-act="rv-confirm" ${ok?'':'disabled'}>确认入库</button></div></div>`;
+}
+function libForm(o){
+ const l=o.id?lib(o.id):null;
+ if(!o.f)o.f=l?{kind:l.kind||'actor',name:l.name,path:l.path,role:l.role||'archive',prefixes:(l.prefixes||[]).join('、')}:{kind:o.kind||'actor',name:'',path:'',role:'archive',prefixes:''};
+ const f=o.f,cat=f.kind==='cat';
+ const test=o.test==='ok'?`<div class="notice green">${I('check')}<div>${cat?'可以访问。目录下有 <b>86</b> 个影片目录；可写入。':'可以访问。找到 <b>57</b> 个演员目录、<b>412</b> 个影片目录；可写入。'}</div></div>`:o.test==='run'?`<div class="notice">${I('clock')}<div>正在检查…</div></div>`:'';
+ return modalHead('dlg-title',l?`编辑${cat?'类型目录':'片库'} · ${esc(l.name)}`:cat?'添加类型目录':'添加片库',cat?'影片直接放进这个目录：类型目录\\影片':'根目录的下一级目录会被当作演员目录')+`<div class="modal-body">
+ ${l?'':`<div class="field"><span>类型</span><div class="seg" role="radiogroup" aria-label="类型"><button type="button" class="seg-opt" role="radio" aria-checked="${!cat}" data-act="lf-kind" data-k="actor">演员片库 · 片库\\演员\\影片</button><button type="button" class="seg-opt" role="radio" aria-checked="${cat}" data-act="lf-kind" data-k="cat">类型目录 · 目录\\影片</button></div></div>`}
+ <label class="field" for="lf-name">名称<input id="lf-name" class="input" placeholder="${cat?'例如：写真 · 某系列':'例如：主片库'}" value="${esc(f.name)}" data-bind="overlay.f.name"></label>
+ <label class="field" for="lf-path">根目录<div class="path-field"><input id="lf-path" class="input" placeholder="\\\\NAS\\共享\\片库" value="${esc(f.path)}" data-bind="overlay.f.path"><button type="button" class="btn" data-act="lf-pick">选择</button></div><span class="hint">支持 NAS 共享路径（\\\\NAS\\共享）和本机目录</span></label>
+ ${cat?`<label class="field" for="lf-pre">番号前缀（可选）<input id="lf-pre" class="input mono" placeholder="例如 OAE、ABC" value="${esc(f.prefixes)}" data-bind="overlay.f.prefixes"><span class="hint">番号以这些前缀开头的影片，待确认时自动推荐放到这里；不填就只能手动指派</span></label>`:`<div class="field"><span>用途</span><div class="seg" role="radiogroup" aria-label="用途"><button type="button" class="seg-opt" role="radio" aria-checked="${f.role==='archive'}" data-act="lf-role" data-k="archive">入库目标</button><button type="button" class="seg-opt" role="radio" aria-checked="${f.role==='readonly'}" data-act="lf-role" data-k="readonly">${I('lock')}只读（只用于匹配和查重）</button></div></div>`}
+ ${test}</div><div class="modal-foot"><button type="button" class="btn" data-act="lf-test" ${f.path.trim()?'':'disabled'}>检查连接</button><div class="actions"><button type="button" class="btn ghost" data-act="close">取消</button><button type="button" class="btn primary" data-act="lf-save" ${f.name.trim()&&f.path.trim()?'':'disabled'}>${l?'保存':cat?'添加':'添加并扫描'}</button></div></div>`;
+}
+function libRemove(o){const l=lib(o.id);const cat=l.kind==='cat';const n=S.actors.filter(a=>a.locs.some(x=>x.lib===l.id)).length;
+ return modalHead('dlg-title',`移除「${esc(l.name)}」？`)+`<div class="modal-body"><p class="small">${cat?'待确认里不再列出这个类型目录。':'TaskPaw 不再扫描这个片库，也不再推荐它作为入库目标。'}<b>NAS 上的文件不会有任何改动。</b></p><dl class="facts"><dt>目录</dt><dd class="mono">${esc(l.path)}</dd><dt>受影响</dt><dd>${cat?'归档历史和回执保留':`${n} 位演员的这个位置会从索引里去掉；归档历史和回执保留`}</dd></dl></div><div class="modal-foot"><span></span><div class="actions"><button type="button" class="btn ghost" data-act="close">取消</button><button type="button" class="btn danger" data-act="lib-remove-ok">移除片库</button></div></div>`}
+function importModal(o){
+ o.step=o.step||1;
+ if(o.step===1){if(!o.pick)o.pick={A:true,B:true,C:true,alias:true};
+  return modalHead('dlg-title','从 Filmpaw 导入','第 1 步，共 2 步 · 只读取，不修改 Filmpaw')+`<div class="modal-body"><dl class="facts"><dt>找到</dt><dd class="mono">%APPDATA%\\Filmpaw\\library.db</dd><dt>最后更新</dt><dd>10-30 08:52（Filmpaw 0.6.0）</dd></dl>
+  <div><div class="section-h" style="margin-bottom:10px">导入哪些</div><ul class="check-list">${LIBS.map(l=>`<li><input type="checkbox" id="ip-${l.id}" ${o.pick[l.id]?'checked':''} data-act="ip" data-k="${l.id}"><label for="ip-${l.id}" class="grow"><strong>${l.id} · ${l.name}</strong><div class="path tiny">${l.path}</div></label><span class="mono tiny muted">${l.performers} 位</span></li>`).join('')}<li><input type="checkbox" id="ip-alias" ${o.pick.alias?'checked':''} data-act="ip" data-k="alias"><label for="ip-alias" class="grow"><strong>别名</strong><div class="tiny muted">58 组，按演员名对应</div></label></li></ul></div>
+  <div class="notice">${I('info')}<div>演员目录不从 Filmpaw 复制，导入后由 TaskPaw 重新扫描 NAS，结果以 NAS 上的实际目录为准。Filmpaw 之后照常可用，两边互不影响。</div></div></div><div class="modal-foot"><span></span><div class="actions"><button type="button" class="btn ghost" data-act="close">取消</button><button type="button" class="btn primary" data-act="ip-go">导入并扫描</button></div></div>`}
+ const st=o.prog||0;
+ const items=[['读取 Filmpaw 片库设置','3 个片库'],['导入别名','58 组'],['扫描 A · 主片库','238 个演员目录'],['扫描 B · 第二片库','142 个演员目录'],['扫描 C · 备份库','离线，恢复后自动补扫']];
+ return modalHead('dlg-title',st>=items.length?'导入完成':'正在导入','第 2 步，共 2 步')+`<div class="modal-body"><ul class="run-list">${items.map(([a,b],i)=>`<li><span class="mark ${i<st?'done':i===st?'run':''}">${i<st?I('check'):i+1}</span><div class="grow"><strong class="small">${a}</strong><div class="tiny ${i===4&&i<st?'t-amber':'muted'}">${i<st?b:i===st?'进行中…':'等待'}</div></div></li>`).join('')}</ul>
+ ${st>=items.length?`<div class="notice green">${I('check')}<div>已导入 2 个在线片库、380 个演员目录、58 组别名。备份库离线，恢复在线后自动扫描。</div></div>`:''}</div><div class="modal-foot"><span></span><div class="actions"><button type="button" class="btn primary" data-act="ip-done" ${st>=items.length?'':'disabled'}>查看片库</button></div></div>`;
+}
+function actorDrawer(o){
+ const a=S.actors.find(x=>x.id===o.id);
+ return `<div class="modal-head"><div><h2 id="dlg-title">演员详情</h2><p>名字来自 NAS 上的目录名</p></div><button type="button" class="btn ghost icon-btn" aria-label="关闭" data-act="close">${I('x')}</button></div><div class="modal-body">
+ <div style="display:flex;gap:18px;align-items:center">${avatar(a,'lg')}<div style="min-width:0"><h2 style="font-size:22px">${esc(a.name)}</h2><p class="small muted">${a.locs.length} 个位置 · ${a.locs.reduce((s,l)=>s+l.films,0)} 部 · 最近入库 ${a.last}</p>${a.thumb===false?'<p class="tiny t-amber" style="margin-top:4px">目录里没有 folder.jpg，显示占位头像</p>':''}</div></div>
+ <section><div class="section-h" style="margin-bottom:10px">位置</div><div class="loc-list">${a.locs.map(l=>{const L=lib(l.lib);return `<div class="loc-item"><div style="min-width:0"><strong class="small">${L.id} · ${esc(L.name)}</strong> ${l.missing?'<span class="chip amber">目录已缺失</span>':!L.online?'<span class="chip red">离线</span>':L.role!=='archive'?'<span class="chip">只读</span>':''}<div class="path tiny">${esc(L.path)}\\${esc(a.name)}</div>${l.missing?'<div class="tiny muted" style="margin-top:4px">上次扫描没找到这个目录。如果是改了名，下次扫描会自动对上新名字；记录不会删除。</div>':''}</div><div class="actions"><span class="mono small">${l.films} 部</span><button type="button" class="btn small ghost" data-act="toast" data-msg="已打开文件夹（演示）" ${l.missing||!L.online?'disabled':''}>${I('open')}打开</button></div></div>`}).join('')}</div></section>
+ <section><div class="section-h" style="margin-bottom:6px">别名</div><p class="tiny muted" style="margin-bottom:10px">Miko 刮削出的名字和目录名对不上时，用别名来匹配。同名的所有位置共用这组别名。</p><div class="alias-edit">${a.aliases.map((x,i)=>`<span class="alias-chip">${esc(x)}<button type="button" aria-label="删除别名 ${esc(x)}" data-act="alias-del" data-i="${i}">${I('x')}</button></span>`).join('')||'<span class="small muted">还没有别名</span>'}</div>
+ <form class="alias-add" data-form="alias"><input id="alias-in" class="input" placeholder="添加别名，例如日文名或旧艺名" aria-label="新别名"><button type="submit" class="btn">${I('plus')}添加</button></form></section>
+ <section><div class="section-h" style="margin-bottom:6px">最近入库</div><ul class="package-list">${S.history.filter(h=>h.actor===a.name).map(h=>`<li><span class="mono">${h.code}</span><span class="muted">${h.at} · ${h.lib}</span></li>`).join('')||'<li><span class="muted">TaskPaw 还没有为这位演员入过库</span></li>'}</ul></section>
+ </div>`;
+}
+function receiptDrawer(o){
+ const h=S.history.find(x=>x.id===o.id);
+ const tgt=histPath(h);
+ const files=[[`${h.code}.mp4`,'7.1 GB','9f3a…c21e'],[`${h.code}.zh.srt`,'84 KB','1b07…77d0'],[`${h.code}.nfo`,'6 KB','e4c2…0a19'],['poster.jpg','412 KB','5d88…b3f2'],['fanart.jpg','1.2 MB','a210…4c6e'],['folder.jpg','236 KB','03fe…9d81']].slice(0,h.files);
+ return `<div class="modal-head"><div><h2 id="dlg-title">归档回执</h2><p class="mono">${h.id}</p></div><button type="button" class="btn ghost icon-btn" aria-label="关闭" data-act="close">${I('x')}</button></div><div class="modal-body">
+ <div class="receipt"><h3>${I('receipt')}${h.code} 已入库</h3><p>${h.second?'两份各 ':''}${h.files}/${h.files} 个文件 SHA-256 一致 · ${h.size}${h.second?' ×2':''} · 用时 ${h.dur}</p><div class="actions" style="margin-top:12px">${openBtns(h,true)}</div></div>
+ <dl class="facts"><dt>${h.kind==='cat'?'类型目录':'演员'}</dt><dd>${h.kind==='cat'?esc(lib(h.lib).name):esc(h.actor)}${h.kind==='new'?' <span class="chip green">本次新建目录</span>':''}${h.kind==='manual'?' <span class="chip">手动入库</span>':''}</dd><dt>目标</dt><dd class="mono">${esc(tgt)}${h.second?`<br>${esc(secondPath(h))} <span class="chip blue">第 2 份</span>`:''}</dd><dt>确认方式</dt><dd>${h.kind==='manual'?'手动选择目录后确认':'在待确认里点「确认入库」'}</dd><dt>完成</dt><dd class="mono">${h.at}</dd></dl>
+ <section><div class="section-h">文件</div><div class="table-wrap"><table class="files-table"><thead><tr><th>文件</th><th>大小</th><th>SHA-256</th><th>校验</th></tr></thead><tbody>${files.map(([n,s,x])=>`<tr><td>${n}</td><td class="mono">${s}</td><td class="mono muted">${x}</td><td class="t-green">一致</td></tr>`).join('')}</tbody></table></div></section>
+ <section><div class="section-h">来源清理</div>${h.clean==='done'?`<div class="notice green" style="margin-top:10px">${I('check')}<div>已清理主控 INBOX / ${h.code} 下 3 个来源文件。NAS 片库不受影响。</div></div>`:`<div class="notice amber" style="margin-top:10px">${I('alert')}<div><p><b>已入库 · 待清理</b></p><p>${esc(h.why)}。来源已保留；只会重试清理，不会重新复制。</p></div></div><div class="actions" style="margin-top:10px"><button type="button" class="btn" data-act="clean-retry" data-id="${h.id}">${I('refresh')}重试清理</button><button type="button" class="btn ghost" data-act="toast" data-msg="已打开来源文件夹（演示）">打开来源文件夹</button></div>`}</section>
+ </div>`;
+}
+
+/* ---------- events ---------- */
+let toastT;
+function toast(m){S.toast=m;clearTimeout(toastT);toastT=setTimeout(()=>{S.toast=null;render()},2600)}
+function go(k){S.page=k;S.overlay=null;try{history.replaceState(null,'','#'+k)}catch(e){}render();const m=$('#main');if(m)m.focus({preventScroll:true})}
+function setPath(path,v){const ks=path.split('.');let o=S;for(let i=0;i<ks.length-1;i++)o=o[ks[i]];o[ks[ks.length-1]]=v}
+function runScan(id){const l=lib(id);if(!l.online||S.scan[id])return;S.scan[id]=1;const step=()=>{if(!S.scan[id])return;S.scan[id]=Math.min(l.performers,S.scan[id]+Math.ceil(l.performers/9));if(S.scan[id]>=l.performers){delete S.scan[id];l.scanned='刚刚';toast(`${l.name}扫描完成：${l.performers} 个演员目录`)}else setTimeout(step,260);render()};setTimeout(step,260);render()}
+
+document.addEventListener('click',e=>{
+ const t=e.target.closest('[data-act]');if(!t)return;
+ const a=t.dataset.act,k=t.dataset.k,id=t.dataset.id,o=S.overlay;
+ if(a==='backdrop'){if(e.target===t){S.overlay=null;render()}return}
+ switch(a){
+ case 'nav':go(k);break;
+ case 'nav-close':S.overlay=null;go(k);break;
+ case 'scenario':S.scenario=k;S.confirmed={};S.overlay=null;if(k==='first'){S.libs=clone(LIBS);S.imported=null}else S.imported='10-30 09:10';render();break;
+ case 'close':S.overlay=null;render();break;
+ case 'toast':toast(t.dataset.msg);render();break;
+ case 'scan':runScan(id);break;
+ case 'scan-all':S.libs.forEach(l=>runScan(l.id));break;
+ case 'lib-add':S.overlay={type:'libform'};render();break;
+ case 'lib-edit':S.overlay={type:'libform',id};render();break;
+ case 'lib-remove':S.overlay={type:'libremove',id};render();break;
+ case 'lib-remove-ok':{const l=lib(o.id);if(l.kind==='cat'){S.cats=S.cats.filter(x=>x.id!==o.id);S.overlay=null;toast(`已移除「${l.name}」，NAS 上的文件没有改动`);render();break}S.libs=S.libs.filter(x=>x.id!==o.id);S.rules.order=S.rules.order.filter(x=>x!==o.id);S.actors.forEach(x=>x.locs=x.locs.filter(y=>y.lib!==o.id));S.actors=S.actors.filter(x=>x.locs.length);if(S.rules.newLib===o.id)S.rules.newLib=S.libs.find(x=>x.role==='archive')?.id;S.overlay=null;toast(`已移除「${l.name}」，NAS 上的文件没有改动`);render();break}
+ case 'lf-role':o.f.role=k;render();break;
+ case 'lf-pick':o.f.path='\\\\nas-demo-4\\films-new';render();break;
+ case 'lf-test':o.test='run';render();setTimeout(()=>{if(S.overlay===o){o.test='ok';render()}},700);break;
+ case 'cat-add':S.overlay={type:'libform',kind:'cat'};render();break;
+ case 'lf-kind':o.f.kind=k;o.test=null;render();break;
+ case 'lf-save':{const pre=o.f.prefixes.split(/[、,，\s]+/).filter(Boolean).map(x=>x.toUpperCase());if(o.id){const t0=lib(o.id);t0.name=o.f.name;t0.path=o.f.path;if(t0.kind==='cat')t0.prefixes=pre;else t0.role=o.f.role;S.overlay=null;toast('已保存');render()}else if(o.f.kind==='cat'){S.cats.push({id:'K'+Date.now(),kind:'cat',name:o.f.name,path:o.f.path,prefixes:pre,films:0,last:'—'});S.overlay=null;if(firstRun())S.scenario='daily';toast(`已添加类型目录「${o.f.name}」`);render()}else{const nid=String.fromCharCode(65+S.libs.length);S.libs.push({id:nid,name:o.f.name,path:o.f.path,role:o.f.role,online:true,performers:57,films:412,free:'3.4 TB',scanned:'—',took:'—',missing:0});S.rules.order.push(nid);S.overlay=null;if(firstRun())S.scenario='daily';runScan(nid)}break}
+ case 'afilter':S.aFilter=k;render();break;
+ case 'hfilter':S.hFilter=k;render();break;
+ case 'actor':S.overlay={type:'actor',id:+id};render();break;
+ case 'receipt':S.overlay={type:'receipt',id};render();break;
+ case 'alias-del':{const ac=S.actors.find(x=>x.id===o.id);const rm=ac.aliases.splice(+t.dataset.i,1);toast(`已删除别名「${rm[0]}」`);render();break}
+ case 'clean-retry':{const h=S.history.find(x=>x.id===id);h.clean='done';toast('来源已清理');render();break}
+ case 'rule-tog':S.rules[k]=!S.rules[k];toast('规则已保存');render();break;
+ case 'rule-multi':S.rules.multi=k;toast('规则已保存');render();break;
+ case 'prio':{const r=S.rules.order,i=r.indexOf(id),j=i+(+t.dataset.d);[r[i],r[j]]=[r[j],r[i]];render();break}
+ case 'set-role':S.set.role=k;render();break;
+ case 'set-tog':S.set[k]=!S.set[k];render();break;
+ case 'pick':if(/\.[a-z]+$/i.test(S.set[k]))toast('打开文件选择窗口（演示）');else S.set[k]=S.set[k].replace(/[^\\]+$/,m=>m+'-新');render();break;
+ case 'set-reset':S.set=clone(S.saved);render();break;
+ case 'set-save':{const restart=dirty().some(x=>RESTART.includes(x));S.saved=clone(S.set);toast(restart?'已保存，重启 TaskPaw 后生效':'已保存');render();break}
+ case 'import-open':S.overlay={type:'import'};render();break;
+ case 'ip':o.pick[k]=t.checked;break;
+ case 'ip-go':{o.step=2;o.prog=0;render();const tick=()=>{if(S.overlay!==o)return;o.prog++;render();if(o.prog<5)setTimeout(tick,520)};setTimeout(tick,520);break}
+ case 'ip-done':S.scenario='daily';S.imported='刚刚';S.libs=clone(LIBS);S.overlay=null;go('library-nas');break;
+ case 'review':S.overlay={type:'review',id};render();break;
+ case 'rv-sel':{const v=t.dataset.i;o.sel=v==='new'||v.startsWith('cat:')?v:+v;if(v.startsWith('cat:'))o.second=null;render();break}
+ case 'rv-second':o.second=k;o.pickSecond=false;render();break;
+ case 'rv-second-off':o.second=null;render();break;
+ case 'rv-second-pick':o.pickSecond=!o.pickSecond;render();break;
+ case 'rv-confirm':{const f=S.films.find(x=>x.id===o.id);o.done=true;o.dual=!!(o.second&&!String(o.sel).startsWith('cat:'));if(o.sel==='new'){o.newDir=`${lib(o.newLib).path}\\${o.newName.trim()}`;const nm=o.newName.trim();let ac=S.actors.find(x=>x.name===nm);if(!ac){ac={id:Date.now(),name:nm,aliases:[],locs:[],last:'10-30',thumb:false};S.actors.push(ac)}ac.locs.push({lib:o.newLib,films:1});f.actor=nm}S.confirmed[o.id]=true;render();setTimeout(()=>{if(S.overlay===o){o.archived=true;render()}},1400);break}
+ }
+});
+document.addEventListener('keydown',e=>{
+ if(e.key==='Escape'&&S.overlay){S.overlay=null;render();return}
+ if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-act]')){e.preventDefault();e.target.click()}
+});
+document.addEventListener('input',e=>{
+ const b=e.target.dataset&&e.target.dataset.bind;if(!b)return;
+ setPath(b,e.target.value);
+ if(b==='aQ'||b==='hQ'||b.startsWith('set.')||b.startsWith('overlay.'))render();
+});
+document.addEventListener('change',e=>{
+ const b=e.target.dataset&&e.target.dataset.bind;
+ if(b&&e.target.tagName==='SELECT'){setPath(b,e.target.value);if(b.startsWith('rules.'))toast('规则已保存');render()}
+});
+document.addEventListener('submit',e=>{
+ if(e.target.dataset.form!=='alias')return;e.preventDefault();
+ const v=$('#alias-in').value.trim();if(!v)return;
+ const ac=S.actors.find(x=>x.id===S.overlay.id);
+ if(ac.aliases.includes(v)){toast('这个别名已经有了');render();return}
+ ac.aliases.push(v);toast(`已添加别名「${v}」`);render();const el=$('#alias-in');if(el)el.focus();
+});
+const known=['library-nas','library-actors','library-rules','library-history','prefs','review','overview','pending','queue','exceptions','devices','local','bridge'];
+function fromHash(){const h=(location.hash||'').slice(1);if(known.includes(h))S.page=h}
+window.addEventListener('hashchange',()=>{fromHash();render()});
+fromHash();render();
+})();
+</script>
