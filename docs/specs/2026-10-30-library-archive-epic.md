@@ -1,8 +1,13 @@
 # Taskpaw-owned library and archive (independent of Filmpaw)
 
-Date: 2026-10-30. Status: design v5, adversarial debate closed (5 rounds, last clean). EPIC: #361 (children #362 L1, #363 L2a, #364 L2b, #365 L3, #366 L4).
-linked from each child. UI reference (approved by the operator on 2026-10-30, v4):
+Date: 2026-10-30. Status: implemented — L1–L4 are complete locally (internal review, Codex
+gate, full suite); the design was debated over 5 rounds, the last clean. EPIC: #361 (children #362 L1,
+#363 L2a, #364 L2b, #365 L3, #366 L4). UI reference (approved by the operator on 2026-10-30, v4):
 `design-system/taskpaw-v3/preview/media-library-v1.html`.
+
+Changes made during implementation: `PUT /library/order` for the library priority (§6 had omitted
+`position` from the editable fields); `GET /performers?group=true` pages whole name groups for the 演员 tab;
+a new actor name may not start with `.` (the scan treats dot folders as hidden).
 
 ## 1. Goal
 
