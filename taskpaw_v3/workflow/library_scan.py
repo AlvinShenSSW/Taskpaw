@@ -163,8 +163,11 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
             if lib["kind"] == "actor"
             else {}
         )
-        if names and counts and all(c is None for c in counts.values()):
-            raise LibraryUnreachable(root)  # the share dropped after the listing
+        unread = [name for name, count in counts.items() if count is None]
+        if unread:  # those folders only, or the share dropped after the listing?
+            list_dirs(root)
+            if len(unread) == len(names):
+                raise LibraryUnreachable(root)
     except LibraryUnreachable:
         with store.transaction() as conn:  # the status only, no performer row
             conn.execute(
@@ -191,7 +194,12 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
             _apply_actor(
                 conn, library_id, root, names, counts, thumbs, at, result, known
             )
-            result.film_count = sum(c for c in counts.values() if c is not None)
+            # an unreadable actor keeps its last count, in the total too
+            (result.film_count,) = conn.execute(
+                "SELECT COALESCE(SUM(film_count), 0) FROM performers"
+                " WHERE library_id=? AND is_missing=0",
+                (library_id,),
+            ).fetchone()
         else:
             result.film_count = len(names)
         conn.execute(

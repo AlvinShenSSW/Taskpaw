@@ -740,6 +740,45 @@ def test_films_confirmed_for_the_same_new_actor_all_land_in_it(rig):
     )
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="a junction is a reparse point")
+def test_a_reused_actor_directory_swapped_for_a_junction_is_refused(rig):
+    """Codex fixes r1 P1: nothing is written through a link put in its place."""
+    import _winapi
+
+    proof = rig.archive.target(None, FILM, library_id=rig.library_id, actor_name="新人")
+    new = dict(library_id=rig.library_id, actor_name="新人")
+    rig.archive.archive(
+        "op-1", rig.package, None, proof["expected_target"], rig.files, **new
+    )
+    assert rig.run("op-1")["status"] == "completed"
+    rig.archive.archive(
+        "op-2",
+        _package(rig, "XYZ-999"),
+        None,
+        proof["expected_target"],
+        rig.files,
+        **new,
+    )
+    actor = rig.root / "新人"
+    actor.rename(rig.tmp / "moved")
+    outside = rig.tmp / "outside"
+    outside.mkdir()
+    _winapi.CreateJunction(str(outside), str(actor))
+    task = rig.run("op-2")
+    assert task["status"] == "failed", task
+    assert list(outside.iterdir()) == []
+    with pytest.raises(LibraryRefused):  # and a new submission is refused outright
+        rig.archive.archive(
+            "op-3",
+            _package(rig, "QRS-777"),
+            None,
+            proof["expected_target"],
+            rig.files,
+            **new,
+        )
+    assert list(outside.iterdir()) == []
+
+
 def test_a_new_actor_name_that_normalizes_like_a_folder_is_refused(rig):
     """UI walkthrough D1: 张小雨 next to 張小雨 would be a parallel directory."""
     (rig.root / "張小雨").mkdir()

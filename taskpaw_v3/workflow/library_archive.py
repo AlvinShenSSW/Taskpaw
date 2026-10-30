@@ -459,7 +459,8 @@ class LibraryArchive:
             return parent, identity, film.casefold() not in names, parent / film
         actor = parent / name
         if actor_ready and name.casefold() in names and _known_actor(store, actor):
-            try:
+            try:  # a plain directory, never a link swapped in since
+                directory_identity(actor)
                 inside = _names(actor)
             except OSError as exc:
                 raise _os_error(exc, "无法读取演员目录") from exc
@@ -918,9 +919,14 @@ class LibraryArchive:
             os.mkdir(actor)
         except FileExistsError as exc:
             # the preflight accepted it: an earlier archive of this actor made it
-            if not _known_actor(self._db(), actor):
-                message = f"{ACTOR_EXISTS}：{actor.name}"
-                self._event(task, "mkdir_actor", index, "failed", message)
+            message = f"{ACTOR_EXISTS}：{actor.name}"
+            try:
+                plain = _known_actor(self._db(), actor) and directory_identity(actor)
+            except (OSError, LibraryRefused) as error:  # a link or gone since
+                message = f"演员目录不可用：{error}"
+                plain = False
+            if not plain:
+                self._event(task, "mkdir_actor", index, "failed", message[:2000])
                 raise _Failed(message) from exc
         except OSError as exc:
             message = f"无法创建演员目录：{exc}"

@@ -423,12 +423,35 @@ def test_an_unlistable_actor_folder_keeps_only_its_own_count(
 
     monkeypatch.setattr(library_scan, "list_dirs", denied)
     result = scan_library(store, lib)
-    assert (result.ok, result.added, result.film_count) == (True, 1, 2)
+    # Bob keeps his last count in the library total too (Codex fixes r1)
+    assert (result.ok, result.added, result.film_count) == (True, 1, 4)
     rows = performers(store, lib)
     assert rows["Alice"]["film_count"] == 2
     assert rows["Bob"]["film_count"] == 2  # the last known count stays
     assert rows["Carol"]["film_count"] is None and rows["Carol"]["is_missing"] == 0
     assert store.library(lib)["last_scan_ok"] is True
+
+
+def test_a_share_lost_after_some_actors_were_counted_is_unreachable(
+    store, tmp_path, monkeypatch
+):
+    """Codex fixes r1: the root listed, Alice counted, then the share went."""
+    lib = actor_library(store, tmp_path, "Alice", "Bob", films=1)
+    scan_library(store, lib)
+    base = str(store.library(lib)["path"])
+    real = library_scan.list_dirs
+    calls = []
+
+    def dropping(path):
+        calls.append(path)
+        if path == base and len(calls) == 1 or Path(path).name == "Alice":
+            return real(path)
+        raise library_scan.LibraryUnreachable(path)
+
+    monkeypatch.setattr(library_scan, "list_dirs", dropping)
+    result = scan_library(store, lib)
+    assert not result.ok and store.library(lib)["last_scan_ok"] is False
+    assert calls[-1] == base  # the root was asked again
 
 
 def test_no_listable_actor_folder_scans_as_unreachable(store, tmp_path, monkeypatch):
