@@ -94,12 +94,12 @@ def test_a_failed_archive_can_be_confirmed_again_with_its_reason():
     row = board.film_row(
         film(
             {**done_through("scrape"), "archive": "failed"},
-            archive_error="Filmpaw 拒绝归档：空间不足",
+            archive_error="片库拒绝归档：空间不足",
         ),
         {},
     )
     assert row["group"] == "confirm" and row["can_confirm"] is True
-    assert row["note"] == "Filmpaw 拒绝归档：空间不足"
+    assert row["note"] == "片库拒绝归档：空间不足"
     assert row["can_retry"] is False
 
 
@@ -120,7 +120,7 @@ def test_a_confirmed_film_is_archiving_not_confirmable(value):
     [
         (True, "等待确认入库", None),
         (False, "等待确认入库", "等待确认入库"),
-        (True, "等待 Filmpaw 运行", "等待 Filmpaw 运行"),
+        (True, "等待片库可用", "等待片库可用"),
         (True, "归档/清理暂停：存储不可用", "归档/清理暂停：存储不可用"),
     ],
 )
@@ -143,7 +143,7 @@ def test_confirming_again_after_a_failed_archive_drops_the_old_reason():
     value = film(
         {**done_through("scrape"), "archive": "failed"},
         approval_active=True,
-        archive_error="Filmpaw failed：旧原因",
+        archive_error="归档未完成（failed）：旧原因",
     )
     row = board.film_row(value, {value.film_id: "归档中"})
     assert (row["group"], row["note"]) == ("archiving", "归档中")
@@ -199,8 +199,8 @@ def test_a_cleanup_that_kept_members_says_why_never_the_stop_message(stage):
 
 def test_only_local_stages_wait_for_a_stop_confirmation():
     value = film({**done_through("scrape"), "archive": "unknown"})
-    row = board.film_row(value, {value.film_id: "Filmpaw 查询失败：超时"})
-    assert (row["stage"], row["note"]) == ("archive", "Filmpaw 查询失败：超时")
+    row = board.film_row(value, {value.film_id: "片库不可用：超时"})
+    assert (row["stage"], row["note"]) == ("archive", "片库不可用：超时")
     intake = film({"intake": "unknown"})
     assert (
         board.film_row(intake, {intake.film_id: "入库扫描中"})["note"] == "入库扫描中"
@@ -494,9 +494,9 @@ def test_a_confirmed_film_is_archiving():
     assert steps["confirm"][0] == "done"
     assert steps["archive"] == ("waiting", "归档中", None)
     started = film({**done_through("scrape"), "archive": "running"}, archive_open=True)
-    steps = _steps(board.film_row(started, {started.film_id: "等待 Filmpaw 运行"}))
+    steps = _steps(board.film_row(started, {started.film_id: "等待片库可用"}))
     assert steps["confirm"][0] == "done"
-    assert steps["archive"] == ("running", "等待 Filmpaw 运行", None)
+    assert steps["archive"] == ("running", "等待片库可用", None)
 
 
 def test_cleanup_combines_both_scopes_and_says_what_was_kept():
@@ -675,7 +675,7 @@ def test_film_board_reports_an_open_and_a_failed_archive(world):
     with world.fake:
         fin = world.finalizer()
         fin.confirm(world.film, "actor")
-    fin.run_once()  # admitted, Filmpaw down
+    fin.run_once()  # admitted, the library closed
     assert _board(world)[world.film].archive_open
     with world.fake:
         world.fake.mode = "fail"
@@ -884,7 +884,7 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         seed.film("failed", {**scraped, "archive": "failed"})
         seed.archive("failed", seed.approval("failed"), error="NAS 可用空间不足")
         seed.film("again", {**scraped, "archive": "failed"})
-        seed.archive("again", seed.approval("again"), error="Filmpaw 拒绝")
+        seed.archive("again", seed.approval("again"), error="片库拒绝")
         seed.approval("again")  # confirmed again after the failure
         seed.film("open", {**scraped, "archive": "pending"})
         seed.archive("open", seed.approval("open"), error="旧原因")
@@ -908,7 +908,7 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         "fresh": ("FRESH-1", False, False, None),
         "waiting": ("WAITING-1", True, False, None),
         "failed": ("FAILED-1", False, False, "NAS 可用空间不足"),
-        "again": ("AGAIN-1", True, False, "Filmpaw 拒绝"),
+        "again": ("AGAIN-1", True, False, "片库拒绝"),
         "open": ("OPEN-1", False, True, None),
         "revoked": ("REVOKED-1", False, False, None),
         "stale": ("STALE-1", False, False, None),

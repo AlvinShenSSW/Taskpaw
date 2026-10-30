@@ -144,6 +144,7 @@
         "can_retry": false,
         "retry_stage": null,
         "created_at": "2026-10-21T08:00:00Z",
+        "completed_at": null,
         "steps": [
           {
             "key": "intake",
@@ -331,8 +332,7 @@
           "running": false,
           "estimated": true
         },
-        "live_power": null,
-        "completed_at": null
+        "live_power": null
       },
       {
         "film_id": "film-failed",
@@ -372,6 +372,7 @@
         "can_retry": true,
         "retry_stage": "translate",
         "created_at": "2026-10-21T08:00:00Z",
+        "completed_at": null,
         "steps": [
           {
             "key": "intake",
@@ -528,8 +529,7 @@
           "running": false,
           "estimated": true
         },
-        "live_power": null,
-        "completed_at": null
+        "live_power": null
       },
       {
         "film_id": "film-restoring",
@@ -569,6 +569,7 @@
         "can_retry": false,
         "retry_stage": null,
         "created_at": "2026-10-21T08:00:00Z",
+        "completed_at": null,
         "steps": [
           {
             "key": "intake",
@@ -746,8 +747,7 @@
           "week_wh": 50400.0,
           "month_wh": 291000.0,
           "activity": "restore"
-        },
-        "completed_at": null
+        }
       },
       {
         "film_id": "film-planning",
@@ -787,6 +787,7 @@
         "can_retry": false,
         "retry_stage": null,
         "created_at": "2026-10-21T08:00:00Z",
+        "completed_at": null,
         "steps": [
           {
             "key": "intake",
@@ -863,8 +864,7 @@
         },
         "duration_ms": 120000,
         "energy": null,
-        "live_power": null,
-        "completed_at": null
+        "live_power": null
       },
       {
         "film_id": "film-planning-unknown",
@@ -901,6 +901,7 @@
         "can_retry": false,
         "retry_stage": null,
         "created_at": "2026-10-21T08:00:00Z",
+        "completed_at": null,
         "steps": [
           {
             "key": "intake",
@@ -977,8 +978,7 @@
         },
         "duration_ms": 120000,
         "energy": null,
-        "live_power": null,
-        "completed_at": null
+        "live_power": null
       }
     ],
     "packages": [
@@ -2712,7 +2712,12 @@
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
-            "aliases": []
+            "aliases": [],
+            "alias_ids": [],
+            "library_id": "id-10",
+            "is_missing": false,
+            "film_count": null,
+            "fuzzy": false
           }
         ]
       }
@@ -2737,7 +2742,12 @@
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
-            "aliases": []
+            "aliases": [],
+            "alias_ids": [],
+            "library_id": "id-10",
+            "is_missing": false,
+            "film_count": null,
+            "fuzzy": false
           }
         ]
       }
@@ -2762,7 +2772,12 @@
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
-            "aliases": []
+            "aliases": [],
+            "alias_ids": [],
+            "library_id": "id-10",
+            "is_missing": false,
+            "film_count": null,
+            "fuzzy": false
           }
         ]
       }
@@ -2775,7 +2790,7 @@
       "target_path": null,
       "absent": null,
       "error_code": "offline",
-      "message": "Filmpaw 未运行：Filmpaw 未运行（C:\\Users\\operator\\AppData\\Roaming\\Filmpaw\\workflow-endpoint.json）",
+      "message": "片库不可用：片库尚未启动",
       "candidates": null
     }
   }

@@ -178,7 +178,7 @@ function ControllerForm({ saved, defaultOutput, detection, refresh, fetching, ad
         </Stack>
         <details open={Object.keys(errors).some((k) => k !== "inbox_root" && k !== "data_dir" && k !== "output_dir") || undefined}>
           <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>
-            高级<span style={{ opacity: 0.7 }}>&nbsp;· 端口 {form.worker_api_port} · Filmpaw 默认</span>
+            高级<span style={{ opacity: 0.7 }}>&nbsp;· 端口 {form.worker_api_port}</span>
           </summary>
           <Stack spacing={2} sx={{ mt: 1 }}>
             {form.remote_workers && (

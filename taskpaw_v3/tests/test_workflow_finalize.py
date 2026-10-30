@@ -1,13 +1,14 @@
 """F02-P1 end to end: 确认入库 → archive → receipt → exact cleanup → reclaim (C1–C10).
 
-A real film runs through the real dispatcher up to Miko (fake CLI); Filmpaw is an in-process fake with
-the same wire contract that really copies into a temporary "NAS". The INBOX originals are real files
-whose identities the input manifest records, as intake would.
+A real film runs through the real dispatcher up to Miko (fake CLI); the archive is the real library
+engine over a temporary `library.db`, copying into a temporary "NAS". The INBOX originals are real
+files whose identities the input manifest records, as intake would.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -22,11 +23,11 @@ from taskpaw_v3.tests import test_workflow_scrape_step as scr
 from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_exec_helpers import video
-from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
+from taskpaw_v3.tests.workflow_fake_library import FakeLibrary
 from taskpaw_v3.workflow import file_identity
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.filmpaw_client import FilmpawClient
 from taskpaw_v3.workflow.finalize import ConfirmError, Finalizer
+from taskpaw_v3.workflow.library_store import insert_library
 
 FILM_DIR = "ABC-123"
 
@@ -47,12 +48,11 @@ class World:
         self.tmp = tmp_path
         self.inbox = tmp_path / "inbox"
         self.nas = tmp_path / "nas" / "Actor"
-        self.filmpaw_dir = tmp_path / "Filmpaw"
         self.inbox.mkdir()
         self.nas.mkdir(parents=True)
         self.rt = self.runtime()
         self.film = self._film(extras, plan=plan)
-        self.fake = FakeFilmpaw(self.filmpaw_dir, {"actor": self.nas})
+        self.fake = FakeLibrary(tmp_path / "library", {"actor": self.nas})
 
     def runtime(self):
         """A (re)started runtime whose film came from the INBOX package `pkg`, as intake records it."""
@@ -115,7 +115,7 @@ class World:
         )
 
     def finalizer(self, rt=None) -> Finalizer:
-        return Finalizer(rt or self.rt, self.inbox, FilmpawClient(self.filmpaw_dir))
+        return Finalizer(rt or self.rt, self.inbox, self.fake.archive)
 
     def status(self, stage: str) -> str:
         return ret.status(self.rt, self.film, stage)
@@ -132,6 +132,7 @@ def world(tmp_path):
         yield w
     finally:
         w.rt.close()
+        w.fake.close()
 
 
 def _files(root: Path) -> dict[str, str]:
@@ -177,7 +178,7 @@ def test_manual_confirm_archives_and_cleans_both_scopes(world):
     with world.fake:
         fin = world.finalizer()
         with (
-            patch.object(fin.filmpaw, "archive", wraps=fin.filmpaw.archive) as archive,
+            patch.object(fin.library, "archive", wraps=fin.library.archive) as archive,
             patch.object(world.rt, "evidence", wraps=world.rt.evidence) as evidence,
         ):
             fin.confirm(world.film, target_dir=str(destination))
@@ -318,13 +319,14 @@ def test_download_extras_are_cleaned_with_the_original_never_archived(
         assert world.inbox.is_dir()
     finally:
         world.rt.close()
+        world.fake.close()
 
 
 def test_confirm_refusals_write_nothing(world, tmp_path):
     with pytest.raises(ConfirmError, match="刮削"):
         world.finalizer().confirm(world.film, "actor")
     world.scrape()
-    with pytest.raises(ConfirmError, match="Filmpaw 未运行"):
+    with pytest.raises(ConfirmError, match="片库不可用"):
         world.finalizer().confirm(world.film, "actor")
     (world.nas / FILM_DIR.lower()).mkdir()
     with world.fake:
@@ -347,13 +349,13 @@ def test_lost_response_is_looked_up_never_copied_twice(world):
     assert world.fake.copies == 1
 
 
-def test_filmpaw_down_waits_and_a_restart_continues_the_same_operation(world, tmp_path):
+def test_library_down_waits_and_a_restart_continues_the_same_operation(world, tmp_path):
     world.scrape()
     with world.fake:
         fin = world.finalizer()
         fin.confirm(world.film, "actor")
-    fin.run_once()  # Filmpaw gone: admitted, not submitted
-    assert fin.waiting[world.film] == "等待 Filmpaw 运行"
+    fin.run_once()  # the library is closed: admitted, not submitted
+    assert fin.waiting[world.film] == "等待片库可用"
     assert world.status("archive") == "running"
     world.rt.close()
     world.rt = world.runtime()  # restart: same fixed archive principal (C9)
@@ -363,18 +365,18 @@ def test_filmpaw_down_waits_and_a_restart_continues_the_same_operation(world, tm
     assert world.fake.copies == 1
 
 
-def test_busy_filmpaw_is_retried_and_failure_needs_a_new_confirm(world):
+def test_a_failed_archive_needs_a_new_confirm(world):
     world.scrape()
     with world.fake:
         fin = world.finalizer()
         fin.confirm(world.film, "actor")
-        world.fake.mode = "busy"
-        fin.run_once()
-        assert world.status("archive") == "running" and world.fake.copies == 0
         world.fake.mode = "fail"
-        fin.run_once()  # resubmitted under the same key; Filmpaw fails it
+        fin.run_once()  # submitted; the preflight fails it (no free space)
+        assert world.status("archive") == "running" and world.fake.copies == 0
         fin.run_once()  # the lookup reads the failure
         assert world.status("archive") == "failed"
+        failure = world.rt.store.film_workflow(world.rt.operator, world.film)
+        assert "NAS 可用空间不足" in (failure.archive_operations[-1].error_code or "")
         world.fake.mode = ""
         world.ticks(fin)
         assert world.status("archive") == "failed"  # C8: no automatic retry
@@ -446,7 +448,7 @@ def test_confirm_twice_while_archiving_is_refused(world):
     with world.fake:
         fin = world.finalizer()
         fin.confirm(world.film, "actor")
-    fin.run_once()  # admitted, Filmpaw down
+    fin.run_once()  # admitted, the library closed
     with world.fake:
         with pytest.raises(ConfirmError):
             fin.confirm(world.film, "actor")
@@ -468,6 +470,137 @@ def test_target_replaced_after_confirm_fails_and_a_new_confirm_archives(world):
         world.ticks(fin)
     assert world.status("cleanup_input") == "succeeded"
     assert (world.nas / FILM_DIR).is_dir()
+
+
+# ── the library target (#363: §9.7 encoding, §9.6 candidates, §9.8 cutover) ──
+def _binding_target(world) -> m.TargetIdentity:
+    return world.rt.store.film_workflow(
+        world.rt.operator, world.film
+    ).approval.binding.target
+
+
+def test_a_performer_target_is_encoded_as_a_library_performer(world):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        target = _binding_target(world)
+        native = target.native_identity
+        assert native.scheme == "library_performer"
+        assert native.volume_or_export_id == "actor"
+        assert (
+            target.root_id
+            == native.root_id
+            == str(
+                uuid.uuid5(
+                    uuid.UUID("0b7f3c2e-6f2d-4a8e-9c1d-3e5a7b9d2f41"),
+                    "taskpaw-performer:actor",
+                )
+            )
+        )
+        assert target.export_identity == str(world.nas)
+        assert target.relative_path == FILM_DIR and target.expected_absent
+        st = os.lstat(world.nas)
+        assert native.object_id == json.dumps([str(st.st_dev), str(st.st_ino)])
+        approval = world.rt.store.film_workflow(world.rt.operator, world.film).approval
+        assert approval.binding.actor_ids == (target.root_id,)
+        with patch.object(fin.library, "archive", wraps=fin.library.archive) as call:
+            world.ticks(fin)
+        assert call.call_args.kwargs["performer_id"] == "actor"
+        assert call.call_args.kwargs["target_dir"] is None
+    assert world.status("cleanup_input") == "succeeded"
+
+
+def _filmpaw_era(world, monkeypatch, **native):
+    """Confirm as Filmpaw did: the same target with the old scheme or identity."""
+    real = Finalizer._target
+
+    def old(self, *args, **kwargs):
+        target = real(self, *args, **kwargs)
+        return target.model_copy(
+            update={"native_identity": target.native_identity.model_copy(update=native)}
+        )
+
+    monkeypatch.setattr(Finalizer, "_target", old)
+
+
+def test_an_open_filmpaw_era_archive_fails_once_and_a_new_confirm_archives(
+    world, monkeypatch
+):
+    world.scrape()
+    _filmpaw_era(world, monkeypatch, scheme="export_object_id")
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        monkeypatch.undo()
+        world.ticks(fin)
+        assert world.status("archive") == "failed"
+        wf = world.rt.store.film_workflow(world.rt.operator, world.film)
+        (failed,) = wf.archive_operations
+        assert failed.error_code == "升级前未完成的归档，请重新确认入库"
+        assert world.fake.posts == 0  # never reached the new engine
+        assert "重新确认入库" in fin.waiting[world.film]
+        fin.confirm(world.film, "actor")
+        world.ticks(fin)
+    assert world.status("cleanup_input") == "succeeded"
+    assert _binding_target(world).native_identity.scheme == "library_performer"
+
+
+def test_an_open_filmpaw_era_manual_archive_resubmits_to_the_engine(world, monkeypatch):
+    """§9.8: a manual binding is kind-compatible; its integer identity is the same."""
+    world.scrape()
+    destination = world.tmp / "manual"
+    destination.mkdir()
+    st = os.lstat(destination)
+    _filmpaw_era(world, monkeypatch, object_id=json.dumps([st.st_dev, st.st_ino]))
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, target_dir=str(destination))
+        world.ticks(fin)
+    assert world.status("cleanup_input") == "succeeded"
+    assert (destination / FILM_DIR).is_dir()
+
+
+def test_candidates_come_from_the_library_with_todays_preselection(world, tmp_path):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        only = fin.preflight(world.film)
+        assert only["performer_id"] == "actor" and only["absent"] is True
+        other = tmp_path / "nas2" / "Actor"
+        other.mkdir(parents=True)
+        with world.fake.store.transaction() as conn:
+            library = insert_library(conn, "actor", str(other.parent))
+            conn.execute(
+                "INSERT INTO performers(id, name, name_norm, library_id, folder_name,"
+                " path, first_seen_at, last_seen_at, is_missing)"
+                " VALUES ('second','Actor','actor',?,'Actor',?,'t','t',0)",
+                (library, str(other)),
+            )
+        several = fin.preflight(world.film)
+        assert [i["id"] for i in several["candidates"]["items"]] == ["actor", "second"]
+        assert several["performer_id"] is None and several["target_path"] is None
+        with world.fake.store.transaction() as conn:
+            conn.execute("UPDATE performers SET is_missing=1 WHERE id='second'")
+        again = fin.preflight(world.film)  # include_missing=false
+        assert [i["id"] for i in again["candidates"]["items"]] == ["actor"]
+        assert again["performer_id"] == "actor"
+
+
+def test_preflight_maps_the_refusal_code_not_the_status(world):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        with world.fake.store.transaction() as conn:
+            conn.execute("UPDATE libraries SET role='readonly'")
+        readonly = fin.preflight(world.film, "actor")
+        assert readonly["error_code"] == "permission" and "只读" in readonly["message"]
+        gone = fin.preflight(world.film, "nobody")
+        assert gone["error_code"] == "missing"
+        with pytest.raises(ConfirmError, match="只读"):
+            fin.confirm(world.film, "actor")
+    offline = fin.preflight(world.film, "actor")
+    assert (offline["error_code"], offline["candidates"]) == ("offline", None)
 
 
 def _in_package(world, monkeypatch, siblings):

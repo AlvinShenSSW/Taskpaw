@@ -81,7 +81,6 @@ PARAMS = launch_params(
 TRANSLATE_ERROR = "LLM 超时：翻译服务 120 秒没有响应"
 # Where the temp folders stand in for, as an operator's Windows machine shows it.
 NAS = "\\\\nas-a\\actors"
-FILMPAW = "C:\\Users\\operator\\AppData\\Roaming\\Filmpaw"
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _SHA256 = re.compile(r"\b[0-9a-f]{64}\b")
 _TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)")
@@ -311,7 +310,7 @@ def build(tmp_path: Path) -> dict[str, Any]:
             arriving: "package-arriving",
             rt.identity.worker_id: "worker-local",
         }
-        paths = {world.nas.parent: NAS, world.filmpaw_dir: FILMPAW}
+        paths = {world.nas.parent: NAS}
         stable = Stable(tmp_path, paths, names)
         return stable(
             {

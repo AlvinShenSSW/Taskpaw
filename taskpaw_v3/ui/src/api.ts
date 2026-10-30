@@ -444,9 +444,9 @@ export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
   has_thumb: boolean; aliases: string[];
 }
-// U1 §7.3: the archive target preflight (read-only) and Filmpaw's candidates for the film's NFO
+// U1 §7.3: the archive target preflight (read-only) and the library's candidates for the film's NFO
 // actors. With no explicit target, a sole candidate is checked; `target_path` ends in `film_dir`.
-// `missing`: the chosen performer or directory is gone; `candidates` is null while Filmpaw is offline.
+// `missing`: the chosen performer or directory is gone; `candidates` is null while the library is offline.
 export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate";
 export interface TargetPreflight {
   film_dir: string; performer_id: string | null; target_path: string | null; absent: boolean | null;
@@ -540,7 +540,7 @@ export interface WorkflowSettingsView {
   enabled: boolean; role: WorkflowRole;
   inbox_root: string | null; data_dir: string | null; output_dir?: string | null; ffprobe_path: string | null;
   jasna_exe_path: string | null; whisperjav_exe_path: string | null; ltx_gpu: string;
-  mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null; filmpaw_data_dir: string | null;
+  mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null;
   remote_workers: boolean; worker_api_port: number; staging_dir: string | null; staging_cap_gb: number;
 }
 export interface WorkflowSettingsState {
@@ -685,7 +685,7 @@ function checkUnauthorized(role: ControlRole, res: Response) {
 }
 
 // A non-2xx control response. Keeps the old message (detail text or "path → status")
-// and adds the status so callers can tell e.g. 503 "Filmpaw down" from other errors.
+// and adds the status so callers can tell e.g. 503 "library unavailable" from other errors.
 // POST /control/workflow/plans takes 1–500 items (backend `PlansBody.plans` max_length).
 export const PLAN_BATCH_MAX = 500;
 

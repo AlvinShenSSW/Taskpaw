@@ -168,6 +168,18 @@ def test_get_shows_saved_running_presets_and_no_secret(tmp_path, tools):
     assert LLM_KEY not in response.text and "api_token" not in response.text
 
 
+def test_an_old_yaml_with_the_filmpaw_data_dir_still_loads(tmp_path, tools):
+    """#363: the key is gone from the settings; an older agent.yaml keeps loading
+    and a save from today's UI (which no longer sends it) still works."""
+    world = World(tmp_path, enabled=True, filmpaw_data_dir="C:/Filmpaw", **tools)
+    assert not hasattr(world.config.workflow, "filmpaw_data_dir")
+    body = world.get().json()
+    assert "filmpaw_data_dir" not in body["saved"]
+    assert world.put({"role": "controller", **tools}).status_code == 200
+    refused = world.put({"role": "controller", "filmpaw_data_dir": "C:/Filmpaw"})
+    assert refused.status_code == 422
+
+
 def test_get_role_off_when_disabled(tmp_path):
     world = World(tmp_path)
     assert world.get().json()["saved"]["role"] == "off"

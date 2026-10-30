@@ -20,6 +20,7 @@ from . import workflow_reads as reads
 from .workflow_reads import WorkflowProvider
 
 if TYPE_CHECKING:
+    from taskpaw_v3.workflow.library_archive import LibraryArchive
     from taskpaw_v3.workflow.library_scan import LibraryScanner
     from taskpaw_v3.workflow.library_store import LibraryStore
 
@@ -74,7 +75,7 @@ def etag_matches(header: str | None, etag: str) -> bool:
 
 
 def thumb_response(
-    store: LibraryStore, performer_id: str, if_none_match: str | None
+    store: LibraryStore | LibraryArchive, performer_id: str, if_none_match: str | None
 ) -> Response:
     """A performer's thumbnail with its ETag; 304 when the client has it."""
     found = store.thumb(performer_id)

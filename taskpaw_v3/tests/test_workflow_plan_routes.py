@@ -399,6 +399,9 @@ def test_pause_sets_the_dispatcher_flag(world, host, client):
 
 
 # ── target preflight (§7.3) ──────────────────────────────────────────────
+PERFORMER_FIELDS = ("id", "name", "source_label", "unc_path", "has_thumb", "aliases")
+
+
 @pytest.fixture
 def scraped(tmp_path, probeable_video):
     w = World(tmp_path)
@@ -407,6 +410,7 @@ def scraped(tmp_path, probeable_video):
         yield w
     finally:
         w.rt.close()
+        w.fake.close()
 
 
 def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
@@ -416,6 +420,7 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
     url = f"{BASE}/films/{scraped.film}/target"
     with scraped.fake:
         data = client.get(url, params={"performer_id": "actor"}).json()
+        candidates = data.pop("candidates")
         assert data == {
             "film_dir": FILM_DIR,
             "performer_id": "actor",
@@ -425,19 +430,16 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
             "absent": True,
             "error_code": None,
             "message": None,
-            "candidates": {
-                "query": ["Actor"],
-                "items": [
-                    {
-                        "id": "actor",
-                        "name": "Actor",
-                        "source_label": "NAS",
-                        "unc_path": str(scraped.nas),
-                        "has_thumb": False,
-                        "aliases": [],
-                    }
-                ],
-            },
+        }
+        assert candidates["query"] == ["Actor"]
+        (item,) = candidates["items"]  # today's fields stay (#363 §10)
+        assert {k: item[k] for k in PERFORMER_FIELDS} == {
+            "id": "actor",
+            "name": "Actor",
+            "source_label": "NAS",
+            "unc_path": str(scraped.nas),
+            "has_thumb": False,
+            "aliases": [],
         }
         (scraped.nas / FILM_DIR).mkdir()
         duplicate = client.get(url, params={"performer_id": "actor"}).json()

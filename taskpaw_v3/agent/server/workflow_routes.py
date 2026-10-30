@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from taskpaw_v3.workflow.local_runtime import LocalRuntime
 
 from . import workflow_reads as reads
+from .library_routes import thumb_response
 from .workflow_reads import CodedConflict, WorkflowProvider, _mapped
 from .workflow_reads import off_state as off_state  # retained for callers
 
@@ -311,21 +312,39 @@ def register_workflow_routes(
             return host.finalizer.preflight(film_id, performer_id or None, target_dir)
 
     @app.get("/control/workflow/performers")
-    def workflow_performers(q: str = "") -> dict[str, Any]:
+    def workflow_performers(
+        q: str = "",
+        include_missing: bool = False,
+        library_id: str | None = None,
+        filter: Literal["multi", "alias", "missing", "nothumb"] | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        """The library's performers (§10): `{items, total, page, page_size}`."""
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
         with _mapped():
-            return {"items": host.finalizer.filmpaw.performers(q)}
+            return host.finalizer.library.performers(
+                q,
+                include_missing=include_missing,
+                library_id=library_id,
+                filter=filter,
+                page=page,
+                page_size=page_size,
+            )
 
     @app.get("/control/workflow/performers/{performer_id}/thumb")
-    def workflow_thumb(performer_id: str) -> Response:
+    def workflow_thumb(performer_id: str, request: Request) -> Response:
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
         with _mapped():
-            data, media_type = host.finalizer.filmpaw.thumb(performer_id)
-        return Response(content=data, media_type=media_type)
+            return thumb_response(
+                host.finalizer.library,
+                performer_id,
+                request.headers.get("if-none-match"),
+            )
 
     @app.post("/control/workflow/films/{film_id}/confirm")
     def workflow_confirm(film_id: str, body: ConfirmBody) -> dict[str, str]:

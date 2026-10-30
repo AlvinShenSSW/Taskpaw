@@ -25,7 +25,7 @@ const POLL_MS = 5000;
 // focus back to the title on each keystroke and each poll.
 export const focusOnMount = (el: HTMLElement | null) => { el?.focus({ preventScroll: true }); };
 export const PREFLIGHT_MS = 30000;
-// Each preflight asks Filmpaw and stats the NAS, so at most this many films per poll cycle (IR05).
+// Each preflight searches the library and stats the NAS, so at most this many films per poll cycle (IR05).
 export const PREFLIGHT_MAX = 10;
 
 export type PageKey =

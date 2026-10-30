@@ -1283,7 +1283,7 @@ def _history(
         rows.append(
             {
                 "key": key,
-                "device": "Filmpaw" if key == "archive" else "主控",
+                "device": "片库" if key == "archive" else "主控",
                 "seconds": round(sum(seconds), 1) if seconds else None,
                 "result": result,
             }

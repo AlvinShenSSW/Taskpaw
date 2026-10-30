@@ -30,7 +30,11 @@ def _valid_port(p: int) -> int:
 
 
 class WorkflowSettings(BaseModel):
-    """Media workflow on this controller (T03-P1 C7): off unless explicitly enabled."""
+    """Media workflow on this controller (T03-P1 C7): off unless explicitly enabled.
+
+    Unknown keys are ignored, so an older `agent.yaml` (e.g. with the removed
+    `filmpaw_data_dir`, #363) still loads.
+    """
 
     enabled: bool = False
     inbox_root: Optional[str] = None
@@ -46,8 +50,6 @@ class WorkflowSettings(BaseModel):
     mdcx_python: Optional[str] = None  # python.exe of MDCX304's environment
     mdcx_root: Optional[str] = None  # the MDCX304 checkout
     mdcx_profile: Optional[str] = None  # the user's Miko config.json
-    # F02-P1: where Filmpaw keeps its library (workflow-endpoint.json); default %APPDATA%\Filmpaw.
-    filmpaw_data_dir: Optional[str] = None
     # P2-2 (#293): this machine's part in the multi-machine workflow. A
     # controller serves the worker API on `worker_api_port` only while
     # `remote_workers` is on; a worker runs restore/ASR for its controller.

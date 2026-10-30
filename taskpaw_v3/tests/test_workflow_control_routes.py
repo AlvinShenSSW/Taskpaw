@@ -27,15 +27,9 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
 from taskpaw_v3.tests.test_workflow_image_size import jpeg
 from taskpaw_v3.tests.test_workflow_intake_store import drop
 from taskpaw_v3.tests.test_workflow_store import identity
-from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
 from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.filmpaw_client import (
-    FilmpawClient,
-    FilmpawRefused,
-    FilmpawUnavailable,
-)
 from taskpaw_v3.workflow.local_host import film_policy, retry_failed_stage
 
 AUTH = {"Authorization": "Bearer t"}
@@ -413,54 +407,47 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
     )
 
 
-# ── Filmpaw proxy (U3, D08) ──────────────────────────────────────────────
-def test_performer_search_is_proxied_with_aliases(world, client):
-    world.fake.aliases["actor"] = ["别名一"]
-    world.fake.thumbs["actor"] = b"jpeg bytes"
+# ── performers from the library (U3, D08; #363 §10) ─────────────────────
+def test_performer_search_and_thumbs_are_served_by_the_library(world, client):
+    world.fake.store.add_alias("actor", "别名一")
+    world.fake.set_thumb("actor", b"jpeg bytes")
     with world.fake:
         response = client.get(f"{BASE}/performers", params={"q": "别名"})
         assert response.status_code == 200
-        assert response.json() == {
-            "items": [
-                {
-                    "id": "actor",
-                    "name": "Actor",
-                    "source_label": "NAS",
-                    "unc_path": str(world.nas),
-                    "has_thumb": True,
-                    "aliases": ["别名一"],
-                }
-            ]
+        body = response.json()
+        (item,) = body["items"]
+        assert {k: item[k] for k in ("id", "name", "source_label", "unc_path")} == {
+            "id": "actor",
+            "name": "Actor",
+            "source_label": "NAS",
+            "unc_path": str(world.nas),
         }
-        assert world.fake.searches[-1] == {
-            "q": "别名",
-            "include_missing": "false",
-            "page_size": "50",
-        }
+        assert (item["has_thumb"], item["aliases"]) == (True, ["别名一"])
+        assert (body["total"], body["page"]) == (1, 1)
         thumb = client.get(f"{BASE}/performers/actor/thumb")
         assert (thumb.status_code, thumb.content) == (200, b"jpeg bytes")
         assert thumb.headers["content-type"] == "image/jpeg"
+        again = client.get(
+            f"{BASE}/performers/actor/thumb",
+            headers={"If-None-Match": thumb.headers["etag"]},
+        )
+        assert again.status_code == 304
         assert client.get(f"{BASE}/performers/nobody/thumb").status_code == 404
+        bad = client.get(f"{BASE}/performers", params={"page": 0})
+        assert bad.status_code == 422
     down = client.get(f"{BASE}/performers", params={"q": "a"})
-    assert down.status_code == 503 and "Filmpaw 未运行" in down.json()["detail"]
+    assert down.status_code == 503 and "片库" in down.json()["detail"]
     assert client.get(f"{BASE}/performers/actor/thumb").status_code == 503
 
 
-def test_filmpaw_client_maps_performers_and_raw_thumbs(tmp_path):
-    nas = tmp_path / "nas" / "Actor"
-    nas.mkdir(parents=True)
-    with FakeFilmpaw(tmp_path / "Filmpaw", {"actor": nas}) as fake:
-        fake.thumbs["actor"] = b"\xff\xd8 raw"
-        client = FilmpawClient(tmp_path / "Filmpaw")
-        (item,) = client.performers("act")
-        assert item["aliases"] == [] and item["has_thumb"] is True
-        assert client.performers("zzz") == []
-        assert client.thumb("actor") == (b"\xff\xd8 raw", "image/jpeg")
-        with pytest.raises(FilmpawRefused) as e:
-            client.thumb("nobody")
-        assert e.value.status == 404
-    with pytest.raises(FilmpawUnavailable):
-        client.performers("act")
+def test_performer_search_leaves_out_missing_performers_by_default(world, client):
+    with world.fake.store.transaction() as conn:
+        conn.execute("UPDATE performers SET is_missing=1 WHERE id='actor'")
+    with world.fake:
+        url = f"{BASE}/performers"
+        assert client.get(url, params={"q": "actor"}).json()["items"] == []
+        shown = client.get(url, params={"q": "actor", "include_missing": "true"})
+        assert [i["id"] for i in shown.json()["items"]] == ["actor"]
 
 
 # ── confirm (U4, D05) ────────────────────────────────────────────────────
@@ -506,12 +493,12 @@ def test_confirm_once_then_refusals_are_409_with_the_reason(world, host, client)
         assert ok.status_code == 200 and set(ok.json()) == {"approval_id"}
     row = _row(client, world.film)
     assert (row["group"], row["can_confirm"]) == ("archiving", False)
-    host.finalizer.run_once()  # admitted while Filmpaw is down
+    host.finalizer.run_once()  # admitted while the library is closed
     again = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
     )
     assert again.status_code == 409 and "已在归档" in again.json()["detail"]
-    assert _row(client, world.film)["note"] == "等待 Filmpaw 运行"
+    assert _row(client, world.film)["note"] == "等待片库可用"
     assert client.post(f"{BASE}/films/{world.film}/confirm", json={}).status_code == 422
 
 

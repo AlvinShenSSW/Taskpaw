@@ -77,13 +77,16 @@ _V1 = (
     "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)",
     """CREATE TABLE archive_tasks (
         operation_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE,
         payload_hash TEXT NOT NULL,
         payload_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        phase TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN
+            ('queued','running','completed','failed','needs_review')),
+        phase TEXT NOT NULL CHECK(phase IN
+            ('queued','preflight','copying','verifying','committing','finished')),
         total_bytes INTEGER NOT NULL DEFAULT 0,
         progress_bytes INTEGER NOT NULL DEFAULT 0,
-        current_file TEXT,
+        verified_bytes INTEGER NOT NULL DEFAULT 0,
         targets_json TEXT NOT NULL DEFAULT '[]',
         message TEXT,
         receipt_json TEXT,

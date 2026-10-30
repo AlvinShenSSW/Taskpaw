@@ -1,7 +1,7 @@
 """Native intake/publication through archive and exact cleanup on owned fixtures.
 
 The intake helper and ffprobe are real. Restore and Miko are existing test
-adapters; Filmpaw uses the in-process contract fake and a temporary NAS directory.
+adapters; the archive is the real library engine over a temporary NAS directory.
 """
 
 import os
@@ -19,10 +19,9 @@ from taskpaw_v3.tests.test_workflow_films import STAGES
 from taskpaw_v3.tests.test_workflow_finalize import _files
 from taskpaw_v3.tests.test_workflow_local_dispatch import plan_film
 from taskpaw_v3.tests.test_workflow_media_facts import profile
-from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
+from taskpaw_v3.tests.workflow_fake_library import FakeLibrary
 from taskpaw_v3.workflow import file_identity
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.filmpaw_client import FilmpawClient
 from taskpaw_v3.workflow.finalize import Finalizer
 from taskpaw_v3.workflow.intake import IntakeService
 from taskpaw_v3.workflow.intake_files import inspect_root
@@ -237,8 +236,8 @@ def test_native_linked_archive_and_readonly_cleanup_preserve_other_names(
     os.link(source_video, canary)
     expected_canary = canary.read_bytes()
     source_video.chmod(0o444)  # Attribute belongs to the shared NTFS file.
-    nas, filmpaw_dir = world.tmp / "nas", world.tmp / "filmpaw"
-    nas.mkdir()
+    nas = world.tmp / "nas" / "Actor"
+    nas.mkdir(parents=True)
     deleted = []
     real_delete = file_identity.delete_exact
 
@@ -253,8 +252,9 @@ def test_native_linked_archive_and_readonly_cleanup_preserve_other_names(
         return result
 
     monkeypatch.setattr(file_identity, "delete_exact", checked_delete)
-    with FakeFilmpaw(filmpaw_dir, {"actor": nas}) as fake:
-        finalizer = Finalizer(rt, world.inbox, FilmpawClient(filmpaw_dir))
+    fake = FakeLibrary(world.tmp / "library", {"actor": nas})
+    with fake:
+        finalizer = Finalizer(rt, world.inbox, fake.archive)
         approval_id = finalizer.confirm(world.film, "actor")
         assert world.service.scan_once(
             trigger="notification", batch=DirtyBatch(("Actor/Film/movie.mp4",), False)
@@ -264,6 +264,7 @@ def test_native_linked_archive_and_readonly_cleanup_preserve_other_names(
         for _ in range(4):
             finalizer.run_once()
         assert fake.copies == 1
+    fake.close()
     for stage in ("archive", "cleanup_input", "cleanup_workcopy"):
         assert ret.status(rt, world.film, stage) == "succeeded", finalizer.waiting
     assert source_video in deleted and final_video in deleted

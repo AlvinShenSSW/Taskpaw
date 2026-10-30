@@ -1500,7 +1500,7 @@ describe("deferred Codex r6 P2s", () => {
     const films = [...FILMS.filter((f) => f.group !== "confirm"), ...Array.from({ length: 12 }, (_, i) => confirmRow(i))];
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
     const target = vi.spyOn(api, "workflowTarget").mockImplementation(async (id) =>
-      preflight(id.toUpperCase(), null, { error_code: "offline", message: "Filmpaw 未运行" }));
+      preflight(id.toUpperCase(), null, { error_code: "offline", message: "片库不可用" }));
     wrap(<MediaWorkspace />);
     fireEvent.click(within(rail()).getByRole("button", { name: /^异常/ }));
     await screen.findByRole("heading", { level: 1, name: "异常" });
