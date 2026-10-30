@@ -212,19 +212,19 @@ describe("片库与规则 · NAS 片库", () => {
 });
 
 describe("片库与规则 · 演员", () => {
-  it("lists one row per name with every location, 3:4 thumbnails and filters", async () => {
+  it("lists one card per name with every location, 3:4 thumbnails and filters", async () => {
     const m = mockLibrary();
     mount(<LibraryPage />);
     await tab("演员");
-    const haru = await screen.findByRole("row", { name: "Haru 详情" });
+    const haru = await screen.findByRole("button", { name: "Haru 详情" });
     expect(within(haru).getByText("别名：ハル")).toBeInTheDocument();
     expect(within(haru).getByText("54")).toBeInTheDocument();  // 42 + 12 部
     expect(within(haru).getByText("A").closest(".loc-chip")).toHaveTextContent("A42 部");
     expect(within(haru).getByText("B").closest(".loc-chip")).toHaveTextContent("B12 部 · 离线");
-    expect((await within(haru).findByRole("img", { name: "Haru 的 folder.jpg" })).closest(".avatar")).not.toHaveClass("lg");
-    const mio = screen.getByRole("row", { name: "Mio 详情" });
+    expect((await within(haru).findByRole("img", { name: "Haru 的 folder.jpg" })).closest(".avatar")).toHaveClass("lg");
+    const mio = screen.getByRole("button", { name: "Mio 详情" });
     expect(within(mio).getByRole("img", { name: "Mio：没有头像" })).toHaveClass("none");
-    expect(within(screen.getByRole("row", { name: "Nagi 详情" })).getByText(/已缺失/)).toBeInTheDocument();
+    expect(within(screen.getByRole("button", { name: "Nagi 详情" })).getByText(/已缺失/)).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /^有别名\s*3$/ })).toBeInTheDocument();  // counts from `total`
 
     fireEvent.click(screen.getByRole("button", { name: /^有别名/ }));
@@ -235,7 +235,7 @@ describe("片库与规则 · 演员", () => {
     await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ q: "ハル" })));
   });
 
-  it("opens the drawer for the location that supplies the row thumbnail", async () => {
+  it("opens the drawer for the location that supplies the card thumbnail", async () => {
     const m = mockLibrary();
     const bare = performer({ id: "p-kei-a", name: "Kei", library_id: "lib-a", has_thumb: false });
     const shot = performer({ id: "p-kei-b", name: "Kei", library_id: "lib-b" });
@@ -243,7 +243,7 @@ describe("片库与规则 · 演员", () => {
     m.performer.mockResolvedValue({ ...shot, locations: [bare, shot], receipts: [] });
     mount(<LibraryPage />);
     await tab("演员");
-    fireEvent.click(await screen.findByRole("row", { name: "Kei 详情" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Kei 详情" }));
     const drawer = await screen.findByRole("dialog", { name: "演员详情" });
     await waitFor(() => expect(m.performer).toHaveBeenCalledWith("p-kei-b"));
     expect((await within(drawer).findByRole("img", { name: "Kei 的 folder.jpg" })).closest(".avatar")).toHaveClass("lg");
@@ -253,7 +253,7 @@ describe("片库与规则 · 演员", () => {
     const m = mockLibrary();
     const ws = mount(<LibraryPage />);
     await tab("演员");
-    fireEvent.click(await screen.findByRole("row", { name: "Haru 详情" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Haru 详情" }));
     const drawer = await screen.findByRole("dialog", { name: "演员详情" });
     await waitFor(() => expect(m.performer).toHaveBeenCalledWith("p-haru-a"));
     expect((await within(drawer).findByRole("img", { name: "Haru 的 folder.jpg" })).closest(".avatar")).toHaveClass("lg");
@@ -358,18 +358,29 @@ describe("片库与规则 · 归档规则 · 片库优先级", () => {
 });
 
 describe("L3 review fixes", () => {
-  it("CX3-1/CX3-2: one row per name group (name_norm), whatever the display names", async () => {
+  it("CX3-1/CX3-2: one card per name group (name_norm), whatever the display names", async () => {
     const m = mockLibrary();
     const trad = performer({ id: "p-z1", name: "張小雨", name_norm: "张小雨", library_id: "lib-a", film_count: 3 });
     const simp = performer({ id: "p-z2", name: "张小雨", name_norm: "张小雨", library_id: "lib-b", film_count: 4 });
     m.performers.mockResolvedValue({ items: [trad, simp], total: 1, page: 1, page_size: 50 });
     mount(<LibraryPage />);
     await tab("演员");
-    const row = await screen.findByRole("row", { name: "張小雨 详情" });
+    const row = await screen.findByRole("button", { name: "張小雨 详情" });
     expect(row.querySelectorAll(".loc-chip")).toHaveLength(2);
     expect(within(row).getByText("7")).toBeInTheDocument();
-    expect(screen.queryByRole("row", { name: "张小雨 详情" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "张小雨 详情" })).toBeNull();
     expect(screen.getByText("显示 1 / 1 位")).toBeInTheDocument();
+  });
+
+  it("lists a card's locations in library-letter order, whatever order the page returned", async () => {
+    const m = mockLibrary();
+    const inB = performer({ id: "p-ren-b", name: "Ren", library_id: "lib-b", film_count: 2 });
+    const inA = performer({ id: "p-ren-a", name: "Ren", library_id: "lib-a", film_count: 5 });
+    m.performers.mockResolvedValue({ items: [inB, inA], total: 1, page: 1, page_size: 50 });
+    mount(<LibraryPage />);
+    await tab("演员");
+    const card = await screen.findByRole("button", { name: "Ren 详情" });
+    expect([...card.querySelectorAll(".loc-chip b")].map((b) => b.textContent)).toEqual(["A", "B"]);
   });
 
   it("CX3-1: the 演员 listing asks the route for whole name groups", async () => {
@@ -404,7 +415,7 @@ describe("L3 review fixes", () => {
       const m = mockLibrary();
       mount(<LibraryPage />);
       await tab("演员");
-      const haru = await screen.findByRole("row", { name: "Haru 详情" });
+      const haru = await screen.findByRole("button", { name: "Haru 详情" });
       await within(haru).findByRole("img", { name: "Haru 的 folder.jpg" });
       const reads = [vi.mocked(api.libraries), m.performers, vi.mocked(api.image)].map((f) => f.mock.calls.length);
       // idle before and after: only the new result tells that a scan finished
@@ -464,7 +475,7 @@ describe("L3 review fixes", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(m.performers).toHaveBeenCalledWith(expect.objectContaining({ page: 3 })));
     await waitFor(() => expect(m.performers).toHaveBeenLastCalledWith(expect.objectContaining({ page: 1 })));
-    expect(await screen.findByRole("row", { name: "Haru 详情" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Haru 详情" })).toBeInTheDocument();
   });
 });
 

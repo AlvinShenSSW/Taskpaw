@@ -324,13 +324,21 @@ export const MEDIA_CSS = `
 .mw table.grid tbody tr[tabindex]:hover{background:#ffffff05}
 .mw table.grid tbody tr:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 .mw table.grid tr:last-child td{border-bottom:0}
-.mw .who{display:flex;align-items:center;gap:12px;min-width:0}
 .mw .avatar{width:54px;height:72px;border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;flex:none;overflow:hidden;border:1px solid #ffffff1a;text-align:center;background:#1c2b43}
 .mw .avatar img{width:100%;height:100%;object-fit:cover;display:block}
-.mw .avatar.lg{width:144px;height:192px;border-radius:12px}
+.mw .avatar.lg{width:240px;height:320px;border-radius:12px}
 .mw .avatar.none{color:#8fa3bb;border:1px dashed #3b4f6a}
 .mw .avatar span{display:none;font:500 11px/1.4 var(--sans);padding:0 8px}
 .mw .avatar.lg span{display:block}
+.mw .actor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,430px),1fr));gap:16px}
+.mw .actor-card{display:flex;gap:18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(170deg,var(--surface),var(--low));color:inherit;text-align:left;cursor:pointer;min-width:0;transition:border-color .16s,background .16s}
+.mw .actor-card:hover{border-color:#3b5576;background:linear-gradient(170deg,#1a2a43,var(--low))}
+.mw .actor-card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.mw .actor-info{display:flex;flex-direction:column;gap:8px;min-width:0;flex:1;padding-top:4px}
+.mw .actor-name{font-size:18px;line-height:1.3;color:var(--text);overflow-wrap:anywhere}
+.mw .actor-card .aliases{font-size:12px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.mw .actor-films{margin-top:auto;font-size:12px;color:var(--muted)}
+.mw .actor-films b{font-size:24px;font-weight:600;color:var(--text);margin-right:2px}
 .mw .aliases{font-size:11px;color:var(--muted);margin-top:2px}
 .mw .loc-chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:5px;font-size:11px;border:1px solid #344861;background:#16233a;color:#c8d7e9;white-space:nowrap}
 .mw .loc-chip b{font:600 11px var(--mono);color:#e6eef8}
@@ -392,7 +400,7 @@ export const MEDIA_CSS = `
 .mw .run-list .mark .icon{width:13px;height:13px}
 .mw.mw-modal.narrow{width:min(560px,calc(100% - 32px))}
 @media(max-width:1250px){.mw .lib-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mw .rules-grid{grid-template-columns:1fr}}
-@media(max-width:600px){.mw .lib-grid,.mw .form-grid{grid-template-columns:1fr}}
+@media(max-width:600px){.mw .lib-grid,.mw .form-grid{grid-template-columns:1fr}.mw .actor-card{gap:14px;padding:12px}.mw .avatar.lg{width:132px;height:176px}.mw .actor-name{font-size:16px}}
 
 @media(min-width:1600px){.mw .content{padding:36px}.mw .queue-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:1200px){.mw .two-col{grid-template-columns:minmax(0,1.4fr) minmax(270px,1fr);gap:16px}.mw .queue-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.mw .review-card{padding:17px;gap:13px}.mw .cover.review{width:66px;height:88px}.mw .stat{padding:15px}.mw .film-row{padding:16px}.mw .panel-head{padding:16px}.mw .review-peek{padding:16px}.mw .pending-card{column-gap:13px}}

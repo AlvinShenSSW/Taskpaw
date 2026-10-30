@@ -17,7 +17,7 @@ export function Toggle({ checked, onChange, label, labelledBy, disabled }: {
   );
 }
 
-// D5: the actor's `folder.jpg` (an authenticated image), portrait 3:4 — 54×72 in lists, 144×192 large.
+// D5: the actor's `folder.jpg` (an authenticated image), portrait 3:4 — 54×72 in lists, 240×320 large (an actor card, the drawer).
 export function ActorThumb({ id, hasThumb, name, large = false }: { id: string; hasThumb: boolean; name: string; large?: boolean }) {
   const image = useQuery({
     queryKey: [...THUMB_KEY, id], queryFn: () => api.image(api.thumbPath(id)),
