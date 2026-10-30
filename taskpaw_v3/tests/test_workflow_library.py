@@ -1175,6 +1175,19 @@ def test_import_preview_import_and_reimport(store, tmp_path):
     assert (db.read_bytes(), os.stat(db).st_mtime_ns) == before
 
 
+def test_the_preview_marks_a_root_nested_in_an_earlier_one_of_the_same_import(
+    store, tmp_path
+):
+    """Release E2E D3: the import skips it, so the preview must not say new."""
+    outer = normalize_path(str(tmp_path / "nas"))
+    inner = normalize_path(str(tmp_path / "nas" / "sub"))
+    db = fake_filmpaw(tmp_path, [(outer, "A", 1), (inner, "B", 1)])
+    view = library_import.preview(store, str(db))
+    assert [r["status"] for r in view["roots"]] == ["new", "overlap"]
+    done = library_import.import_filmpaw(store, str(db))
+    assert len(done["added"]) == 1 and len(done["skipped"]) == 1
+
+
 def test_import_defaults_to_appdata_filmpaw(store, tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     assert library_import.default_filmpaw_db() == tmp_path / "Filmpaw" / "library.db"

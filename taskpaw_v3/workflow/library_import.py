@@ -59,14 +59,27 @@ def read_filmpaw(path: str | None) -> dict[str, Any]:
     return {"path": str(db), "roots": roots, "aliases": aliases}
 
 
+def _conflict(keys: list[str], key: str) -> str | None:
+    """`root_conflict` against roots added earlier in the same import."""
+    for other in keys:
+        if other == key:
+            return "exists"
+        if other.startswith(key) or key.startswith(other):
+            return "overlap"
+    return None
+
+
 def preview(store: LibraryStore, path: str | None) -> dict[str, Any]:
     """Each root as `new`, `exists` or `overlap`, and how many aliases are new."""
     source = read_filmpaw(path)
     with store.reading() as conn:
-        roots = [
-            {**root, "status": root_conflict(conn, path_key(root["path"])) or "new"}
-            for root in source["roots"]
-        ]
+        roots, adding = [], []  # adding: the roots this import would add, in order
+        for root in source["roots"]:
+            key = path_key(root["path"])
+            status = root_conflict(conn, key) or _conflict(adding, key) or "new"
+            if status == "new":
+                adding.append(key)
+            roots.append({**root, "status": status})
         known = {
             (row["name_norm"], row["alias_norm"])
             for row in conn.execute("SELECT name_norm, alias_norm FROM aliases")
