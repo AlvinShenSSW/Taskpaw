@@ -112,6 +112,10 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const [submittedAt, setSubmittedAt] = useState(0);
   // the targets that 「确认入库」 sent, for the receipt (the film detail names the first one only)
   const [bound, setBound] = useState<Submitted | null>(null);
+  // CX5-3/CX5-5: back in review after a failed new-actor archive, the rules' preselection is not taken
+  // (it follows the NFO names and library priority, not the directory just made); the search is
+  // prefilled with that name so its performer can be chosen explicitly.
+  const [retryName, setRetryName] = useState<string | null>(null);
   const actor = film?.actors[0] ?? "";
   // Candidates: the preflight's (the library searched for every NFO actor); while it is offline
   // (null) or the preflight failed, a manual search is offered instead.
@@ -142,7 +146,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     const hit = id == null ? undefined : candidates.find((p) => String(p.id) === String(id));
     return hit ? { kind: "performer", performer: hit, rev: final } : null;
   }, [candidates, target.data, final]);
-  const sel = choice && (choice.kind !== "performer" || choice.rev === final) ? choice : auto;
+  const sel = choice && (choice.kind !== "performer" || choice.rev === final) ? choice : retryName !== null ? null : auto;
   const selected = sel?.kind === "performer" ? sel.performer : null;
   const isNew = sel?.kind === "new_actor";
   const isManual = sel?.kind === "manual";
@@ -228,16 +232,19 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const archiveStatus = film?.archive.status ?? null;
   const reopened = phase === "submitted" && film !== undefined && detail.dataUpdatedAt > submittedAt
     && (archiveStatus === "unknown" || (archiveStatus === "failed" && film.can_confirm));
-  // CX5-2: back in review the targets are asked again — after a failed second copy the new actor
-  // directory exists (the preflight then selects its performer, archived), so a new-actor choice
-  // made before is dropped instead of being sent again.
+  // CX5-2: back in review the targets are asked again. After a new-actor archive the directory may
+  // exist (its first copy archived), so the new-actor choice is never sent again; nothing is
+  // preselected and the search shows the created performer for an explicit choice (CX5-3/CX5-5).
+  // A second target the operator chose is kept.
   useEffect(() => {
     if (!reopened) return;
     setPhase("review");
     confirm.reset();
-    if (choice?.kind === "new_actor") { setChoice(null); setNewActor(null); }
+    const made = bound?.choice.kind === "new_actor" ? bound.newActor?.name ?? "" : null;
+    if (made !== null) { setChoice(null); setNewActor(null); }
+    setRetryName(made);
     void qc.invalidateQueries({ queryKey: ["mediaTarget", filmId] });
-  }, [reopened, confirm, choice, qc, filmId]);
+  }, [reopened, confirm, bound, qc, filmId]);
 
   if (detail.isLoading || !film) {
     return (
@@ -314,7 +321,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
             <p>{film.marks.chinese_subtitles ? "修复成品 · 中文字幕已核对" : "修复成品 · 无语音，不加中文字幕标识"}</p>
           </div>
         </div>
-        <Candidates candidates={candidates} selected={selected} actor={actor} locked={locked}
+        <Candidates key={retryName ?? ""} search={retryName} candidates={candidates} selected={selected} actor={actor} locked={locked}
           onSelect={(p) => choose({ kind: "performer", performer: p, rev: final })}
           newActor={target.data?.new_actor ? { chosen: isNew, onSelect: () => choose({ kind: "new_actor" }) } : null} />
         {isNew && (
@@ -429,13 +436,14 @@ function targetCheck(data: TargetPreflight | undefined, error: unknown): string 
   return "";
 }
 
-function Candidates({ candidates, selected, actor, locked, onSelect, newActor }: {
-  candidates: Performer[] | null; selected: Performer | null; actor: string; locked: boolean; onSelect: (p: Performer) => void;
+function Candidates({ search, candidates, selected, actor, locked, onSelect, newActor }: {
+  search: string | null; candidates: Performer[] | null; selected: Performer | null; actor: string; locked: boolean;
+  onSelect: (p: Performer) => void;
   newActor: { chosen: boolean; onSelect: () => void } | null;
 }) {
   // CX5-4: the search is always offered (the preview's 搜索已有演员或别名); with no candidate it starts
   // from the NFO actor. Its results join the candidates and never change the preselection.
-  const [typed, setTyped] = useState<string | null>(null);
+  const [typed, setTyped] = useState<string | null>(search);
   const manual = candidates !== null && candidates.length === 0;
   const text = typed ?? (manual ? actor : "");
   const [query, setQuery] = useState("");

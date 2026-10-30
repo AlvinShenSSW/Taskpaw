@@ -2080,31 +2080,35 @@ describe("待确认 dialog targets (#366)", () => {
     await waitFor(() => expect(confirm).toHaveBeenCalledWith("abf-406", "p-far"));
   });
 
-  it("CX5-2: after a failed second copy the created actor is preselected (archived), not created again", async () => {
+  // A failed new-actor archive (first copy committed, second failed) brings the review back.
+  const failAfterConfirm = (m: ReturnType<typeof mockApi>, state: { after: boolean }) => {
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (state.after && id === "abf-406"
+      ? detail(id, { can_confirm: true, archive: { status: "failed", error: "第二份复制失败", target_path: null, manual: false } })
+      : detail(id)));
+    m.confirm.mockImplementation(async () => { state.after = true; return { approval_id: "a1" }; });
+  };
+
+  it("CX5-2/CX5-5: after a failed new-actor archive nothing is preselected; the search shows the created actor", async () => {
     const m = mockApi();
     vi.spyOn(api, "libraries").mockResolvedValue(LIBS);
-    vi.spyOn(api, "performers").mockResolvedValue({ items: [] });
-    let after = false;
+    const state = { after: false };
     const NEW_PATH = "\\\\nas-1\\films\\演员新月\\ABF-406";
     const created = { ...performer(1, "演员新月", "NAS-1"), id: "p-new", unc_path: "\\\\nas-1\\films\\演员新月", role: "archive" as const };
-    // before: no actor in the library; after the archive made the directory (and its performer row)
-    // and failed on the second copy, the preflight selects that performer and reports it archived
+    // the created name differs from the NFO actor (演员星河): the NFO search does not find it
+    vi.spyOn(api, "performers").mockImplementation(async (q) => ({ items: state.after && q === "演员新月" ? [created] : [] }));
     vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen, _dir, other) => {
       if (id !== "abf-406") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
-      const base = preflight("ABF-406", after ? [created] : [], { new_actor: { library_id: LIB_A.id, name: "演员新月" } });
+      const base = preflight("ABF-406", [], { new_actor: { library_id: LIB_A.id, name: "演员新月" } });
       if (other?.library_id) {
-        return after ? { ...base, error_code: "actor_exists" as const, message: "已有同名演员目录：演员新月" }
+        return state.after ? { ...base, error_code: "actor_exists" as const, message: "已有同名演员目录：演员新月" }
           : { ...base, target_path: NEW_PATH, absent: true, archived: false };
       }
-      if (after && (chosen === undefined || String(chosen) === "p-new")) {
+      if (state.after && String(chosen) === "p-new") {
         return { ...base, performer_id: "p-new", target_path: NEW_PATH, absent: false, archived: true };
       }
       return base;
     });
-    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
-      ? detail(id, { can_confirm: true, archive: { status: "failed", error: "第二份复制失败", target_path: null, manual: false } })
-      : detail(id)));
-    m.confirm.mockImplementation(async () => { after = true; return { approval_id: "a1" }; });
+    failAfterConfirm(m, state);
     wrap(<MediaWorkspace />);
     const dialog = await openReview();
     fireEvent.click(await within(dialog).findByRole("button", { name: /新建演员目录/ }));
@@ -2115,11 +2119,63 @@ describe("待确认 dialog targets (#366)", () => {
     }));
     const back = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
     expect(await within(back).findByText("上次入库未完成：第二份复制失败。可重新确认入库。")).toBeInTheDocument();
-    await waitFor(() => expect(within(back).getByRole("button", { name: /演员新月/ })).toHaveAttribute("aria-pressed", "true"));
+    expect(within(back).getByRole("searchbox", { name: "搜索已有演员或别名" })).toHaveValue("演员新月");
+    const pick = await within(back).findByRole("button", { name: /演员新月/ });
+    expect(pick).toHaveAttribute("aria-pressed", "false");
+    expect(within(back).getByRole("button", { name: /新建演员目录/ })).toHaveAttribute("aria-pressed", "false");
+    expect(within(back).getByText("请选择演员与目标路径。")).toBeInTheDocument();
+    expect(confirmButton(back)).toBeDisabled();
+    fireEvent.click(pick);
     expect(await within(back).findByText("已入库，本次只核对，不再复制")).toBeInTheDocument();
     await waitFor(() => expect(confirmButton(back)).toBeEnabled());
     fireEvent.click(confirmButton(back));
     await waitFor(() => expect(m.confirm).toHaveBeenLastCalledWith("abf-406", "p-new"));
+  });
+
+  it("CX5-3: after a failed new-actor archive a higher-priority location of that actor is not preselected", async () => {
+    const m = mockApi();
+    const LIB_C = { ...LIB_A, id: "lib-c", label: "新库", path: "\\\\nas-3\\new\\", position: 3 };
+    vi.spyOn(api, "libraries").mockResolvedValue({ items: [LIB_A, LIB_C, CAT], db_path: "library.db" });
+    const state = { after: false };
+    const C_PATH = "\\\\nas-3\\new\\演员星河\\ABF-406";
+    const high = { ...performer(1, "演员星河", "NAS-A"), role: "archive" as const };
+    const made = { ...performer(9, "演员星河", "新库"), id: "p-c", unc_path: "\\\\nas-3\\new\\演员星河", role: "archive" as const };
+    const found = () => (state.after ? [high, made] : [high]);
+    vi.spyOn(api, "performers").mockImplementation(async (q) => ({ items: q === "演员星河" ? found() : [] }));
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen, _dir, other) => {
+      if (id !== "abf-406") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+      const base = preflight("ABF-406", found(), { new_actor: { library_id: LIB_A.id, name: "演员星河" } });
+      if (other?.library_id) {
+        return !state.after && other.library_id === "lib-c" ? { ...base, target_path: C_PATH, absent: true, archived: false }
+          : { ...base, error_code: "actor_exists" as const, message: "已有同名演员目录：演员星河" };
+      }
+      if (String(chosen) === "p-c") return { ...base, performer_id: "p-c", target_path: C_PATH, absent: false, archived: true };
+      // the rules prefer the higher-priority library's location
+      return { ...base, performer_id: "1", target_path: STAR, absent: true, archived: false };
+    });
+    failAfterConfirm(m, state);
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview();
+    fireEvent.click(await within(dialog).findByRole("button", { name: /新建演员目录/ }));
+    fireEvent.change(within(dialog).getByLabelText(/^放到/), { target: { value: "lib-c" } });
+    expect(await within(dialog).findByText("新库里没有同名目录，可以新建。名字也会记为该演员的正式名，下次直接匹配。")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(dialog)).toBeEnabled());
+    fireEvent.click(confirmButton(dialog));
+    await waitFor(() => expect(m.confirm).toHaveBeenCalledWith("abf-406", undefined, undefined, {
+      new_actor: { library_id: "lib-c", name: "演员星河" },
+    }));
+    const back = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
+    expect(await within(back).findByText("上次入库未完成：第二份复制失败。可重新确认入库。")).toBeInTheDocument();
+    const group = within(back).getByRole("group", { name: "演员与目标候选" });
+    const pick = await within(group).findByRole("button", { name: /新库/ });
+    await waitFor(() => expect(within(group).getAllByRole("button", { name: /演员星河/ })).toHaveLength(2));
+    within(group).getAllByRole("button").forEach((b) => expect(b).toHaveAttribute("aria-pressed", "false"));
+    expect(confirmButton(back)).toBeDisabled();
+    fireEvent.click(pick);
+    expect(await within(back).findByText("已入库，本次只核对，不再复制")).toBeInTheDocument();
+    await waitFor(() => expect(confirmButton(back)).toBeEnabled());
+    fireEvent.click(confirmButton(back));
+    await waitFor(() => expect(m.confirm).toHaveBeenLastCalledWith("abf-406", "p-c"));
   });
 
   it("first run: 待确认 says there is no library and links to 片库与规则", async () => {
