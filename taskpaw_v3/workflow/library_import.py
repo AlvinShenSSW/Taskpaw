@@ -73,7 +73,8 @@ def preview(store: LibraryStore, path: str | None) -> dict[str, Any]:
     """Each root as `new`, `exists` or `overlap`, and how many aliases are new."""
     source = read_filmpaw(path)
     with store.reading() as conn:
-        roots, adding = [], []  # adding: the roots this import would add, in order
+        roots: list[dict[str, Any]] = []
+        adding: list[str] = []  # the roots this import would add, in order
         for root in source["roots"]:
             key = path_key(root["path"])
             status = root_conflict(conn, key) or _conflict(adding, key) or "new"
