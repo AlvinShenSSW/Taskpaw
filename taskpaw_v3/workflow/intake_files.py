@@ -23,9 +23,22 @@ from .models import NativeIdentity
 
 
 class IntakeFileError(OSError):
-    def __init__(self, code: str):
+    """`path`: the package-relative member the failure is about, when one is."""
+
+    def __init__(self, code: str, path: str | None = None):
         self.code = code
+        self.path = path
         super().__init__(code)
+
+
+def _metadata_stream(name: str, size: int) -> bool:
+    """Streams Windows writes on its own, with no film data: Explorer's 0-byte
+    Thumbs.db `:encryptable` marker and a download's Mark of the Web. Any other
+    alternate stream (a non-empty `:encryptable` too) is still refused."""
+    name = name.casefold()
+    return name in ("::$data", ":zone.identifier:$data") or (
+        name == ":encryptable:$data" and size == 0
+    )
 
 
 class _Basic(ctypes.Structure):
@@ -290,7 +303,7 @@ class WindowsFiles:
             self.check(False)
         try:
             while True:
-                if value.name != "::$DATA":
+                if not _metadata_stream(value.name, value.size):
                     raise IntakeFileError("alternate_stream")
                 if not self.kernel.FindNextStreamW(handle, ctypes.byref(value)):
                     if _last_error() != 38:
@@ -475,11 +488,11 @@ class HeldPackage:
         names: set[str] = set()
         for child in children:
             _parts(child.name)
-            if child.name.casefold() in names:
-                raise IntakeFileError("case_conflict")
-            names.add(child.name.casefold())
             parts = (*parents, child.name)
             relative = "/".join(parts)
+            if child.name.casefold() in names:
+                raise IntakeFileError("case_conflict", relative)
+            names.add(child.name.casefold())
             if (
                 len(parts) > self.policy.max_depth
                 or len(self.entries) >= self.policy.max_members
@@ -489,11 +502,15 @@ class HeldPackage:
             if not retain and relative not in self.entries:
                 raise IntakeFileError("source_changed")
             directory = child.is_dir(follow_symlinks=False)
-            entry = (
-                self._holds.acquire(Path(child.path), relative, directory=directory)
-                if retain
-                else self.entries[relative]
-            )
+            try:
+                entry = (
+                    self._holds.acquire(Path(child.path), relative, directory=directory)
+                    if retain
+                    else self.entries[relative]
+                )
+            except IntakeFileError as exc:
+                exc.path = exc.path or relative
+                raise
             if retain:
                 self.entries[relative] = entry
             found.add(relative)

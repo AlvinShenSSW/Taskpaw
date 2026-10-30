@@ -141,11 +141,33 @@ def test_extra_stream_is_rejected_without_modifying_source(package):
     stream = str(directory / "movie.mp4") + ":side-data"
     with open(stream, "wb") as writer:
         writer.write(b"owned alternate stream")
-    with pytest.raises(files.IntakeFileError, match="alternate_stream"):
+    with pytest.raises(files.IntakeFileError, match="alternate_stream") as raised:
         with held(package):
             pytest.fail("must retain and report source")
+    assert raised.value.path == "movie.mp4"  # the operator is told which file
     with open(stream, "rb") as reader:
         assert reader.read() == b"owned alternate stream"
+
+
+def test_windows_metadata_streams_are_not_film_data(package):
+    """Explorer's 0-byte Thumbs.db `:encryptable` and the Mark of the Web are accepted."""
+    _, directory, _, _ = package
+    (directory / "Thumbs.db").write_bytes(b"thumbnail cache")
+    open(str(directory / "Thumbs.db") + ":encryptable", "wb").close()
+    with open(str(directory / "movie.mp4") + ":Zone.Identifier", "wb") as writer:
+        writer.write(b"[ZoneTransfer] ZoneId=3")
+    with held(package) as source:
+        assert {"Thumbs.db", "movie.mp4"} <= set(source.entries)
+
+
+def test_a_non_empty_encryptable_stream_is_still_refused(package):
+    """Codex 4.0.1 P2: only Explorer's 0-byte marker is metadata."""
+    _, directory, _, _ = package
+    with open(str(directory / "movie.mp4") + ":encryptable", "wb") as writer:
+        writer.write(b"data that was never archived")
+    with pytest.raises(files.IntakeFileError, match="alternate_stream"):
+        with held(package):
+            pytest.fail("must refuse")
 
 
 @pytest.mark.parametrize(

@@ -6,4 +6,4 @@
 release. (The repo's `pyproject.toml` version tracks the frozen V2 package separately.)
 """
 
-__version__ = "4.0.0"
+__version__ = "4.0.1"

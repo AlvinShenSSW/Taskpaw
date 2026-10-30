@@ -494,7 +494,8 @@ const en = {
       cancelled: "Cancelled", probe_failed: "Media probe failed", copy_failed: "Copy failed",
       owner_unknown: "Intake process state unknown", disabled: "Intake is disabled", limit_exceeded: "Over a limit",
       recovery_required: "Recovery required", publication_blocked: "Cannot be registered as a film",
-      permission_denied: "Permission denied", tool_missing: "A required tool is missing" },
+      permission_denied: "Permission denied", tool_missing: "A required tool is missing",
+      alternate_stream: "A file has an alternate data stream (not archived); remove the file or the stream and it rescans", unsupported_member: "A shortcut, link or other unsupported file", case_conflict: "Two names differ only in case" },
   },
 };
 
@@ -958,7 +959,9 @@ const zh: typeof en = {
       waiting_capacity: "等待工作区空间", snapshot_complete: "已复制到工作区", source_changed: "复制时源文件发生变化",
       cancelled: "已取消", probe_failed: "媒体识别失败", copy_failed: "复制失败", owner_unknown: "入库进程状态未知",
       disabled: "入库已停用", limit_exceeded: "超出限制", recovery_required: "需要恢复",
-      publication_blocked: "无法登记为影片", permission_denied: "没有访问权限", tool_missing: "缺少所需工具" },
+      publication_blocked: "无法登记为影片", permission_denied: "没有访问权限", tool_missing: "缺少所需工具",
+      alternate_stream: "文件带有附加数据流（不会归档），删除该文件或去掉数据流后会自动重新扫描",
+      unsupported_member: "有快捷方式、链接等不支持的文件", case_conflict: "有只差大小写的同名文件" },
   },
 };
 

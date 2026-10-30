@@ -199,6 +199,18 @@ def _group(
     return grouping
 
 
+# Member failures that stay until the operator changes the folder: the package
+# needs attention instead of waiting as 「正在接收」 forever.
+_ATTENTION: dict[str, im.Reason] = {
+    "alternate_stream": "alternate_stream",
+    "reparse_point": "unsupported_member",
+    "unsupported_object": "unsupported_member",
+    "unknown_identity": "unknown_identity",
+    "case_conflict": "case_conflict",
+    "limit_exceeded": "limit_exceeded",
+}
+
+
 def observe_package(
     config: im.IntakeRootPut,
     relative_path: str,
@@ -225,6 +237,7 @@ def observe_package(
     parent: str | None = str(PurePosixPath(relative_path).parent)
     parent = None if parent == "." else parent
     failure = None
+    failure_path = None
     compatible = previous
     grouping: im.PackageGrouping | None
     try:
@@ -253,6 +266,7 @@ def observe_package(
             # unresolved native observation into a complete empty directory.
             raise DiscoveryUnresolved(exc.code, source) from None
         failure = exc.code
+        failure_path = exc.path if exc.code in _ATTENTION else None
         members = compatible.members if compatible else ()
         grouping = (
             compatible.grouping
@@ -280,4 +294,6 @@ def observe_package(
         else "unknown"
         if failure
         else "clear",
+        failure=_ATTENTION.get(failure) if failure else None,
+        failure_path=failure_path,
     )

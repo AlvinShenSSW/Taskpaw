@@ -1,7 +1,6 @@
-// 片库与规则 · 演员 (#361 §6, §11): search, filters, the 3:4 folder.jpg thumbnails and the drawer
+// 片库与规则 · 演员 (#361 §6, §11): search, filters, a card per name with its 3:4 folder.jpg and the drawer
 // with every location of a name, its aliases (group-level) and its recent receipts.
 import AddIcon from "@mui/icons-material/Add";
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CloseIcon from "@mui/icons-material/Close";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import SearchIcon from "@mui/icons-material/Search";
@@ -9,7 +8,7 @@ import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } f
 import { useDeferredValue, useState, type FormEvent } from "react";
 import { api, type Library, type LibraryPerformer, type PerformerFilter } from "../../api";
 import { ActorThumb, Pager, SideDrawer } from "./LibraryParts";
-import { actorLibraries, letters, libraryOf, offline, PERFORMER_KEY, PERFORMERS_KEY, rowKeys, useOpenPath } from "./libraryModel";
+import { actorLibraries, letters, libraryOf, offline, PERFORMER_KEY, PERFORMERS_KEY, useOpenPath } from "./libraryModel";
 import { fmtDateTime } from "./mediaModel";
 import { Chip, Icon, Notice } from "./parts";
 import { errorText, useWorkspace } from "./workspace";
@@ -19,13 +18,17 @@ const FILTERS: Array<["all" | PerformerFilter, string]> = [
   ["all", "全部"], ["multi", "多个位置"], ["alias", "有别名"], ["missing", "目录已缺失"], ["nothumb", "没有头像"],
 ];
 
-// One row per name group (the backend's `name_norm`, so 張 and 张 are one): the grouped listing
+// One card per name group (the backend's `name_norm`, so 張 and 张 are one): the grouped listing
 // pages over groups and returns every location of each, ordered by `name_norm`.
 function byName(items: LibraryPerformer[]): LibraryPerformer[][] {
   const groups = new Map<string, LibraryPerformer[]>();
   for (const p of items) groups.set(p.name_norm, [...(groups.get(p.name_norm) ?? []), p]);
   return [...groups.values()];
 }
+
+// A card lists its locations in library-letter order (A, B, …), whatever order the page returned.
+const byLetter = (locations: LibraryPerformer[], letter: Record<string, string>) =>
+  [...locations].sort((a, b) => (letter[a.library_id] ?? "").localeCompare(letter[b.library_id] ?? ""));
 
 const sumFilms = (locations: LibraryPerformer[]) => locations.reduce((n, p) => n + (p.film_count ?? 0), 0);
 
@@ -73,33 +76,26 @@ export function ActorsTab({ libraries }: { libraries: Library[] }) {
         </div>
       </div>
       {list.error && <Notice tone="red">无法读取演员：{errorText(list.error)}</Notice>}
-      <div className="panel">
-        <div className="table-wrap">
-          <table className="grid">
-            <thead><tr><th>演员</th><th>位置</th><th>影片</th><th><span className="sr-only">打开</span></th></tr></thead>
-            <tbody>
-              {rows.map((locations) => {
-                const first = locations.find((p) => p.has_thumb) ?? locations[0];
-                const open = () => setOpened(first.id);
-                return (
-                  <tr key={locations[0].id} tabIndex={0} aria-label={`${first.name} 详情`} onClick={open} onKeyDown={rowKeys(open)}>
-                    <td><div className="who">
-                      <ActorThumb id={first.id} hasThumb={first.has_thumb} name={first.name} />
-                      <div style={{ minWidth: 0 }}><strong>{first.name}</strong>
-                        {first.aliases.length > 0 && <div className="aliases">别名：{first.aliases.join("、")}</div>}</div>
-                    </div></td>
-                    <td><div className="chips">{locations.map((p) => <LocationChip key={p.id} performer={p} libraries={libraries} mark={letter[p.library_id]} />)}</div></td>
-                    <td className="mono">{sumFilms(locations)}</td>
-                    <td style={{ width: 40, color: "var(--muted)" }}><Icon of={ChevronRightIcon} /></td>
-                  </tr>
-                );
-              })}
-              {list.data && rows.length === 0 && (
-                <tr><td colSpan={4}><div className="empty" style={{ padding: 30 }}><Icon of={SearchIcon} /><p>没有符合条件的演员。</p></div></td></tr>
-              )}
-            </tbody>
-          </table>
+      {rows.length > 0 && (
+        <div className="actor-grid">
+          {rows.map((locations) => {
+            const first = locations.find((p) => p.has_thumb) ?? locations[0];
+            return (
+              <button key={locations[0].id} type="button" className="actor-card" aria-label={`${first.name} 详情`} onClick={() => setOpened(first.id)}>
+                <ActorThumb id={first.id} hasThumb={first.has_thumb} name={first.name} large />
+                <div className="actor-info">
+                  <strong className="actor-name">{first.name}</strong>
+                  {first.aliases.length > 0 && <div className="aliases">别名：{first.aliases.join("、")}</div>}
+                  <div className="actor-films"><b className="mono">{sumFilms(locations)}</b> 部</div>
+                  <div className="chips">{byLetter(locations, letter).map((p) => <LocationChip key={p.id} performer={p} libraries={libraries} mark={letter[p.library_id]} />)}</div>
+                </div>
+              </button>
+            );
+          })}
         </div>
+      )}
+      <div className="panel">
+        {list.data && rows.length === 0 && <div className="empty" style={{ padding: 30 }}><Icon of={SearchIcon} /><p>没有符合条件的演员。</p></div>}
         <Pager page={page} total={list.data?.total ?? 0} size={PAGE_SIZE} onPage={setPage}>
           <span>显示 {rows.length} / {list.data?.total ?? 0} 位</span>
           <span>缩略图取演员目录下的 folder.jpg · 同名演员共用一组别名</span>

@@ -278,6 +278,24 @@ def test_alternate_stream_added_after_intake_is_never_deleted(member):
         assert stream.read() == b"not archived"
 
 
+@WINDOWS
+def test_mark_of_the_web_added_after_intake_does_not_block_cleanup(member):
+    path, value = member
+    with open(f"{path}:Zone.Identifier", "wb") as stream:
+        stream.write(b"[ZoneTransfer]")
+    assert fid.check(path, value) == "ok"
+
+
+@WINDOWS
+def test_a_non_empty_encryptable_stream_blocks_cleanup(member):
+    """Codex 4.0.1 P2: its bytes were never archived; the file is kept."""
+    path, value = member
+    with open(f"{path}:encryptable", "wb") as stream:
+        stream.write(b"not archived")
+    assert fid.delete_exact(path, value) == "blocked_changed"
+    assert path.exists()
+
+
 def test_shutdown_while_hashing_deletes_nothing(member):
     import threading
 

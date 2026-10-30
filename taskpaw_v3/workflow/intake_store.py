@@ -214,6 +214,8 @@ class IntakeCommands(ApprovalCommands):
         command: im.IntakeObservation, config: im.IntakeRootPut
     ) -> tuple[im.IntakeState, im.Reason]:
         if command.coverage != "complete":
+            if command.failure:
+                return "needs_attention", command.failure
             return "receiving", "partial_observation"
         if command.package_native_identity is None or any(
             value.native_identity is None or value.entry_kind in ("unknown", "reparse")
@@ -1622,14 +1624,23 @@ class IntakeCommands(ApprovalCommands):
             )
             paths = {v.member_id: v.relative_path for v in observation.members}
             grouping = observation.grouping
+            failed = observation.failure  # current, ahead of an earlier grouping
             packages.append(
                 im.IntakeBoardPackage(
                     package_id=row["package_id"],
                     relative_path=row["relative_path"],
                     state=row["state"],
                     reason=row["reason"],
-                    grouping_reasons=grouping.reasons if grouping else (),
-                    unassigned_paths=tuple(
+                    grouping_reasons=(failed,)
+                    if failed
+                    else grouping.reasons
+                    if grouping
+                    else (),
+                    unassigned_paths=(
+                        (observation.failure_path,) if observation.failure_path else ()
+                    )
+                    if failed
+                    else tuple(
                         paths[member]
                         for member in (
                             grouping.unassigned_member_ids if grouping else ()
