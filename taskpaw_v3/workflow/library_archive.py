@@ -465,8 +465,8 @@ class LibraryArchive:
             except OSError as exc:
                 raise _os_error(exc, "无法读取演员目录") from exc
             return parent, identity, film.casefold() not in inside, actor / film
-        key = normalize(name)
-        if any(normalize(other) == key for other in names):
+        key = normalize(name)  # 張/张, and casefold for Straße/Strasse
+        if name.casefold() in names or any(normalize(o) == key for o in names):
             raise _refused(f"{ACTOR_EXISTS}：{name}", "actor_exists")
         return parent, identity, True, actor / film
 

@@ -782,14 +782,16 @@ def test_a_reused_actor_directory_swapped_for_a_junction_is_refused(rig):
 def test_a_new_actor_name_that_normalizes_like_a_folder_is_refused(rig):
     """UI walkthrough D1: 张小雨 next to 張小雨 would be a parallel directory."""
     (rig.root / "張小雨").mkdir()
-    _refused(
-        "actor_exists",
-        rig.archive.target,
-        None,
-        FILM,
-        library_id=rig.library_id,
-        actor_name="张小雨",
-    )
+    (rig.root / "Strasse").mkdir()
+    for name in ("张小雨", "Straße"):  # Codex fixes r2: casefold still applies
+        _refused(
+            "actor_exists",
+            rig.archive.target,
+            None,
+            FILM,
+            library_id=rig.library_id,
+            actor_name=name,
+        )
 
 
 def test_an_unreadable_root_reads_offline_not_as_a_gone_record(rig, monkeypatch):

@@ -436,7 +436,7 @@ def test_a_share_lost_after_some_actors_were_counted_is_unreachable(
     store, tmp_path, monkeypatch
 ):
     """Codex fixes r1: the root listed, Alice counted, then the share went."""
-    lib = actor_library(store, tmp_path, "Alice", "Bob", films=1)
+    lib = actor_library(store, tmp_path, "Alice", "Bob", "Carol", films=1)
     scan_library(store, lib)
     base = str(store.library(lib)["path"])
     real = library_scan.list_dirs
@@ -451,7 +451,8 @@ def test_a_share_lost_after_some_actors_were_counted_is_unreachable(
     monkeypatch.setattr(library_scan, "list_dirs", dropping)
     result = scan_library(store, lib)
     assert not result.ok and store.library(lib)["last_scan_ok"] is False
-    assert calls[-1] == base  # the root was asked again
+    # the root is asked again at Bob's failure; Carol is never probed
+    assert [Path(c).name for c in calls[1:]] == ["Alice", "Bob", Path(base).name]
 
 
 def test_no_listable_actor_folder_scans_as_unreachable(store, tmp_path, monkeypatch):

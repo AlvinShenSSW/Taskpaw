@@ -158,16 +158,13 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
     result = ScanResult(library_id, ok=True, at=at)
     try:
         names = list_dirs(root)
-        counts = (
-            {name: _count(os.path.join(root, name)) for name in names}
-            if lib["kind"] == "actor"
-            else {}
-        )
-        unread = [name for name, count in counts.items() if count is None]
-        if unread:  # those folders only, or the share dropped after the listing?
-            list_dirs(root)
-            if len(unread) == len(names):
-                raise LibraryUnreachable(root)
+        counts: dict[str, int | None] = {}
+        for name in names if lib["kind"] == "actor" else ():
+            counts[name] = _count(os.path.join(root, name))
+            if counts[name] is None:  # that folder only, or did the share drop?
+                list_dirs(root)
+        if names and counts and all(c is None for c in counts.values()):
+            raise LibraryUnreachable(root)
     except LibraryUnreachable:
         with store.transaction() as conn:  # the status only, no performer row
             conn.execute(
