@@ -118,6 +118,24 @@ def test_actual_scan_discovers_package_reuses_identity_and_marks_positive_missin
     assert h.store.get_intake(adapter, first.package_id).state == "missing"
 
 
+def test_an_alternate_stream_needs_attention_and_names_the_file(service, package):
+    """A refusal only the operator can fix is never shown as 正在接收 forever."""
+    h, adapter, config, obj, mono = service
+    stream = str(package[1] / "movie.mp4") + ":side-data"
+    with open(stream, "wb") as writer:
+        writer.write(b"owned alternate stream")
+    obj.scan_once()
+    (view,) = h.store.list_intakes(adapter, im.IntakeListQuery()).items
+    assert (view.state, view.reason) == ("needs_attention", "alternate_stream")
+    (row,) = h.store.list_intake_board(h.operator)
+    assert row.unassigned_paths == ("movie.mp4",)
+    os.remove(stream)  # the operator fixes the folder: the next scan admits it
+    h.clock.value += timedelta(seconds=30)
+    mono[0] += 30
+    assert obj.scan_once()
+    assert h.store.get_intake(adapter, view.package_id).state == "waiting_stability"
+
+
 def test_wall_clock_jump_does_not_count_toward_live_stability(service):
     h, adapter, _, obj, mono = service
     assert obj.scan_once()

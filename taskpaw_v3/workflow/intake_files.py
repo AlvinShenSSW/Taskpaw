@@ -23,9 +23,20 @@ from .models import NativeIdentity
 
 
 class IntakeFileError(OSError):
-    def __init__(self, code: str):
+    """`path`: the package-relative member the failure is about, when one is."""
+
+    def __init__(self, code: str, path: str | None = None):
         self.code = code
+        self.path = path
         super().__init__(code)
+
+
+# Windows writes these on its own and they carry no film data: Explorer marks
+# Thumbs.db `:encryptable` (0 bytes) and a downloaded file gets the Mark of the
+# Web `:Zone.Identifier`. Any other alternate stream is still refused.
+_METADATA_STREAMS = frozenset(
+    {"::$data", ":encryptable:$data", ":zone.identifier:$data"}
+)
 
 
 class _Basic(ctypes.Structure):
@@ -290,7 +301,7 @@ class WindowsFiles:
             self.check(False)
         try:
             while True:
-                if value.name != "::$DATA":
+                if value.name.casefold() not in _METADATA_STREAMS:
                     raise IntakeFileError("alternate_stream")
                 if not self.kernel.FindNextStreamW(handle, ctypes.byref(value)):
                     if _last_error() != 38:
@@ -475,11 +486,11 @@ class HeldPackage:
         names: set[str] = set()
         for child in children:
             _parts(child.name)
-            if child.name.casefold() in names:
-                raise IntakeFileError("case_conflict")
-            names.add(child.name.casefold())
             parts = (*parents, child.name)
             relative = "/".join(parts)
+            if child.name.casefold() in names:
+                raise IntakeFileError("case_conflict", relative)
+            names.add(child.name.casefold())
             if (
                 len(parts) > self.policy.max_depth
                 or len(self.entries) >= self.policy.max_members
@@ -489,11 +500,15 @@ class HeldPackage:
             if not retain and relative not in self.entries:
                 raise IntakeFileError("source_changed")
             directory = child.is_dir(follow_symlinks=False)
-            entry = (
-                self._holds.acquire(Path(child.path), relative, directory=directory)
-                if retain
-                else self.entries[relative]
-            )
+            try:
+                entry = (
+                    self._holds.acquire(Path(child.path), relative, directory=directory)
+                    if retain
+                    else self.entries[relative]
+                )
+            except IntakeFileError as exc:
+                exc.path = exc.path or relative
+                raise
             if retain:
                 self.entries[relative] = entry
             found.add(relative)

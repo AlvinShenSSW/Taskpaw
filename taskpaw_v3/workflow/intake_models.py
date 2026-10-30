@@ -69,6 +69,9 @@ Reason = Literal[
     "publication_blocked",
     "permission_denied",
     "tool_missing",
+    "alternate_stream",
+    "unsupported_member",
+    "case_conflict",
 ]
 IntakeState = Literal[
     "receiving",
@@ -512,6 +515,10 @@ class IntakeObservation(Model):
     observation_digest: Digest
     grouping: PackageGrouping | None
     writer_state: Literal["clear", "busy", "unknown"]
+    # A partial observation the operator has to fix (a rescan alone never will),
+    # and the member it is about.
+    failure: Reason | None = None
+    failure_path: RelativePath | None = None
 
     @model_validator(mode="after")
     def _members(self) -> Self:
