@@ -54,6 +54,11 @@ class ImportBody(BaseModel):
     path: Optional[str] = Field(default=None, max_length=1024)
 
 
+class OrderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[str] = Field(max_length=1000)
+
+
 class OpenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str = Field(min_length=1, max_length=1024)
@@ -114,7 +119,8 @@ def register_library_routes(
 
     @app.get(f"{BASE}/libraries")
     def library_list() -> dict[str, Any]:
-        return {"items": _store().libraries()}
+        store = _store()
+        return {"items": store.libraries(), "db_path": str(store.path)}
 
     @app.post(f"{BASE}/libraries", status_code=201)
     def library_add(body: LibraryBody) -> dict[str, Any]:
@@ -142,6 +148,13 @@ def register_library_routes(
         with _errors():
             _store().remove_library(library_id)
         return Response(status_code=204)
+
+    @app.put(f"{BASE}/order")
+    def library_order(body: OrderBody) -> dict[str, Any]:
+        """The actor libraries' priority order: every actor library id once."""
+        store = _store()
+        with _errors():
+            return {"items": store.reorder(body.ids), "db_path": str(store.path)}
 
     @app.post(f"{BASE}/libraries/{{library_id}}/scan")
     def library_scan(library_id: str) -> dict[str, Any]:

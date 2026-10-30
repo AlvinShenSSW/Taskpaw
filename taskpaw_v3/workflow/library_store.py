@@ -476,6 +476,22 @@ class LibraryStore:
             ).rowcount:
                 raise LibraryError(404, "片库不存在")
 
+    def reorder(self, ids: list[str]) -> list[dict[str, Any]]:
+        """The actor libraries' priority (§8 `priority`): `ids` is every actor
+        library exactly once, in the new order; categories keep theirs."""
+        with self.transaction() as conn:
+            current = {
+                row["id"]
+                for row in conn.execute("SELECT id FROM libraries WHERE kind='actor'")
+            }
+            if len(ids) != len(set(ids)) or set(ids) != current:
+                raise LibraryError(422, "顺序必须恰好包含每个演员片库一次")
+            conn.executemany(
+                "UPDATE libraries SET position=? WHERE id=?",
+                [(position, library_id) for position, library_id in enumerate(ids, 1)],
+            )
+        return self.libraries()
+
     def unreachable(self) -> list[tuple[str, str]]:
         """(id, path) of every library whose last scan could not reach it."""
         with self.reading() as conn:
@@ -552,11 +568,14 @@ class LibraryStore:
         fuzzy: bool = False,
         page: int = 1,
         page_size: int = PAGE_SIZE_DEFAULT,
+        group: bool = False,
     ) -> dict[str, Any]:
         """Every performer of each matched name group, by `name_norm, id`.
 
         A group found only through the fuzzy comparison has `fuzzy: true`: it
-        is listed, never preselected (§6).
+        is listed, never preselected (§6). With `group` the page and `total`
+        count name groups, and each group on the page comes with every one of
+        its matching locations (the 演员 tab, #365).
         """
         if page < 1 or not 1 <= page_size <= PAGE_SIZE_MAX:
             raise LibraryError(422, f"page ≥ 1，page_size 1–{PAGE_SIZE_MAX}")
@@ -619,14 +638,31 @@ class LibraryStore:
                 ).fetchone():
                     raise LibraryError(422, "library_id 无效")
             cond = " AND ".join(where)
+            counted = "DISTINCT p.name_norm" if group else "*"
             (total,) = conn.execute(
-                f"{prefix}SELECT COUNT(*) FROM performers p {join} WHERE {cond}", params
+                f"{prefix}SELECT COUNT({counted}) FROM performers p {join}"
+                f" WHERE {cond}",
+                params,
             ).fetchone()
+            paged, limit = cond, " LIMIT :limit OFFSET :offset"
+            if group:  # the page's groups, then all their rows
+                # filters pick the groups; each shows all its locations
+                shown = (
+                    "1=1"
+                    if include_missing or filter == "missing"
+                    else "p.is_missing = 0"
+                )
+                paged, limit = (
+                    f"{shown} AND p.name_norm IN (SELECT DISTINCT p.name_norm"
+                    f" FROM performers p {join} WHERE {cond}"
+                    " ORDER BY p.name_norm LIMIT :limit OFFSET :offset)",
+                    "",
+                )
             rows = conn.execute(
                 f"{prefix}SELECT p.*, l.label AS source_label, l.role AS library_role,"
                 f" {fuzzy_hit} AS fuzzy_hit"
                 f" FROM performers p {join} JOIN libraries l ON l.id = p.library_id"
-                f" WHERE {cond} ORDER BY p.name_norm, p.id LIMIT :limit OFFSET :offset",
+                f" WHERE {paged} ORDER BY p.name_norm, p.id{limit}",
                 {**params, "limit": page_size, "offset": (page - 1) * page_size},
             ).fetchall()
             alias_map = self._aliases(conn, {row["name_norm"] for row in rows})
@@ -830,6 +866,7 @@ def _performer(
     return {
         "id": row["id"],
         "name": row["name"],
+        "name_norm": row["name_norm"],
         "source_label": row["source_label"],
         "unc_path": row["path"],
         "has_thumb": row["thumb"] is not None,

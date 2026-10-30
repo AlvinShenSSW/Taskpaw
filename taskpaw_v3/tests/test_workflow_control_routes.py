@@ -439,6 +439,8 @@ def test_performer_search_and_thumbs_are_served_by_the_library(world, client):
         )
         assert again.status_code == 304
         assert client.get(f"{BASE}/performers/nobody/thumb").status_code == 404
+        grouped = client.get(f"{BASE}/performers", params={"group": "true"}).json()
+        assert grouped["total"] == 1 and grouped["items"][0]["name_norm"] == "actor"
         bad = client.get(f"{BASE}/performers", params={"page": 0})
         assert bad.status_code == 422
     down = client.get(f"{BASE}/performers", params={"q": "a"})

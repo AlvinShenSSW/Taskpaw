@@ -444,6 +444,53 @@ export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
   has_thumb: boolean; aliases: string[];
 }
+// #361 §6–§10: the controller's own library (`/control/workflow/library/*`). Counts are the last
+// scan's (`last_scan_ok` null = never scanned, false = unreachable then).
+export type LibraryKind = "actor" | "category";
+export type LibraryRole = "archive" | "readonly";
+export interface Library {
+  id: string; kind: LibraryKind; path: string; label: string; role: LibraryRole; prefixes: string[]; position: number;
+  last_scan_at: string | null; last_scan_ok: boolean | null; last_scan_ms: number | null;
+  film_count: number | null; free_bytes: number | null; created_at: string;
+  performer_count: number; missing_count: number;
+}
+export interface LibraryList { items: Library[]; db_path: string }
+export interface ScanResult { library_id: string; ok: boolean; at?: string; error?: string | null }
+export interface ScanStatus { running: string | null; queued: string[]; results: Record<string, ScanResult> }
+export type MultiLocation = "priority" | "most" | "recent";
+export interface LibraryRules {
+  multi_location: MultiLocation; alias_match: boolean; preselect_single: boolean; fuzzy: boolean;
+  allow_new_actor: boolean; new_actor_library: string | null; new_actor_name: "actor" | "ask";
+  category_prefix: boolean; second_target_hint: boolean; category_always: boolean;
+  scan_on_start: boolean; scan_every_hours: 0 | 2 | 6 | 12 | 24;
+}
+export interface LibraryPerformer extends Performer {
+  id: string; name_norm: string; alias_ids: number[]; library_id: string; role: LibraryRole; is_missing: boolean;
+  film_count: number | null; fuzzy: boolean;
+}
+export type PerformerFilter = "multi" | "alias" | "missing" | "nothumb";
+export interface PerformerQuery { q?: string; library_id?: string; filter?: PerformerFilter; page?: number; page_size?: number }
+export interface PerformerPage { items: LibraryPerformer[]; total: number; page: number; page_size: number }
+export type HistoryKind = "performer" | "category" | "new_actor" | "manual";
+export type HistoryFilter = "pending" | "new" | "category" | "manual" | "second";
+export interface HistoryRow {
+  receipt_id: string; film_id: string; operation_id: string; accepted_at: string; kind: HistoryKind | null;
+  film_dir: string; target_path: string; second_target_path: string | null;
+  cleanup: { input: string | null; workcopy: string | null }; pending: boolean;
+  number: string; title: string | null; actors: string[];
+}
+export interface HistoryPage { items: HistoryRow[]; total: number; page: number; page_size: number }
+export interface HistoryReceipt extends HistoryRow {
+  files: Array<{ path: string; size: number; sha256: string }>; message: string | null;
+}
+export interface PerformerDetail extends LibraryPerformer { locations: LibraryPerformer[]; receipts: HistoryRow[] }
+export interface ImportPreview {
+  path: string; roots: Array<{ path: string; label: string; performers: number; status: "new" | "exists" | "overlap" }>;
+  aliases: number; new_aliases: number;
+}
+export interface ImportResult { path: string; added: string[]; skipped: Array<{ path: string; reason: string }>; aliases_added: number }
+export interface LibraryBody { kind: LibraryKind; path: string; label?: string; role?: LibraryRole; prefixes?: string[] }
+export type LibraryPatch = Partial<Pick<Library, "label" | "role" | "prefixes">>;
 // U1 §7.3: the archive target preflight (read-only) and the library's candidates for the film's NFO
 // actors. With no explicit target, a sole candidate is checked; `target_path` ends in `film_dir`.
 // `missing`: the chosen performer or directory is gone; `candidates` is null while the library is offline.
@@ -596,6 +643,7 @@ export type OpenclawTest = { ok: true; at: string; elapsed_s: number } | { ok: f
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
+const LIBRARY = "/control/workflow/library";
 
 export type ControlRole = "agent" | "hub";
 declare global {
@@ -704,6 +752,23 @@ async function get<T>(role: "agent" | "hub", path: string, signal?: AbortSignal)
   });
   checkUnauthorized(role, res);
   if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
+  return res.json() as Promise<T>;
+}
+
+// The library's GETs (#361) keep the backend's `detail`, as send() does: 「不是可读的 Filmpaw 片库…」
+// says more than "path → 422". The plain get() stays as it is for its other callers.
+async function libraryGet<T>(path: string): Promise<T> {
+  const { baseUrl, controlToken } = cfg("agent");
+  const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
+  checkUnauthorized("agent", res);
+  if (!res.ok) {
+    let detail = `${path} → ${res.status}`;
+    try {
+      const j: unknown = await res.json();
+      if (j && typeof j === "object" && "detail" in j && typeof j.detail === "string") detail = j.detail;
+    } catch { /* non-JSON error body */ }
+    throw new HttpError(detail, res.status);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -970,5 +1035,40 @@ export const api = {
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,
   thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
+  // #361 §10: 片库与规则 and 设置 · 片库 (controller only)
+  libraries: () => libraryGet<LibraryList>(`${LIBRARY}/libraries`),
+  libraryAdd: (body: LibraryBody) => send<Library>("agent", "POST", `${LIBRARY}/libraries`, body),
+  libraryUpdate: (id: string, patch: LibraryPatch) => send<Library>("agent", "PATCH", `${LIBRARY}/libraries/${seg(id)}`, patch),
+  libraryRemove: (id: string) => send<void>("agent", "DELETE", `${LIBRARY}/libraries/${seg(id)}`),
+  // 归档规则's priority: every actor library id once, in the new order
+  libraryOrder: (ids: string[]) => send<LibraryList>("agent", "PUT", `${LIBRARY}/order`, { ids }),
+  libraryScan: (id: string) => send<ScanStatus>("agent", "POST", `${LIBRARY}/libraries/${seg(id)}/scan`),
+  libraryScanAll: () => send<ScanStatus>("agent", "POST", `${LIBRARY}/scan-all`),
+  libraryScanStatus: () => libraryGet<ScanStatus>(`${LIBRARY}/scan-status`),
+  // the 演员 tab lists missing directories too (the route's default leaves them out, §10) and pages
+  // over name groups, each with every location (#365)
+  libraryPerformers: (query: PerformerQuery) => {
+    const qs = new URLSearchParams({ include_missing: "true", group: "true" });
+    for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== "") qs.set(key, String(value));
+    return libraryGet<PerformerPage>(`/control/workflow/performers?${qs}`);
+  },
+  libraryPerformer: (id: string) => libraryGet<PerformerDetail>(`/control/workflow/performers/${seg(id)}`),
+  libraryAddAlias: (performerId: string, alias: string) =>
+    send<{ id: number; alias: string }>("agent", "POST", `${LIBRARY}/performers/${seg(performerId)}/aliases`, { alias }),
+  libraryDeleteAlias: (aliasId: number) => send<void>("agent", "DELETE", `${LIBRARY}/aliases/${aliasId}`),
+  libraryRules: () => libraryGet<LibraryRules>(`${LIBRARY}/rules`),
+  librarySaveRules: (changes: Partial<LibraryRules>) => send<LibraryRules>("agent", "PUT", `${LIBRARY}/rules`, changes),
+  libraryImportPreview: (path = "") =>
+    libraryGet<ImportPreview>(`${LIBRARY}/import/preview${path ? `?${new URLSearchParams({ path })}` : ""}`),
+  libraryImport: (path = "") => send<ImportResult>("agent", "POST", `${LIBRARY}/import`, path ? { path } : {}),
+  libraryHistory: (filter: HistoryFilter | null, q: string, page: number) => {
+    const qs = new URLSearchParams({ page: String(page) });
+    if (filter) qs.set("filter", filter);
+    if (q) qs.set("q", q);
+    return libraryGet<HistoryPage>(`${LIBRARY}/history?${qs}`);
+  },
+  libraryReceipt: (receiptId: string) => libraryGet<HistoryReceipt>(`${LIBRARY}/history/${seg(receiptId)}`),
+  // 打开目录: only a library root's subtree or a receipt's target (403 otherwise)
+  libraryOpen: (path: string) => send<void>("agent", "POST", `${LIBRARY}/open`, { path }),
   image,
 };

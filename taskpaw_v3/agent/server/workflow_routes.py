@@ -351,8 +351,10 @@ def register_workflow_routes(
         filter: Literal["multi", "alias", "missing", "nothumb"] | None = None,
         page: int = 1,
         page_size: int = 50,
+        group: bool = False,
     ) -> dict[str, Any]:
-        """The library's performers (§10): `{items, total, page, page_size}`."""
+        """The library's performers (§10): `{items, total, page, page_size}`;
+        `group` pages over name groups, each with all its locations (#365)."""
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
@@ -364,6 +366,7 @@ def register_workflow_routes(
                 filter=filter,
                 page=page,
                 page_size=page_size,
+                group=group,
             )
 
     @app.get("/control/workflow/performers/{performer_id}")

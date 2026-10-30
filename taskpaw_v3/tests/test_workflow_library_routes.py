@@ -91,8 +91,10 @@ def test_library_crud(client, host, tmp_path):
     assert missing.status_code == 422
     odd = client.post(f"{BASE}/libraries", json={"kind": "film", "path": str(path)})
     assert odd.status_code == 422
-    (item,) = client.get(f"{BASE}/libraries").json()["items"]
+    listed = client.get(f"{BASE}/libraries").json()
+    (item,) = listed["items"]
     assert item["id"] == lib["id"]
+    assert listed["db_path"] == str(host.library.path)  # 设置 · 片库数据
 
     patched = client.patch(
         f"{BASE}/libraries/{lib['id']}", json={"label": "演员", "role": "readonly"}
@@ -165,6 +167,24 @@ def test_rules_routes(client):
     assert client.get(f"{BASE}/rules").json()["scan_every_hours"] == 12
 
 
+def test_order_route_rewrites_the_actor_priority(client, host, tmp_path):
+    a = host.library.add_library("actor", str(root(tmp_path, "a", "Alice")))["id"]
+    b = host.library.add_library("actor", str(root(tmp_path, "b", "Bob")))["id"]
+    cat = host.library.add_library("category", str(root(tmp_path, "c")))
+    put = client.put(f"{BASE}/order", json={"ids": [b, a]})
+    assert put.status_code == 200
+    body = put.json()
+    assert [lib["id"] for lib in body["items"] if lib["kind"] == "actor"] == [b, a]
+    assert body["db_path"] == str(host.library.path)
+    for wrong in ([b], [b, a, b], [b, a, cat["id"]]):
+        assert client.put(f"{BASE}/order", json={"ids": wrong}).status_code == 422
+    assert client.put(f"{BASE}/order", json={"order": [a, b]}).status_code == 422
+    listed = client.get(f"{BASE}/libraries").json()["items"]
+    assert [lib["id"] for lib in listed if lib["kind"] == "actor"] == [b, a]
+    worker = client_for(lambda: host, role="worker")
+    assert worker.put(f"{BASE}/order", json={"ids": [a, b]}).status_code == 409
+
+
 def test_import_routes_scan_what_they_added(client, host, tmp_path):
     new_root = normalize_path(str(tmp_path / "nas1"))
     db = fake_filmpaw(tmp_path, [(new_root, "NAS 1", 2)])
@@ -199,6 +219,7 @@ def test_routes_require_the_control_token(host):
         )
     )
     assert bare.get(f"{BASE}/libraries").status_code == 401
+    assert bare.put(f"{BASE}/order", json={"ids": []}).status_code == 401
 
 
 def test_thumb_response_uses_the_etag(host, tmp_path):

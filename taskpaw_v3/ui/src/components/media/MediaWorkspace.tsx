@@ -20,6 +20,7 @@ import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
 import { FilmDrawer } from "./FilmDrawer";
 import { LaterPage } from "./LaterPages";
+import { ControllerOnly, LibraryPage } from "./LibraryPage";
 import { LocalPage } from "./LocalPage";
 import { MEDIA_CSS } from "./mediaStyles";
 import type { StageFilter } from "./mediaModel";
@@ -29,12 +30,13 @@ import { PendingPage } from "./PendingPage";
 import { QueuePage } from "./QueuePage";
 import { ReviewDialog } from "./ReviewDialog";
 import { ReviewPage } from "./ReviewPage";
+import { SettingsPage } from "./SettingsPage";
 import {
   errorText, focusOnMount, isPaused, mediaFilmKey, mediaSourceKey, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
-// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last three are
-// later pages, marked 「后续」 (operator decision 3); 设备 is live since P2-2.
+// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). Mac 信息桥 is a later page,
+// marked 「后续」 (operator decision 3); 设备 is live since P2-2, 片库与规则 and 设置 since #361.
 const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?: boolean }> = [
   { key: "overview", label: "概览", icon: GridViewIcon },
   { key: "pending", label: "待处理", icon: PlaylistAddCheckIcon },
@@ -43,9 +45,9 @@ const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?
   { key: "exceptions", label: "异常", icon: WarningAmberIcon },
   { key: "devices", label: "设备", icon: DesktopWindowsIcon },
   { key: "local", label: "本机", icon: ComputerIcon },
-  { key: "libraries", label: "片库与规则", icon: FolderOpenIcon, later: true },
+  { key: "libraries", label: "片库与规则", icon: FolderOpenIcon },
   { key: "bridge", label: "Mac 信息桥", icon: LanIcon, later: true },
-  { key: "settings", label: "设置 / 迁移", icon: TuneIcon, later: true },
+  { key: "settings", label: "设置", icon: TuneIcon },
 ];
 const PREFLIGHT_PAGES = new Set<PageKey>(["overview", "review", "exceptions"]);
 const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "devices", "local"]);
@@ -139,7 +141,10 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower, onOpenSe
   const gpuFilm = films?.current;
 
   let body: ReactNode;
-  if (!LIVE_PAGES.has(page)) body = <LaterPage page={page as "libraries" | "bridge" | "settings"} />;
+  // 片库与规则 and 设置 read their own routes, so they do not wait for the pipeline (the Hub has neither)
+  if (page === "libraries" || page === "settings") {
+    body = readOnly ? <ControllerOnly title={current.label} /> : page === "libraries" ? <LibraryPage /> : <SettingsPage />;
+  } else if (!LIVE_PAGES.has(page)) body = <LaterPage />;
   else if (data.films.isLoading) body = <div className="panel empty"><p>正在读取媒体流水线…</p></div>;
   else if (data.films.error || !films) body = <Notice tone="red" icon={WarningAmberIcon}>无法读取媒体流水线，请重试。{data.films.error ? `（${errorText(data.films.error)}）` : ""}</Notice>;
   else if (!running) body = <Notice icon={WarningAmberIcon}>媒体流水线未运行：{films.reason || films.state}</Notice>;

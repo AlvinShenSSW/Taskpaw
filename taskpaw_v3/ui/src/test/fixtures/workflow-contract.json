@@ -2716,6 +2716,7 @@
           {
             "id": "actor",
             "name": "Actor",
+            "name_norm": "actor",
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
@@ -2759,6 +2760,7 @@
           {
             "id": "actor",
             "name": "Actor",
+            "name_norm": "actor",
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
@@ -2802,6 +2804,7 @@
           {
             "id": "actor",
             "name": "Actor",
+            "name_norm": "actor",
             "source_label": "NAS",
             "unc_path": "\\\\nas-a\\actors\\Actor",
             "has_thumb": false,
