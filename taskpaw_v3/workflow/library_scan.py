@@ -114,6 +114,15 @@ def _thumb(
         return None
 
 
+def _count(folder: str) -> int | None:
+    """An actor folder's film folders; None when that one folder is unreadable."""
+    try:
+        return len(list_dirs(folder))
+    except LibraryUnreachable:
+        log.warning("cannot list actor folder %s", folder)
+        return None
+
+
 def _free_bytes(root: str) -> int | None:
     try:
         return shutil.disk_usage(root).free
@@ -150,10 +159,12 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
     try:
         names = list_dirs(root)
         counts = (
-            {name: len(list_dirs(os.path.join(root, name))) for name in names}
+            {name: _count(os.path.join(root, name)) for name in names}
             if lib["kind"] == "actor"
             else {}
         )
+        if names and counts and all(c is None for c in counts.values()):
+            raise LibraryUnreachable(root)  # the share dropped after the listing
     except LibraryUnreachable:
         with store.transaction() as conn:  # the status only, no performer row
             conn.execute(
@@ -180,7 +191,7 @@ def scan_library(store: LibraryStore, library_id: str) -> ScanResult:
             _apply_actor(
                 conn, library_id, root, names, counts, thumbs, at, result, known
             )
-            result.film_count = sum(counts.values())
+            result.film_count = sum(c for c in counts.values() if c is not None)
         else:
             result.film_count = len(names)
         conn.execute(
@@ -200,7 +211,7 @@ def _apply_actor(
     library_id: str,
     root: str,
     names: list[str],
-    counts: dict[str, int],
+    counts: dict[str, int | None],
     thumbs: dict[str, tuple[bytes, float] | tuple[()] | None],
     now: str,
     result: ScanResult,
@@ -221,8 +232,8 @@ def _apply_actor(
         if row is not None:
             performer_id = row["id"]
             conn.execute(
-                "UPDATE performers SET last_seen_at=?, is_missing=0, film_count=?"
-                " WHERE id=?",
+                "UPDATE performers SET last_seen_at=?, is_missing=0,"
+                " film_count=COALESCE(?, film_count) WHERE id=?",
                 (now, counts[name], performer_id),
             )
             if row["folder_name"] != name:  # case-only rename: adopt the new casing

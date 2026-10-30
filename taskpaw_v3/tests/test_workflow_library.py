@@ -405,6 +405,50 @@ def test_an_unreadable_attribute_rejects_the_whole_snapshot(
     assert store.library(lib)["last_scan_ok"] is False
 
 
+def test_an_unlistable_actor_folder_keeps_only_its_own_count(
+    store, tmp_path, monkeypatch
+):
+    """Audit: one actor folder that cannot be listed (an ACL-restricted
+    `#recycle`, a folder renamed mid-scan) must not blank the whole library."""
+    lib = actor_library(store, tmp_path, "Alice", "Bob", films=2)
+    scan_library(store, lib)
+    base = Path(store.library(lib)["path"])
+    (base / "Carol").mkdir()
+    real = library_scan.list_dirs
+
+    def denied(path):
+        if Path(path).name in ("Bob", "Carol"):
+            raise library_scan.LibraryUnreachable(path)
+        return real(path)
+
+    monkeypatch.setattr(library_scan, "list_dirs", denied)
+    result = scan_library(store, lib)
+    assert (result.ok, result.added, result.film_count) == (True, 1, 2)
+    rows = performers(store, lib)
+    assert rows["Alice"]["film_count"] == 2
+    assert rows["Bob"]["film_count"] == 2  # the last known count stays
+    assert rows["Carol"]["film_count"] is None and rows["Carol"]["is_missing"] == 0
+    assert store.library(lib)["last_scan_ok"] is True
+
+
+def test_no_listable_actor_folder_scans_as_unreachable(store, tmp_path, monkeypatch):
+    """A share that drops after its root was listed reads as unreachable."""
+    lib = actor_library(store, tmp_path, "Alice", "Bob", films=1)
+    scan_library(store, lib)
+    base = str(store.library(lib)["path"])
+    real = library_scan.list_dirs
+
+    def dropped(path):
+        if path != base:
+            raise library_scan.LibraryUnreachable(path)
+        return real(path)
+
+    monkeypatch.setattr(library_scan, "list_dirs", dropped)
+    result = scan_library(store, lib)
+    assert not result.ok
+    assert {r["film_count"] for r in performers(store, lib).values()} == {1}
+
+
 def test_an_unreachable_root_writes_nothing_but_its_status(store, tmp_path):
     lib = actor_library(store, tmp_path, "Alice", films=1)
     scan_library(store, lib)
