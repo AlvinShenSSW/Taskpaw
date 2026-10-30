@@ -623,7 +623,8 @@ class LibraryStore:
                 f"{prefix}SELECT COUNT(*) FROM performers p {join} WHERE {cond}", params
             ).fetchone()
             rows = conn.execute(
-                f"{prefix}SELECT p.*, l.label AS source_label, {fuzzy_hit} AS fuzzy_hit"
+                f"{prefix}SELECT p.*, l.label AS source_label, l.role AS library_role,"
+                f" {fuzzy_hit} AS fuzzy_hit"
                 f" FROM performers p {join} JOIN libraries l ON l.id = p.library_id"
                 f" WHERE {cond} ORDER BY p.name_norm, p.id LIMIT :limit OFFSET :offset",
                 {**params, "limit": page_size, "offset": (page - 1) * page_size},
@@ -660,7 +661,8 @@ class LibraryStore:
             if row is None:
                 raise LibraryError(404, "演员不存在")
             rows = conn.execute(
-                "SELECT p.*, l.label AS source_label, 0 AS fuzzy_hit FROM performers p"
+                "SELECT p.*, l.label AS source_label, l.role AS library_role,"
+                " 0 AS fuzzy_hit FROM performers p"
                 " JOIN libraries l ON l.id = p.library_id WHERE p.name_norm=?"
                 " ORDER BY l.kind, l.position, p.id",
                 (row["name_norm"],),
@@ -682,6 +684,114 @@ class LibraryStore:
         if row is None or row["thumb"] is None:
             return None
         return bytes(row["thumb"]), f'"{row["thumb_mtime"]}-{row["thumb_side"]}"'
+
+    # ── 待确认 candidates (§9.6) ────────────────────────────────────────
+    def candidates(self, actors: list[str], number: str) -> dict[str, Any]:
+        """Every location of each scraped actor's name group (plus aliases and
+        fuzzy hits per the rules, missing ones left out), the category
+        directories, and what the rules preselect: one actor group → that
+        actor (by `multi_location` among its locations); no archive-role actor
+        candidate → the category whose prefix matches `number` (the longest
+        prefix wins). Fuzzy hits and read-only locations are listed only."""
+        rules = self.rules()
+        items: dict[str, dict[str, Any]] = {}
+        for actor in dict.fromkeys(actors):
+            found = self.search(
+                actor,
+                aliases=rules["alias_match"],
+                fuzzy=rules["fuzzy"],
+                page_size=PAGE_SIZE_MAX,
+            )["items"]
+            for item in found:
+                if item["id"] not in items or items[item["id"]]["fuzzy"]:
+                    items[item["id"]] = item
+        archive = [item for item in items.values() if item["role"] == "archive"]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for item in archive:
+            if not item["fuzzy"]:
+                groups.setdefault(normalize(item["name"]), []).append(item)
+        number = number.upper()
+
+        def longest(prefixes: list[str]) -> int:
+            return max((len(p) for p in prefixes if number.startswith(p)), default=0)
+
+        libraries = self.libraries()
+        categories = [
+            {
+                "id": lib["id"],
+                "label": lib["label"],
+                "path": lib["path"],
+                "prefixes": lib["prefixes"],
+                "film_count": lib["film_count"],
+                "prefix_match": longest(lib["prefixes"]) > 0,
+            }
+            for lib in libraries
+            if lib["kind"] == "category"
+        ]
+        matched = max(
+            (c for c in categories if c["prefix_match"]),
+            key=lambda c: longest(c["prefixes"]),
+            default=None,
+        )
+        if archive and not rules["category_always"]:
+            categories = []
+        selected = None
+        if len(groups) == 1 and rules["preselect_single"]:
+            (locations,) = groups.values()
+            position = {lib["id"]: lib["position"] for lib in libraries}
+            chosen = self._location(locations, rules["multi_location"], position)
+            selected = {"kind": "performer", "id": chosen["id"]}
+        elif not archive and rules["category_prefix"] and matched is not None:
+            selected = {"kind": "category", "id": matched["id"]}
+        hint = (
+            matched is not None
+            and selected is not None
+            and selected["kind"] == "performer"
+            and rules["second_target_hint"]
+        )
+        return {
+            "items": list(items.values()),
+            "categories": categories,
+            "selected": selected,
+            "second_hint": matched["id"] if hint and matched is not None else None,
+            "new_actor": {
+                "library_id": rules["new_actor_library"],
+                "name": actors[0]
+                if actors and rules["new_actor_name"] == "actor"
+                else "",
+            }
+            if rules["allow_new_actor"]
+            else None,
+        }
+
+    def _location(
+        self, locations: list[dict[str, Any]], rule: str, position: dict[str, int]
+    ) -> dict[str, Any]:
+        """One actor's location by `multi_location` (§8); library order breaks
+        ties and stands in when no receipt names a location."""
+        ordered = sorted(locations, key=lambda item: position[item["library_id"]])
+        if rule == "most":
+            return max(ordered, key=lambda item: item["film_count"] or 0)
+        if rule == "recent":
+            paths = {str(Path(item["unc_path"])).casefold(): item for item in ordered}
+            for receipt, _ in self.task_receipts().values():
+                parent = str(Path(receipt["target_path"]).parent).casefold()
+                if parent in paths:
+                    return paths[parent]
+        return ordered[0]
+
+    def task_receipts(self) -> dict[str, tuple[dict[str, Any], str]]:
+        """operation id → (receipt, message) of every archive task this engine
+        completed, newest first."""
+        with self.reading() as conn:
+            rows = conn.execute(
+                "SELECT operation_id, receipt_json, message FROM archive_tasks"
+                " WHERE receipt_json IS NOT NULL ORDER BY updated_at DESC, rowid DESC"
+            ).fetchall()
+        return {
+            row["operation_id"]: (json.loads(row["receipt_json"]), row["message"] or "")
+            for row in rows
+        }
 
     # ── aliases (§6) ────────────────────────────────────────────────────
     def add_alias(self, performer_id: str, alias: str) -> dict[str, Any]:
@@ -726,6 +836,7 @@ def _performer(
         "aliases": [alias for _, alias in group],
         "alias_ids": [alias_id for alias_id, _ in group],
         "library_id": row["library_id"],
+        "role": row["library_role"],
         "is_missing": bool(row["is_missing"]),
         "film_count": row["film_count"],
         "fuzzy": bool(row["fuzzy_hit"]),

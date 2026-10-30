@@ -1195,6 +1195,7 @@ def film_detail(
             "manual": bool(
                 target and target.native_identity.scheme == "manual_directory"
             ),
+            "kind": target_kind(target) if target else None,
             "target_path": wf.archive_path
             or (
                 str(Path(target.export_identity) / target.relative_path)
@@ -1208,6 +1209,21 @@ def film_detail(
             "kept": [item for items in kept.values() for item in items],
         },
     }
+
+
+# #361 §9.7/§10: the archive target kind of each bound scheme; a Filmpaw-era
+# binding (`export_object_id`) was a performer directory
+TARGET_KINDS = {
+    "library_performer": "performer",
+    "export_object_id": "performer",
+    "library_category": "category",
+    "library_new_actor": "new_actor",
+    "manual_directory": "manual",
+}
+
+
+def target_kind(target: m.TargetIdentity) -> str | None:
+    return TARGET_KINDS.get(target.native_identity.scheme)
 
 
 def _completed_at(wf: m.FilmWorkflow) -> datetime | None:

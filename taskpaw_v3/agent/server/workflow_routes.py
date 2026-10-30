@@ -34,15 +34,32 @@ from .workflow_reads import CodedConflict, WorkflowProvider, _mapped
 from .workflow_reads import off_state as off_state  # retained for callers
 
 
+class NewActorBody(BaseModel):
+    """「新建演员目录」: created in that actor library by the archive (§9.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+    library_id: str = Field(min_length=1, max_length=256)
+    name: str = Field(min_length=1, max_length=256)
+
+
 class ConfirmBody(BaseModel):
+    """One target, and for an actor target an optional category (§9.4, §10)."""
+
     model_config = ConfigDict(extra="forbid")
     performer_id: str | None = Field(default=None, min_length=1, max_length=256)
+    category_id: str | None = Field(default=None, min_length=1, max_length=256)
+    new_actor: NewActorBody | None = None
     target_dir: str | None = Field(default=None, min_length=1)
+    second_category_id: str | None = Field(default=None, min_length=1, max_length=256)
 
     @model_validator(mode="after")
     def one_target(self) -> ConfirmBody:
-        if (self.performer_id is None) == (self.target_dir is None):
-            raise ValueError("exactly one of performer_id and target_dir is required")
+        chosen = (self.performer_id, self.category_id, self.new_actor, self.target_dir)
+        if sum(value is not None for value in chosen) != 1:
+            raise ValueError(
+                "exactly one of performer_id, category_id, new_actor and target_dir"
+                " is required"
+            )
         return self
 
 
@@ -145,6 +162,17 @@ def open_folder(path: Path) -> None:
     raise NotImplementedError("只支持在 Windows 上打开文件夹")
 
 
+def open_response(path: Path | None) -> Response:
+    """Open a folder for the operator: 204, 404 without one, 500 refused."""
+    if path is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    try:
+        open_folder(path)
+    except OSError as exc:  # Explorer refused (access, vanished share)
+        raise HTTPException(status_code=500, detail=f"无法打开文件夹：{exc}") from None
+    return Response(status_code=204)
+
+
 def find_vlc() -> Path | None:
     """Prefer VLC's registered installation, then the standard Windows paths."""
     if sys.platform != "win32":
@@ -205,16 +233,7 @@ def register_workflow_routes(
     def _runtime(host: WorkflowHostLike) -> LocalRuntime:
         return reads.runtime(host)
 
-    def _open(path: Path | None) -> Response:
-        if path is None:
-            raise HTTPException(status_code=404, detail="文件夹不存在")
-        try:
-            open_folder(path)
-        except OSError as exc:  # Explorer refused (access, vanished share)
-            raise HTTPException(
-                status_code=500, detail=f"无法打开文件夹：{exc}"
-            ) from None
-        return Response(status_code=204)
+    _open = open_response
 
     def _dispatcher(host: WorkflowHostLike) -> Any:
         dispatcher = getattr(host, "dispatcher", None)
@@ -302,14 +321,27 @@ def register_workflow_routes(
 
     @app.get("/control/workflow/films/{film_id}/target")
     def workflow_target(
-        film_id: str, performer_id: str = "", target_dir: str | None = None
+        film_id: str,
+        performer_id: str = "",
+        target_dir: str | None = None,
+        category_id: str = "",
+        library_id: str = "",
+        actor_name: str = "",
     ) -> dict[str, Any]:
-        """V3 §7.3: the archive target preflight and the NFO actor's candidates."""
+        """V3 §7.3: the archive target preflight, the NFO actors' candidates
+        and the rules' preselection (#361 §9.6)."""
         host = _host()
         if host.finalizer is None:
             raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
         with _mapped():
-            return host.finalizer.preflight(film_id, performer_id or None, target_dir)
+            return host.finalizer.preflight(
+                film_id,
+                performer_id or None,
+                target_dir,
+                category_id=category_id or None,
+                library_id=library_id or None,
+                actor_name=actor_name or None,
+            )
 
     @app.get("/control/workflow/performers")
     def workflow_performers(
@@ -334,6 +366,23 @@ def register_workflow_routes(
                 page_size=page_size,
             )
 
+    @app.get("/control/workflow/performers/{performer_id}")
+    def workflow_performer(performer_id: str) -> dict[str, Any]:
+        """One performer, every location of its name group, its aliases and
+        the group's recent archive receipts (§10)."""
+        from taskpaw_v3.workflow import library_history
+
+        host = _host()
+        store = getattr(host, "library", None)
+        if store is None:
+            raise HTTPException(status_code=503, detail="片库尚未启动")
+        with _mapped():
+            detail = store.performer(performer_id)
+            detail["receipts"] = library_history.recent(
+                _runtime(host), store, [loc["unc_path"] for loc in detail["locations"]]
+            )
+        return detail
+
     @app.get("/control/workflow/performers/{performer_id}/thumb")
     def workflow_thumb(performer_id: str, request: Request) -> Response:
         host = _host()
@@ -350,9 +399,16 @@ def register_workflow_routes(
     def workflow_confirm(film_id: str, body: ConfirmBody) -> dict[str, str]:
         host = _host()
         with _mapped():
-            return {
-                "approval_id": host.confirm(film_id, body.performer_id, body.target_dir)
-            }
+            approval_id = host.confirm(
+                film_id,
+                body.performer_id,
+                body.target_dir,
+                category_id=body.category_id,
+                library_id=body.new_actor.library_id if body.new_actor else None,
+                actor_name=body.new_actor.name if body.new_actor else None,
+                second_category_id=body.second_category_id,
+            )
+        return {"approval_id": approval_id}
 
     @app.post("/control/workflow/films/{film_id}/retry")
     def workflow_retry(film_id: str, body: RetryBody) -> dict[str, bool]:

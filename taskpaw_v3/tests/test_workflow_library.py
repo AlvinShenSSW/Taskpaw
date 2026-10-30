@@ -307,6 +307,70 @@ def test_scan_adds_visible_actor_dirs_with_their_film_counts(store, tmp_path):
     assert isinstance(info["free_bytes"], int)
 
 
+def test_a_row_born_after_the_snapshot_is_not_marked_missing(
+    store, tmp_path, monkeypatch
+):
+    lib = actor_library(store, tmp_path, "Alice", "Gone")
+    scan_library(store, lib)
+    base = Path(store.library(lib)["path"])
+    real = library_scan.list_dirs
+    inserted = []
+    scan_at = "2026-10-30T10:00:00+00:00"
+    monkeypatch.setattr(library_scan, "now_iso", lambda: scan_at)  # same second
+
+    def list_then_mkdir_insert(path):
+        names = real(path)
+        if not inserted:  # the archive's mkdir lands after the listing
+            inserted.append(path)
+            with store.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO performers(id, name, name_norm, library_id,"
+                    " folder_name, path, first_seen_at, last_seen_at, is_missing)"
+                    " VALUES ('new','New','new',?, 'New', ?,"
+                    " ?, ?, 0)",
+                    (lib, str(base / "New"), scan_at, scan_at),
+                )
+        return names
+
+    shutil.rmtree(base / "Gone")
+    monkeypatch.setattr(library_scan, "list_dirs", list_then_mkdir_insert)
+    result = scan_library(store, lib)
+    rows = performers(store, lib)
+    assert rows["New"]["is_missing"] == 0
+    assert rows["Gone"]["is_missing"] == 1  # an ordinary vanished folder
+    assert result.missing == 1
+
+
+def test_a_row_revived_after_the_snapshot_stays_present(store, tmp_path, monkeypatch):
+    """CXb5: an archive mkdir revives a missing actor's row (ON CONFLICT(path))
+    after the scan listed the root; the scan must not mark it missing again."""
+    lib = actor_library(store, tmp_path, "Alice", "Old")
+    scan_library(store, lib)
+    base = Path(store.library(lib)["path"])
+    shutil.rmtree(base / "Old")
+    scan_library(store, lib)
+    assert performers(store, lib)["Old"]["is_missing"] == 1
+    real = library_scan.list_dirs
+    revived = []
+
+    def list_then_revive(path):
+        names = real(path)
+        if not revived:  # the archive recreates Old after the listing
+            revived.append(path)
+            with store.transaction() as conn:
+                conn.execute(
+                    "UPDATE performers SET is_missing=0 WHERE library_id=?"
+                    " AND folder_name='Old'",
+                    (lib,),
+                )
+        return names
+
+    monkeypatch.setattr(library_scan, "list_dirs", list_then_revive)
+    result = scan_library(store, lib)
+    assert performers(store, lib)["Old"]["is_missing"] == 0
+    assert result.missing == 0
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows attributes")
 def test_scan_skips_hidden_and_system_directories(store, tmp_path):
     import ctypes

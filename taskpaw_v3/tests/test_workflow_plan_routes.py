@@ -421,6 +421,8 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
     with scraped.fake:
         data = client.get(url, params={"performer_id": "actor"}).json()
         candidates = data.pop("candidates")
+        new_actor = data.pop("new_actor")  # #364 §9.6: added, none renamed
+        assert new_actor["name"] == "Actor"
         assert data == {
             "film_dir": FILM_DIR,
             "performer_id": "actor",
@@ -430,6 +432,11 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
             "absent": True,
             "error_code": None,
             "message": None,
+            "category_id": None,
+            "archived": False,
+            "categories": [],
+            "selected": {"kind": "performer", "id": "actor"},
+            "second_hint": None,
         }
         assert candidates["query"] == ["Actor"]
         (item,) = candidates["items"]  # today's fields stay (#363 §10)

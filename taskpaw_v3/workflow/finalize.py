@@ -28,6 +28,7 @@ from . import file_identity
 from . import models as m
 from .intake_reclaim import remove_work_tree
 from .library_archive import LibraryArchive, LibraryRefused, LibraryUnavailable
+from .library_store import normalize
 from .local_runtime import PRODUCER, LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.finalize")
@@ -44,6 +45,24 @@ LIBRARY_WAIT = "等待片库可用"
 CUTOVER = "升级前未完成的归档，请重新确认入库"
 # preflight error codes the 待确认 dialog knows; the message says the rest
 _UI_CODES = {"readonly": "permission", "invalid": "permission"}
+# §9.4: an actor binding's second target lives in library.db, keyed by its hash
+SECOND_MISSING = "入库目标记录缺失，请重新确认入库"
+_SECOND_KINDS = ("performer", "new_actor")
+_SECOND_SCHEMES = ("library_performer", "library_new_actor")
+# the scheme of each bound target kind → the archive() argument its volume is
+_CHOICES = {
+    "library_performer": "performer_id",
+    "manual_directory": "target_dir",
+    "library_category": "category_id",
+    "library_new_actor": "library_id",
+}
+# "<place>目录下已有同名目录"
+_PLACE = {
+    "performer": "演员",
+    "new_actor": "演员",
+    "category": "类型",
+    "manual": "目标",
+}
 
 Scope = Literal["input", "workcopy"]
 
@@ -60,8 +79,28 @@ class ConfirmError(Exception):
         self.code = code
 
 
-def performer_uuid(performer_id: str) -> str:
-    return str(uuid.uuid5(_PERFORMER_NS, f"taskpaw-performer:{performer_id}"))
+class _Unbound(Exception):
+    """An actor binding whose second-target row is missing (§9.4)."""
+
+
+def _kind(
+    performer_id: str | None,
+    target_dir: str | None,
+    category_id: str | None,
+    library_id: str | None,
+) -> str | None:
+    """The one chosen target kind; None for no choice, "" for several."""
+    chosen = [
+        kind
+        for kind, value in (
+            ("performer", performer_id),
+            ("manual", target_dir),
+            ("category", category_id),
+            ("new_actor", library_id),
+        )
+        if value
+    ]
+    return chosen[0] if len(chosen) == 1 else "" if chosen else None
 
 
 def _host(target_path: str) -> str:
@@ -108,25 +147,32 @@ class Finalizer:
         film_id: str,
         performer_id: str | None = None,
         target_dir: str | None = None,
+        *,
+        category_id: str | None = None,
+        library_id: str | None = None,
+        actor_name: str | None = None,
     ) -> dict[str, Any]:
         """Where 确认入库 would archive, read-only: the target folder under the
-        chosen performer or manual directory and whether it is free, plus the library's
-        candidates for the film's NFO actors (0 / 1 / many; the dialog pre-selects only one;
-        missing performers are not listed).
+        chosen performer, category, new actor directory or manual directory and
+        whether it is free (or already holds this engine's copy of this package,
+        `archived`, §9.5), plus the library's candidates for the film's NFO
+        actors, the category directories, the rules' preselection
+        (`selected`), the second-target hint and the new actor defaults (§9.6).
 
         `error_code`: offline (the library or its share unreachable), permission
-        (also a read-only library or an invalid name), missing (the performer
-        record is gone), duplicate (the folder exists). It is mapped from the
-        refusal's `code`, never from its status (§9.1).
+        (also a read-only library or an invalid name), missing (the record is
+        gone), actor_exists (a new actor's directory exists), duplicate (the
+        folder exists). It is mapped from the refusal's `code`, never from its
+        status (§9.1).
 
-        Without an explicit target, exactly one candidate is checked in the same
-        call (U1 Codex r2 F4; `performer_id` then names it): the list reads one
-        answer per film and still shows a blocked target.
+        Without an explicit target, the preselected one is checked in the same
+        call (U1 Codex r2 F4; `performer_id` / `category_id` then names it): the
+        list reads one answer per film and still shows a blocked target.
         """
         from . import board
 
-        if performer_id and target_dir:
-            raise ConfirmError("请选择演员或手动入库目录，不能同时选择")
+        if _kind(performer_id, target_dir, category_id, library_id) == "":
+            raise ConfirmError("请只选择一个入库目标")
         rt = self.runtime
         film = rt.store.get_film(rt.operator, film_id).film
         if film.current_final_revision is None:
@@ -139,36 +185,63 @@ class Finalizer:
             "film_dir": film_dir,
             "performer_id": performer_id,
             "target_dir": target_dir,
+            "category_id": category_id,
             "manual": bool(target_dir),
             "target_path": None,
             "absent": None,
+            "archived": None,
             "error_code": None,
             "message": None,
             "candidates": None,
+            "categories": None,
+            "selected": None,
+            "second_hint": None,
+            "new_actor": None,
         }
         row = board.board_film(rt, film_id)
-        actors = board.film_facts(rt, row, final=final).actors if row else ()
+        facts = board.film_facts(rt, row, final=final) if row else None
+        actors = list(dict.fromkeys(facts.actors)) if facts else []
         try:
-            items: dict[str, dict[str, Any]] = {}
-            for actor in dict.fromkeys(actors):
-                for item in self.library.performers(actor)["items"]:
-                    items.setdefault(item["id"], item)
-            value["candidates"] = {
-                "query": list(dict.fromkeys(actors)),
-                "items": list(items.values()),
-            }
-            if not performer_id and not target_dir and len(items) == 1:
-                performer_id = value["performer_id"] = next(iter(items))
-            if performer_id or target_dir:
+            found = self.library.candidates(
+                actors, (facts.number if facts else None) or film_dir
+            )
+            value.update(
+                candidates={"query": actors, "items": found["items"]},
+                categories=found["categories"],
+                new_actor=found["new_actor"],
+            )
+            kind = _kind(performer_id, target_dir, category_id, library_id)
+            if kind is None and found["selected"] is not None:
+                kind, chosen = found["selected"]["kind"], found["selected"]["id"]
+                if kind == "performer":
+                    performer_id = value["performer_id"] = chosen
+                else:
+                    category_id = value["category_id"] = chosen
+            if kind is not None:
+                value["selected"] = {
+                    "kind": kind,
+                    "id": performer_id or category_id or library_id or target_dir,
+                }
+                if kind in _SECOND_KINDS:
+                    value["second_hint"] = found["second_hint"]
                 proof = self.library.target(
-                    performer_id, film_dir, target_dir=target_dir
+                    performer_id,
+                    film_dir,
+                    target_dir=target_dir,
+                    category_id=category_id,
+                    library_id=library_id,
+                    actor_name=actor_name,
+                    final_hash=final.manifest_hash,
                 )
-                value["absent"] = bool(proof["absent"])
-                value["target_path"] = proof["target_path"]
-                if not value["absent"]:
+                value.update(
+                    absent=bool(proof["absent"]),
+                    archived=bool(proof["archived"]),
+                    target_path=proof["target_path"],
+                )
+                if not proof["absent"] and not proof["archived"]:
                     value.update(
                         error_code="duplicate",
-                        message=f"{'目标' if target_dir else '演员'}目录下已有同名目录：{film_dir}",
+                        message=f"{_PLACE[kind]}目录下已有同名目录：{film_dir}",
                     )
         except LibraryUnavailable as e:
             value.update(error_code="offline", message=f"片库不可用：{e}")
@@ -182,10 +255,20 @@ class Finalizer:
         film_id: str,
         performer_id: str | None = None,
         target_dir: str | None = None,
+        *,
+        category_id: str | None = None,
+        library_id: str | None = None,
+        actor_name: str | None = None,
+        second_category_id: str | None = None,
     ) -> str:
-        """Approve archiving this film's final package under the chosen folder; the approval id."""
-        if bool(performer_id) == bool(target_dir):
-            raise ConfirmError("请选择一个演员或手动入库目录")
+        """Approve archiving this film's final package under the chosen folder
+        and, for an actor target, optionally also into one category directory
+        (§9.4); the approval id."""
+        kind = _kind(performer_id, target_dir, category_id, library_id)
+        if not kind:
+            raise ConfirmError("请选择一个演员、类型目录、新建演员目录或手动入库目录")
+        if second_category_id and kind not in _SECOND_KINDS:
+            raise ConfirmError("第二目标只能配合演员目录或新建演员目录")
         rt = self.runtime
         op, store = rt.operator, rt.store
         wf = store.film_workflow(op, film_id)
@@ -202,17 +285,41 @@ class Finalizer:
         final = store.get_final_manifest(op, film_id, film.current_final_revision)
         film_dir = PurePosixPath(final.output_relative_path).name
         try:
-            proof = self.library.target(performer_id, film_dir, target_dir=target_dir)
+            proof = self.library.target(
+                performer_id,
+                film_dir,
+                target_dir=target_dir,
+                category_id=category_id,
+                library_id=library_id,
+                actor_name=actor_name,
+                final_hash=final.manifest_hash,
+            )
+            second = (
+                self.library.target(
+                    None,
+                    film_dir,
+                    category_id=second_category_id,
+                    final_hash=final.manifest_hash,
+                )
+                if second_category_id
+                else None
+            )
         except LibraryUnavailable as e:
             raise ConfirmError(f"片库不可用：{e}") from e
         except LibraryRefused as e:
             raise ConfirmError(e.message) from e
-        if not proof["absent"]:
-            raise ConfirmError(
-                f"{'目标' if target_dir else '演员'}目录下已有同名目录：{film_dir}"
-            )
+        # absent, or this engine's verified copy of this package (§9.5)
+        for place, found in ((_PLACE[kind], proof), (_PLACE["category"], second)):
+            if found is not None and not (found["absent"] or found["archived"]):
+                raise ConfirmError(f"{place}目录下已有同名目录：{film_dir}")
         target = self._target(
-            performer_id, film_dir, proof["expected_target"], target_dir
+            film_dir,
+            proof["expected_target"],
+            performer_id=performer_id,
+            target_dir=target_dir,
+            category_id=category_id,
+            library_id=library_id,
+            actor_name=actor_name,
         )
         input_cleanup = self._cleanup_manifest(
             "input", source.manifest_hash, source.items
@@ -251,15 +358,18 @@ class Finalizer:
             workcopy_cleanup_hash=m.digest(workcopy_cleanup),
         )
         signer = rt.archive_auth
+        summary = f"{kind} {performer_id or target_dir or category_id or library_id}"
+        if library_id:
+            summary += f" {actor_name}"
+        if second_category_id:
+            summary += f" + category {second_category_id}"
         observations = m.ApprovalObservations(
             metadata=rt.evidence("final_metadata", film_dir, producer=signer),
-            candidate=rt.evidence(
-                "operator_choice",
-                f"manual {target_dir}" if target_dir else f"performer {performer_id}",
-                producer=signer,
-            ),
+            candidate=rt.evidence("operator_choice", summary, producer=signer),
             target=rt.evidence(
-                "library_target", payload_digest=m.digest(proof), producer=signer
+                "library_target",
+                payload_digest=m.digest(proof if second is None else [proof, second]),
+                producer=signer,
             ),
             input_cleanup=rt.evidence("input_members_checked", producer=signer),
             workcopy_cleanup=rt.evidence("workcopy_members_checked", producer=signer),
@@ -282,6 +392,12 @@ class Finalizer:
                 or put.context_hash is None
             ):
                 raise ConfirmError(f"审批上下文未就绪：{put.status}")
+            if kind in _SECOND_KINDS:  # always, NULL without a second target (§9.4)
+                self.library.bind_second(
+                    m.digest(binding),
+                    second_category_id,
+                    second["expected_target"] if second else None,
+                )
             approval_id = _new_id()
             store.approve(
                 op,
@@ -300,35 +416,73 @@ class Finalizer:
             raise ConfirmError(
                 f"影片状态已变化，请刷新后重试：{exc}", code=exc.code
             ) from exc
+        except LibraryUnavailable as e:
+            raise ConfirmError(f"片库不可用：{e}") from e
         return approval_id
 
     def _target(
         self,
-        performer_id: str | None,
         film_dir: str,
         expected: dict[str, Any],
+        *,
+        performer_id: str | None = None,
         target_dir: str | None = None,
+        category_id: str | None = None,
+        library_id: str | None = None,
+        actor_name: str | None = None,
     ) -> m.TargetIdentity:
-        root = (  # the manual root id is unchanged from the Filmpaw era (§9.7)
-            str(uuid.uuid5(_PERFORMER_NS, f"filmpaw-manual-target:{target_dir}"))
-            if target_dir
-            else performer_uuid(str(performer_id))
-        )
+        """The §9.7 encoding of one target kind. `expected_absent` means the
+        film folder is absent or holds this engine's verified copy (§9.5)."""
+        scheme: Literal[
+            "manual_directory",
+            "library_category",
+            "library_new_actor",
+            "library_performer",
+        ]
+        relative = film_dir
+        if target_dir:  # the manual root id is unchanged from the Filmpaw era
+            scheme, volume, key = (
+                "manual_directory",
+                target_dir,
+                f"filmpaw-manual-target:{target_dir}",
+            )
+        elif category_id:
+            scheme, volume = "library_category", category_id
+            key = f"taskpaw-category:{category_id}"
+        elif library_id:
+            name = str(actor_name)
+            scheme, volume = "library_new_actor", library_id
+            key = f"taskpaw-new-actor:{library_id}:{normalize(name)}"
+            relative = f"{name}/{film_dir}"
+        else:
+            scheme, volume = "library_performer", str(performer_id)
+            key = f"taskpaw-performer:{performer_id}"
+        root = str(uuid.uuid5(_PERFORMER_NS, key))
         return m.TargetIdentity(
             root_id=root,
             host_identity=_host(expected["target_path"]),
             export_identity=expected["target_path"],
             native_identity=m.NativeIdentity(
-                scheme="manual_directory" if target_dir else "library_performer",
+                scheme=scheme,
                 root_id=root,
-                volume_or_export_id=target_dir or str(performer_id),
+                volume_or_export_id=volume,
                 object_id=json.dumps(expected["directory_identity"]),
                 observed_at=self.runtime.clock.now(),
                 evidence_id=_new_id(),
             ),
-            relative_path=film_dir,
+            relative_path=relative,
             expected_absent=True,
         )
+
+    def _second(self, binding: m.ApprovalBinding) -> dict[str, Any] | None:
+        """The second target bound to this approval (`archive(second=...)`), or
+        None. _Unbound: an actor binding without its row (§9.4)."""
+        if binding.target.native_identity.scheme not in _SECOND_SCHEMES:
+            return None
+        row = self.library.second_target(m.digest(binding))
+        if row is None:
+            raise _Unbound(SECOND_MISSING)
+        return row["second"]
 
     @staticmethod
     def _cleanup_manifest(
@@ -447,19 +601,25 @@ class Finalizer:
             target.native_identity.scheme,
             target.native_identity.volume_or_export_id,
         )
-        if scheme not in ("library_performer", "manual_directory"):
+        if scheme not in _CHOICES:
             self._fail(operation_id, CUTOVER)  # a Filmpaw-era binding (§9.8)
             return
-        manual = scheme == "manual_directory"
+        choice = dict.fromkeys(
+            ("performer_id", "target_dir", "category_id", "library_id", "actor_name")
+        )
+        choice[_CHOICES[scheme]] = volume
+        if scheme == "library_new_actor":
+            choice["actor_name"] = PurePosixPath(target.relative_path).parts[0]
         final = self.runtime.store.get_final_manifest(
             self.runtime.operator, film_id, binding.final_revision
         )
         try:
+            second = self._second(binding)
             self.library.archive(
                 operation_id,
                 self._package_dir(final),
-                performer_id=None if manual else volume,
-                target_dir=volume if manual else None,
+                **choice,
+                second=second,
                 expected_target={
                     "target_path": target.export_identity,
                     "directory_identity": json.loads(target.native_identity.object_id),
@@ -479,6 +639,8 @@ class Finalizer:
             waiting[film_id] = LIBRARY_WAIT  # looked up by operation key next tick
         except LibraryRefused as e:  # permanent (§9.1): a new confirm is needed
             self._fail(operation_id, f"片库拒绝归档：{e.message}")
+        except _Unbound:  # never archive one copy of a two-copy approval
+            self._fail(operation_id, SECOND_MISSING)
 
     def _poll(
         self,
@@ -558,7 +720,27 @@ class Finalizer:
         target_path = str(
             Path(binding.target.export_identity) / binding.target.relative_path
         )
-        if files != expected or receipt["target_path"] != target_path:
+        try:
+            second = self._second(binding)
+        except LibraryUnavailable:
+            return  # read again next tick; cleanup waits for this receipt
+        except _Unbound:
+            self._fail(op.operation_id, SECOND_MISSING, op.version)
+            return
+        # §9.4: one file list covers both copies; the second is `<category>\<film>`
+        second_path = (
+            str(
+                Path(second["expected_target"]["target_path"])
+                / PurePosixPath(binding.target.relative_path).name
+            )
+            if second
+            else None
+        )
+        if (
+            files != expected
+            or receipt["target_path"] != target_path
+            or (receipt.get("second") or {}).get("target_path") != second_path
+        ):
             self._fail(op.operation_id, "归档回执与已批准清单不一致", op.version)
             return
         signer = rt.archive_auth

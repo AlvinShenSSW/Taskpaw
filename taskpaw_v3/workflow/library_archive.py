@@ -29,7 +29,7 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from . import models as m
-from .library_store import PAGE_SIZE_DEFAULT, LibraryStore, now_iso
+from .library_store import PAGE_SIZE_DEFAULT, LibraryStore, normalize, now_iso
 
 log = logging.getLogger("taskpaw.workflow.library_archive")
 
@@ -39,6 +39,7 @@ SAVE_SECONDS = 0.2
 REFUSED = 412  # every permanent refusal (§9.1): waiting cannot help
 CONFLICT = "目标已有同名影片目录"
 MISMATCH = "目标目录内容与批准清单不一致"
+ACTOR_EXISTS = "演员目录已存在，请选择已有演员"
 _REPARSE_POINT = 0x400
 _RELATIVE = TypeAdapter(m.RelativePath)
 
@@ -166,30 +167,52 @@ def _tree(root: Path) -> dict[str, int]:
 
 
 def _approved(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Filmpaw's `_workflow_files`: '/'-separated, unique, sized and hashed."""
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for entry in files:
-        path, size, sha = entry.get("path"), entry.get("size"), entry.get("sha256")
-        if not isinstance(path, str) or not path or "\\" in path:
-            raise _refused(f"清单路径无效：{path!r}")
-        for part in path.split("/"):
-            check_name(part)
-        if path in seen:
-            raise _refused(f"清单路径重复：{path}")
-        if (
-            type(size) is not int
-            or size < 0
-            or not isinstance(sha, str)
-            or len(sha) != 64
-            or sha.strip("0123456789abcdef")
-        ):
-            raise _refused(f"清单条目无效：{path}")
-        seen.add(path)
-        out.append({"path": path, "size": size, "sha256": sha})
-    if not out:
+    """The approved final manifest (already validated by its model); every
+    '/'-separated part is still a name the NAS accepts."""
+    if not files:
         raise _refused("清单为空")
-    return out
+    for entry in files:
+        for part in entry["path"].split("/"):
+            check_name(part)
+    return [{key: f[key] for key in ("path", "size", "sha256")} for f in files]
+
+
+def _spec(
+    performer_id: str | None,
+    target_dir: str | None,
+    category_id: str | None = None,
+    library_id: str | None = None,
+    actor_name: str | None = None,
+) -> dict[str, Any]:
+    """One target (§9.1): a performer, a manual directory, a category, or a new
+    actor directory in an actor library root."""
+    if sum(bool(v) for v in (performer_id, target_dir, category_id, library_id)) != 1:
+        raise ValueError("exactly one target is required")
+    return {
+        "performer_id": performer_id or None,
+        "target_dir": target_dir or None,
+        "category_id": category_id or None,
+        "library_id": library_id or None,
+        "actor_name": actor_name if library_id else None,
+    }
+
+
+def _expected(value: dict[str, Any]) -> dict[str, Any]:
+    """The approval's target proof; Filmpaw-era manual proofs hold integers."""
+    try:
+        return {
+            "target_path": str(value["target_path"]),
+            "directory_identity": [str(v) for v in value["directory_identity"]],
+        }
+    except (KeyError, TypeError) as exc:
+        raise _refused("缺少审批时的目标证明") from exc
+
+
+def _same(parent: Path, identity: list[str], expected: dict[str, Any]) -> bool:
+    return (
+        str(parent) == expected["target_path"]
+        and identity == expected["directory_identity"]
+    )
 
 
 def _message(exc: BaseException) -> str:
@@ -296,19 +319,86 @@ class LibraryArchive:
         """The thumbnail and its ETag, or None."""
         return self._db().thumb(performer_id)
 
+    def candidates(self, actors: list[str], number: str) -> dict[str, Any]:
+        """The 待确认 candidates and preselection for a film (§9.6)."""
+        return self._db().candidates(actors, number)
+
+    # ── the second target bound to one approval (§9.4) ──────────────────
+    def bind_second(
+        self,
+        binding_hash: str,
+        category_id: str | None,
+        expected_target: dict[str, Any] | None,
+    ) -> None:
+        """Written for every performer / new-actor approval, NULL without a
+        second target; a row whose binding never became an approval is inert."""
+        with self._db().transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO second_targets(binding_hash, category_id,"
+                " target_path, directory_identity, created_at) VALUES (?,?,?,?,?)",
+                (
+                    binding_hash,
+                    category_id,
+                    expected_target["target_path"] if expected_target else None,
+                    json.dumps(expected_target["directory_identity"])
+                    if expected_target
+                    else None,
+                    now_iso(),
+                ),
+            )
+
+    def second_target(self, binding_hash: str) -> dict[str, Any] | None:
+        """None without a row; `second` None when none was chosen, else
+        `{category_id, expected_target}` as `archive(second=...)` takes it."""
+        with self._db().reading() as conn:
+            row = conn.execute(
+                "SELECT * FROM second_targets WHERE binding_hash=?", (binding_hash,)
+            ).fetchone()
+        if row is None:
+            return None
+        if row["category_id"] is None:
+            return {"second": None}
+        return {
+            "second": {
+                "category_id": row["category_id"],
+                "expected_target": {
+                    "target_path": row["target_path"],
+                    "directory_identity": json.loads(row["directory_identity"]),
+                },
+            }
+        }
+
     # ── target proof (§9.2) ─────────────────────────────────────────────
-    def _parent(
-        self, store: LibraryStore, performer_id: str | None, target_dir: str | None
-    ) -> Path:
-        if target_dir is not None:
-            if not os.path.isabs(target_dir):
+    @staticmethod
+    def _parent(store: LibraryStore, spec: dict[str, Any]) -> Path:
+        """The directory the target's proof is taken of (§9.1)."""
+        if spec["target_dir"] is not None:
+            if not os.path.isabs(spec["target_dir"]):
                 raise _refused("入库目录必须是绝对路径")
-            return Path(target_dir)
+            return Path(spec["target_dir"])
         with store.reading() as conn:
+            if spec["category_id"] is not None:
+                row = conn.execute(
+                    "SELECT path FROM libraries WHERE id=? AND kind='category'",
+                    (spec["category_id"],),
+                ).fetchone()
+                if row is None:
+                    raise _refused("所选类型目录已不存在", "missing")
+                return Path(row["path"])
+            if spec["library_id"] is not None:
+                row = conn.execute(
+                    "SELECT path, kind, role FROM libraries WHERE id=?",
+                    (spec["library_id"],),
+                ).fetchone()
+                if row is None:
+                    raise _refused("所选片库已不存在", "missing")
+                if row["kind"] != "actor" or row["role"] != "archive":
+                    raise _refused("只能在可入库的演员片库中新建演员目录", "readonly")
+                return Path(row["path"])
             row = conn.execute(
                 "SELECT p.path, p.is_missing, l.role FROM performers p"
                 " JOIN libraries l ON l.id = p.library_id WHERE p.id=?",
-                (performer_id,),
+                (spec["performer_id"],),
             ).fetchone()
         if row is None:
             raise _refused("所选演员记录已不存在", "missing")
@@ -319,22 +409,26 @@ class LibraryArchive:
         return Path(row["path"])
 
     def _prove(
-        self,
-        store: LibraryStore,
-        performer_id: str | None,
-        target_dir: str | None,
-        film: str,
-    ) -> tuple[Path, list[str], bool]:
-        """The target parent, its identity and whether `film` is absent there."""
-        parent = self._parent(store, performer_id, target_dir)
+        self, store: LibraryStore, spec: dict[str, Any], film: str
+    ) -> tuple[Path, list[str], bool, Path]:
+        """The proved parent, its identity, whether `film` is absent there and
+        the film folder. A new actor's parent is the library root; the folder
+        is `<root>\\<name>\\<film>` and the actor directory must not exist."""
+        parent = self._parent(store, spec)
+        name = spec["actor_name"]
+        if spec["library_id"] is not None:
+            check_name(name)
+            if name.startswith("."):  # the scan skips dot folders: it would go missing
+                raise _refused("演员目录名不能以 . 开头")
         try:
-            return (
-                parent,
-                directory_identity(parent),
-                film.casefold() not in _names(parent),
-            )
+            identity, names = directory_identity(parent), _names(parent)
         except OSError as exc:
             raise _os_error(exc, "无法读取入库目录") from exc
+        if spec["library_id"] is None:
+            return parent, identity, film.casefold() not in names, parent / film
+        if name.casefold() in names:
+            raise _refused(f"{ACTOR_EXISTS}：{name}", "actor_exists")
+        return parent, identity, True, parent / name / film
 
     @staticmethod
     def _archived(
@@ -359,14 +453,15 @@ class LibraryArchive:
         film_dir: str,
         *,
         target_dir: str | None = None,
+        category_id: str | None = None,
+        library_id: str | None = None,
+        actor_name: str | None = None,
         final_hash: str | None = None,
     ) -> dict[str, Any]:
-        if bool(performer_id) == bool(target_dir):
-            raise ValueError("exactly one of performer_id and target_dir is required")
+        spec = _spec(performer_id, target_dir, category_id, library_id, actor_name)
         store = self._db()
         film = check_name(film_dir)
-        parent, identity, absent = self._prove(store, performer_id, target_dir, film)
-        folder = parent / film
+        parent, identity, absent, folder = self._prove(store, spec, film)
         return {
             "target_path": str(folder),
             "absent": absent,
@@ -389,43 +484,41 @@ class LibraryArchive:
         files: list[dict[str, Any]],
         *,
         target_dir: str | None = None,
+        category_id: str | None = None,
+        library_id: str | None = None,
+        actor_name: str | None = None,
+        second: dict[str, Any] | None = None,
         final_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Queue the copy of one approved package; the same operation key and
-        payload answers the task's snapshot, a different payload is refused."""
-        if bool(performer_id) == bool(target_dir):
-            raise ValueError("exactly one of performer_id and target_dir is required")
+        """Queue the copy of one approved package to its target and, when
+        `second` (`{category_id, expected_target}`) is given, to that category
+        too (§9.4); the same operation key and payload answers the task's
+        snapshot, a different payload is refused."""
+        specs = [
+            {
+                **_spec(performer_id, target_dir, category_id, library_id, actor_name),
+                "expected_target": _expected(expected_target),
+            }
+        ]
+        if second is not None:
+            specs.append(
+                {
+                    **_spec(None, None, second["category_id"]),
+                    "expected_target": _expected(second["expected_target"]),
+                }
+            )
         store = self._db()
         if self._broken:
             raise LibraryUnavailable(self._broken)
-        if not operation_id or len(operation_id) > 128:
-            raise _refused("无效的操作键")
         package = Path(package_dir)
-        if not package.is_absolute():
-            raise _refused("影片包路径必须是绝对路径")
         film = check_name(package.name)
-        try:  # Filmpaw-era manual proofs hold integers: the same identity
-            expected = {
-                "target_path": str(expected_target["target_path"]),
-                "directory_identity": [
-                    str(v) for v in expected_target["directory_identity"]
-                ],
-            }
-        except (KeyError, TypeError) as exc:
-            raise _refused("缺少审批时的目标证明") from exc
         approved = _approved(files)
         payload = {
             "package_dir": str(package),
             "film": film,
             "final_hash": final_hash,
             "files": approved,
-            "targets": [
-                {
-                    "performer_id": performer_id,
-                    "target_dir": target_dir,
-                    "expected_target": expected,
-                }
-            ],
+            "targets": specs,
         }
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
@@ -434,25 +527,24 @@ class LibraryArchive:
             if previous["payload_hash"] != payload_hash:
                 raise _refused("操作键已用于另一个归档请求", "changed")
             return _public(_load(previous))
-        parent, identity, _ = self._prove(store, performer_id, target_dir, film)
-        if (
-            str(parent) != expected["target_path"]
-            or identity != expected["directory_identity"]
-        ):
-            raise _refused("入库目录已变化，请重新确认入库", "changed")
         size = sum(f["size"] for f in approved)
-        targets = [
-            {
-                "name": film,
-                "target_path": str(parent / film),
-                "status": "pending",
-                "size_bytes": size,
-                "progress_bytes": 0,
-                "staging_path": None,
-                "directory_identity": None,
-                "message": "",
-            }
-        ]
+        targets = []
+        for spec in specs:
+            parent, identity, _, folder = self._prove(store, spec, film)
+            if not _same(parent, identity, spec["expected_target"]):
+                raise _refused("入库目录已变化，请重新确认入库", "changed")
+            targets.append(
+                {
+                    "name": film,
+                    "target_path": str(folder),
+                    "status": "pending",
+                    "size_bytes": size,
+                    "progress_bytes": 0,
+                    "staging_path": None,
+                    "directory_identity": None,
+                    "message": "",
+                }
+            )
         now = now_iso()
         with store.transaction() as conn:
             conn.execute(
@@ -610,21 +702,8 @@ class LibraryArchive:
         outcome: str,
         detail: str | None = None,
     ) -> None:
-        op = task["operation_id"]
         with self._writing() as conn:
-            conn.execute(
-                "INSERT INTO archive_events(event_key, operation_id, action,"
-                " target_index, outcome, at, detail) VALUES (?,?,?,?,?,?,?)",
-                (
-                    f"{op}:{action}:{index}:{outcome}",
-                    op,
-                    action,
-                    index,
-                    outcome,
-                    now_iso(),
-                    detail,
-                ),
-            )
+            _insert_event(conn, task["operation_id"], action, index, outcome, detail)
 
     def _step(
         self, task: dict[str, Any], action: str, index: int, fn: Callable[[], Any]
@@ -714,16 +793,9 @@ class LibraryArchive:
             )
         size, notes, copies = sum(expected.values()), [], 0
         for spec, target in zip(payload["targets"], task["targets"]):
-            parent, identity, absent = self._prove(
-                store, spec["performer_id"], spec["target_dir"], film
-            )
-            wanted = spec["expected_target"]
-            if (
-                str(parent) != wanted["target_path"]
-                or identity != wanted["directory_identity"]
-            ):
+            parent, identity, absent, folder = self._prove(store, spec, film)
+            if not _same(parent, identity, spec["expected_target"]):
                 raise _Failed("入库目录已变化，请重新确认入库")
-            folder = parent / film
             if not absent:
                 final_hash = payload["final_hash"]
                 if not final_hash or not self._archived(
@@ -766,7 +838,11 @@ class LibraryArchive:
         index: int,
         target: dict[str, Any],
     ) -> None:
-        parent = Path(payload["targets"][index]["expected_target"]["target_path"])
+        folder = Path(target["target_path"])
+        parent = folder.parent
+        spec = payload["targets"][index]
+        if spec["library_id"] is not None:
+            self._mkdir_actor(task, index, spec, parent)
         staging = parent / f"{STAGING_PREFIX}{task['task_id']}-{uuid.uuid4().hex}"
         # the intended path is recorded before it exists (Filmpaw)
         target.update(status="copying", staging_path=str(staging), message="正在复制")
@@ -785,11 +861,46 @@ class LibraryArchive:
         task.update(phase="committing", message="校验通过，正在提交目标目录")
         self._save(task)
         self._step(
-            task,
-            "commit",
-            index,
-            lambda: self._commit(task, payload, target, parent / payload["film"]),
+            task, "commit", index, lambda: self._commit(task, payload, target, folder)
         )
+
+    def _mkdir_actor(
+        self, task: dict[str, Any], index: int, spec: dict[str, Any], actor: Path
+    ) -> None:
+        """§9.3: create the new actor directory exclusively; its performer row
+        is written with the `succeeded` journal entry, so a later failure
+        leaves an actor the operator can pick when confirming again."""
+        self._event(task, "mkdir_actor", index, "started")
+        try:
+            os.mkdir(actor)
+        except OSError as exc:
+            exists = isinstance(exc, FileExistsError)
+            message = (
+                f"{ACTOR_EXISTS}：{actor.name}"
+                if exists
+                else f"无法创建演员目录：{exc}"
+            )
+            self._event(task, "mkdir_actor", index, "failed", message[:2000])
+            raise _Failed(message) from exc
+        now = now_iso()
+        with self._writing() as conn:
+            _insert_event(conn, task["operation_id"], "mkdir_actor", index, "succeeded")
+            conn.execute(
+                "INSERT INTO performers(id, name, name_norm, library_id, folder_name,"
+                " path, first_seen_at, last_seen_at, is_missing)"
+                " VALUES (?,?,?,?,?,?,?,?,0) ON CONFLICT(path) DO UPDATE SET"
+                " is_missing=0, last_seen_at=excluded.last_seen_at",
+                (
+                    str(uuid.uuid4()),
+                    actor.name,
+                    normalize(actor.name),
+                    spec["library_id"],
+                    actor.name,
+                    str(actor),
+                    now,
+                    now,
+                ),
+            )
 
     def _copy(
         self,
@@ -885,13 +996,18 @@ class LibraryArchive:
 
     @staticmethod
     def _receipt(task: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        primary = task["targets"][0]
+        primary, *second = task["targets"]
         return {
             "task_id": task["task_id"],
             "target_path": primary["target_path"],
             "directory_identity": primary["directory_identity"],
             "files": sorted(payload["files"], key=lambda f: f["path"]),
-            "second": None,  # L2b
+            "second": {
+                "target_path": second[0]["target_path"],
+                "directory_identity": second[0]["directory_identity"],
+            }
+            if second
+            else None,
         }
 
     # ── restart recovery (Filmpaw `transfer.py` 1361–1446) ──────────────
@@ -922,15 +1038,16 @@ class LibraryArchive:
     def _reconcile(self, task: dict[str, Any], payload: dict[str, Any]) -> None:
         with self._db().reading() as conn:
             events = conn.execute(
-                "SELECT target_index, outcome FROM archive_events"
-                " WHERE operation_id=? AND action='commit'",
+                "SELECT action, target_index, outcome FROM archive_events"
+                " WHERE operation_id=? AND action IN ('commit','mkdir_actor')",
                 (task["operation_id"],),
             ).fetchall()
-        commits: dict[int, set[str]] = {}
+        journal: dict[tuple[str, int], set[str]] = {}
         for event in events:
-            commits.setdefault(event["target_index"], set()).add(event["outcome"])
+            key = (event["action"], event["target_index"])
+            journal.setdefault(key, set()).add(event["outcome"])
         for index, target in enumerate(task["targets"]):
-            outcomes = commits.get(index, set())
+            outcomes = journal.get(("commit", index), set())
             if target["status"] == "committed" or "succeeded" in outcomes:
                 target["status"] = "committed"
             elif "started" in outcomes and "failed" not in outcomes:
@@ -938,6 +1055,11 @@ class LibraryArchive:
             elif "failed" in outcomes:
                 target.update(
                     status="needs_review", message="上次提交失败，请人工核对目标目录"
+                )
+            elif journal.get(("mkdir_actor", index)) == {"started"}:
+                target.update(
+                    status="needs_review",
+                    message="上次新建演员目录中断，请人工核对片库根目录",
                 )
             elif target["status"] in ("copying", "verifying", "committing"):
                 target.update(status="failed", message="上次复制或校验中断，来源保留")
@@ -985,6 +1107,29 @@ class LibraryArchive:
             status="needs_review",
             message="上次提交中断，无法确认结果，请人工核对目标目录",
         )
+
+
+def _insert_event(
+    conn: Any,
+    op: str,
+    action: str,
+    index: int,
+    outcome: str,
+    detail: str | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO archive_events(event_key, operation_id, action,"
+        " target_index, outcome, at, detail) VALUES (?,?,?,?,?,?,?)",
+        (
+            f"{op}:{action}:{index}:{outcome}",
+            op,
+            action,
+            index,
+            outcome,
+            now_iso(),
+            detail,
+        ),
+    )
 
 
 def _leftovers(task: dict[str, Any]) -> str:
