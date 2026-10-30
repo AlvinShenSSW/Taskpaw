@@ -215,6 +215,25 @@ def test_request_marks_then_stops_on_its_own_thread():
     assert done.wait(5) and restart.requested()
 
 
+def test_the_restart_stop_thread_is_not_a_daemon():
+    """Release 4.0.0 E2E: a daemon stop thread could still be logging when the
+    main thread exited, aborting the process (0xC0000409) instead of exit 75.
+    The API asks from a daemon worker thread, so the flag must not inherit."""
+    import threading
+
+    stopped_on: list[bool] = []
+    done = threading.Event()
+
+    def stop():
+        stopped_on.append(threading.current_thread().daemon)
+        done.set()
+
+    asker = threading.Thread(target=restart.request, args=(stop,), daemon=True)
+    asker.start()
+    asker.join(5)
+    assert done.wait(5) and stopped_on == [False]
+
+
 # ── the Hub: overrides (R15) ────────────────────────────────────────────
 @pytest.fixture
 def store(tmp_path):

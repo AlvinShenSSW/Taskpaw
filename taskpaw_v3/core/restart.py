@@ -15,9 +15,13 @@ _requested = threading.Event()
 
 def request(stop: Callable[[], None]) -> None:
     """Mark the restart, then stop the service on its own thread (the HTTP
-    reply that asked for it has already been sent)."""
+    reply that asked for it has already been sent). Not a daemon: the exit
+    waits for it to return instead of finalizing under its last log write
+    (0xC0000409, so the shell saw no 75 and did not restart us)."""
     _requested.set()
-    threading.Thread(target=stop, name="taskpaw-restart", daemon=True).start()
+    # explicit: the API asks from a daemon worker thread, whose flag a new
+    # thread would otherwise inherit
+    threading.Thread(target=stop, name="taskpaw-restart", daemon=False).start()
 
 
 def requested() -> bool:

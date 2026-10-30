@@ -75,8 +75,10 @@ class GracefulShutdown:
             if complete:
                 self._completion_claimed = True
         if complete:
-            self.stopped.set()
+            # logged before the event: a main thread woken by it may exit at
+            # once, and a write still in flight then aborts the interpreter
             log.info("Graceful shutdown complete")
+            self.stopped.set()
 
     def register_child(self, name: str, proc: subprocess.Popen) -> None:
         """Register a managed child process (e.g. lada-cli) to terminate on stop."""

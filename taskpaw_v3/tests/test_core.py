@@ -517,3 +517,30 @@ def test_thinking_config_three_states(prefix, value):
     if isinstance(value, str) and value.strip().lower() in ("", "auto"):
         expected = None
     assert getattr(cfg, field) is expected
+
+
+def test_the_completion_is_logged_before_stopped_is_set():
+    """Release 4.0.0 E2E: a main thread woken by `stopped` may exit at once;
+    the last log write must already be done by then."""
+    import logging
+
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+
+    gs = GracefulShutdown()
+    seen: list[bool] = []
+
+    class Probe(logging.Handler):
+        def emit(self, record):
+            if "Graceful shutdown complete" in record.getMessage():
+                seen.append(gs.stopped.is_set())
+
+    logger = logging.getLogger("taskpaw.lifecycle")
+    probe, level = Probe(), logger.level
+    logger.addHandler(probe)
+    logger.setLevel(logging.INFO)
+    try:
+        gs.shutdown()
+    finally:
+        logger.removeHandler(probe)
+        logger.setLevel(level)
+    assert seen == [False] and gs.stopped.is_set()
