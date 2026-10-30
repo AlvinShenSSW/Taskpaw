@@ -26,12 +26,12 @@ export const MEDIA_CSS = `
 --green:${T.green};--green-light:${T.greenLight};--blue:${T.blue};--amber:${T.amber};--red:${T.red};--on-green:${T.onGreen};
 --sans:${T.sans};--mono:${T.mono};color:var(--text);font:14px/1.6 var(--sans);color-scheme:dark}
 .mw *,.mw *::before,.mw *::after{box-sizing:border-box}
-.mw button,.mw input,.mw select{font:inherit}
-.mw button{cursor:pointer;color:inherit}
+.mw button:where(:not([class*="Mui"])),.mw input,.mw select{font:inherit}
+.mw button:where(:not([class*="Mui"])){cursor:pointer;color:inherit}
 .mw button:disabled{cursor:not-allowed;opacity:.52}
 .mw button,.mw a,.mw input,.mw select,.mw summary{outline-offset:4px;-webkit-tap-highlight-color:transparent}
 .mw button:focus-visible,.mw a:focus-visible,.mw input:focus-visible,.mw select:focus-visible,.mw summary:focus-visible,.mw [tabindex]:focus-visible{outline:2px solid var(--blue)}
-.mw h1,.mw h2,.mw h3,.mw p{margin:0}
+.mw h1:where(:not([class*="Mui"])),.mw h2:where(:not([class*="Mui"])),.mw h3:where(:not([class*="Mui"])),.mw p:where(:not([class*="Mui"])){margin:0}
 .mw h2{font-size:17px;font-weight:600}
 .mw h3{font-size:15px;font-weight:600}
 .mw .muted{color:var(--muted)}
@@ -107,7 +107,7 @@ export const MEDIA_CSS = `
 .mw .notice.red{color:#fec0c9;border-color:#6e3544;background:#59233120}
 .mw .notice p+p{margin-top:5px}
 .mw .empty{padding:60px 24px;text-align:center;color:var(--muted)}
-.mw .empty .icon{width:36px;height:36px;color:#7fb69b;margin-bottom:14px}
+.mw .empty>.icon{width:36px;height:36px;color:#7fb69b;margin-bottom:14px}
 .mw .empty h2{color:var(--text);margin-bottom:7px}
 
 /* overview */

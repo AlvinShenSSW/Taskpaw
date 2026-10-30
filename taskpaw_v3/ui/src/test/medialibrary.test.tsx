@@ -398,6 +398,29 @@ describe("L3 review fixes", () => {
     }
   });
 
+  it("a scan that ran between two idle polls re-reads the libraries, actors and thumbnails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const m = mockLibrary();
+      mount(<LibraryPage />);
+      await tab("演员");
+      const haru = await screen.findByRole("row", { name: "Haru 详情" });
+      await within(haru).findByRole("img", { name: "Haru 的 folder.jpg" });
+      const reads = [vi.mocked(api.libraries), m.performers, vi.mocked(api.image)].map((f) => f.mock.calls.length);
+      // idle before and after: only the new result tells that a scan finished
+      vi.mocked(api.libraryScanStatus).mockResolvedValue({
+        running: null, queued: [], results: { "lib-a": { library_id: "lib-a", ok: true, at: "2026-10-30T10:00:00Z" } },
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SCAN_IDLE_MS); });
+      await waitFor(() => {
+        const now = [vi.mocked(api.libraries), m.performers, vi.mocked(api.image)].map((f) => f.mock.calls.length);
+        now.forEach((n, i) => expect(n).toBeGreaterThan(reads[i]));
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("IR4-2: a refused import preview shows the backend's reason", async () => {
     const m = mockLibrary();
     libraries = NO_LIBRARIES;

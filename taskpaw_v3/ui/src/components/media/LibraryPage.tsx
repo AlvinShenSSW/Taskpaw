@@ -50,6 +50,7 @@ export function LibraryPage() {
   const [importing, setImporting] = useState(false);
   const libraries = useLibraries();
   const items = libraries.data?.items;
+  useScanStatus();  // on every tab: a finished scan refreshes the cards, actors and thumbnails
 
   // No libraries yet: the first-run state stands in for the library tabs; 归档规则 and 归档历史 (receipts outlive a library) stay reachable.
   const firstRun = (

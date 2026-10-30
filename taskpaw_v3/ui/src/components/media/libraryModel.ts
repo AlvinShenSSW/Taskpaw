@@ -10,6 +10,7 @@ export const RULES_KEY = ["libraryRules"] as const;
 export const PERFORMERS_KEY = ["libraryPerformers"] as const;
 export const PERFORMER_KEY = ["libraryPerformer"] as const;
 export const HISTORY_KEY = ["libraryHistory"] as const;
+export const THUMB_KEY = ["libraryThumb"] as const;
 const SCAN_POLL_MS = 1500;
 // idle, the scanner is still asked: a scheduled or recovery scan starts without the UI (§6)
 export const SCAN_IDLE_MS = 30_000;
@@ -28,9 +29,13 @@ export function useRules() {
 }
 
 export const scanBusy = (s: ScanStatus | undefined) => Boolean(s && (s.running || s.queued.length));
+// every library's last finished scan; null before the first read
+const scanSettled = (s: ScanStatus | undefined) =>
+  s ? Object.values(s.results).map((r) => `${r.library_id}@${r.at ?? ""}`).sort().join("|") : null;
 
 // The scanner's state, polled fast while a scan runs or waits and slowly otherwise; once it settles
-// the counts are read again.
+// the counts and the thumbnails are read again. A scan that ran entirely between two idle polls is
+// seen by its new result, not by a busy → idle change.
 export function useScanStatus() {
   const qc = useQueryClient();
   const status = useQuery({
@@ -38,14 +43,16 @@ export function useScanStatus() {
     refetchInterval: (q) => (scanBusy(q.state.data) ? SCAN_POLL_MS : SCAN_IDLE_MS),
   });
   const busy = scanBusy(status.data);
-  const was = useRef(busy);
+  const settled = scanSettled(status.data);
+  const was = useRef({ busy, settled });
   useEffect(() => {
-    if (was.current && !busy) {
-      void qc.invalidateQueries({ queryKey: LIBRARIES_KEY });
-      void qc.invalidateQueries({ queryKey: PERFORMERS_KEY });
+    const before = was.current;
+    was.current = { busy, settled };
+    if (busy || settled === null || before.settled === null) return;
+    if (before.busy || before.settled !== settled) {
+      for (const key of [LIBRARIES_KEY, PERFORMERS_KEY, THUMB_KEY]) void qc.invalidateQueries({ queryKey: key });
     }
-    was.current = busy;
-  }, [busy, qc]);
+  }, [busy, settled, qc]);
   return status;
 }
 

@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, type ReactNode } from "react";
 import { api } from "../../api";
 import { Icon } from "./parts";
+import { THUMB_KEY } from "./libraryModel";
 
 export function Toggle({ checked, onChange, label, labelledBy, disabled }: {
   checked: boolean; onChange: (next: boolean) => void; label?: string; labelledBy?: string; disabled?: boolean;
@@ -19,7 +20,7 @@ export function Toggle({ checked, onChange, label, labelledBy, disabled }: {
 // D5: the actor's `folder.jpg` (an authenticated image), portrait 3:4 — 54×72 in lists, 144×192 large.
 export function ActorThumb({ id, hasThumb, name, large = false }: { id: string; hasThumb: boolean; name: string; large?: boolean }) {
   const image = useQuery({
-    queryKey: ["libraryThumb", id], queryFn: () => api.image(api.thumbPath(id)),
+    queryKey: [...THUMB_KEY, id], queryFn: () => api.image(api.thumbPath(id)),
     enabled: hasThumb, staleTime: Infinity, retry: false,
   });
   const cls = `avatar${large ? " lg" : ""}`;
