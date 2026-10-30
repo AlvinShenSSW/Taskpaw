@@ -147,7 +147,8 @@ export const performer = (id: number, name: string, label: string): Performer =>
 // The preflight without a performer: only the candidates (U1 §7.3).
 export const preflight = (filmDir: string, items: Performer[] | null, over: Partial<TargetPreflight> = {}): TargetPreflight => ({
   film_dir: filmDir, performer_id: null, target_dir: null, manual: false, target_path: null, absent: null, error_code: null, message: null,
-  candidates: items === null ? null : { query: items.map((p) => p.name), items }, ...over,
+  candidates: items === null ? null : { query: items.map((p) => p.name), items },
+  category_id: null, archived: null, categories: items === null ? null : [], selected: null, second_hint: null, new_actor: null, ...over,
 });
 
 export const PREFLIGHTS: Record<string, TargetPreflight> = {

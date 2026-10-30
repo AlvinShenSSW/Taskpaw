@@ -1,8 +1,10 @@
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { itemActors, itemNumber, itemResolution, itemTitle, reviewLine, type StatusKey } from "./mediaModel";
+import { useLibraries } from "./libraryModel";
 import { Chip, EmptyState, Icon, ItemCover, Notice, PageTitle, StatusChip } from "./parts";
 import { useWorkspace } from "./workspace";
 
@@ -13,9 +15,16 @@ export function ReviewPage() {
   const ws = useWorkspace();
   const [filter, setFilter] = useState<Filter>("all");
   const items = ws.data.review.filter((i) => (filter === "ready" ? i.status === "ready" : filter === "blocked" ? i.status !== "ready" : true));
+  // first run (#361 §11): without any library nothing can be recommended
+  const libraries = useLibraries(!ws.readOnly);
   return (
     <>
       <PageTitle title="待确认" />
+      {libraries.data?.items.length === 0 && (
+        <Notice tone="amber" icon={WarningAmberIcon}>还没有片库，暂时无法推荐入库位置。
+          <button type="button" className="link-btn" onClick={() => ws.navigate("libraries")}>去设置片库</button>
+        </Notice>
+      )}
       <Notice icon={VerifiedUserIcon}>入库不会覆盖或删除已有片库。来源暂时无法清理时会保留，并显示“已入库 · 待清理”。</Notice>
       <div className="toolbar">
         {!ws.readOnly && <div className="filters" role="group" aria-label="按核对状态筛选">
@@ -31,8 +40,11 @@ export function ReviewPage() {
             const pf = ws.data.preflights[item.id];
             const actor = itemActors(item);
             const candidates = pf?.candidates?.items ?? null;
-            const target = item.status === "ready" && candidates?.length === 1
-              ? [candidates[0].source_label, candidates[0].name].filter(Boolean).join(" / ") : null;
+            // the rules' preselection, which the preflight checked: an actor, or a category directory
+            const chosen = candidates?.find((p) => pf?.performer_id != null && String(p.id) === String(pf.performer_id));
+            const category = pf?.categories?.find((c) => c.id === pf.category_id);
+            const target = item.status !== "ready" ? null
+              : chosen ? [chosen.source_label, chosen.name].filter(Boolean).join(" / ") : category ? `类型目录 / ${category.label}` : null;
             return (
               <article key={item.id} className="panel review-card" data-review={item.id}>
                 <ItemCover item={item} size="review" />

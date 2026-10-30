@@ -443,6 +443,8 @@ export interface FilmDetail extends FilmRemote {
 export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
   has_thumb: boolean; aliases: string[];
+  // #361: the library's own performers also carry these (a read-only location is listed only)
+  role?: LibraryRole; film_count?: number | null; fuzzy?: boolean;
 }
 // #361 §6–§10: the controller's own library (`/control/workflow/library/*`). Counts are the last
 // scan's (`last_scan_ok` null = never scanned, false = unreachable then).
@@ -494,13 +496,27 @@ export type LibraryPatch = Partial<Pick<Library, "label" | "role" | "prefixes">>
 // U1 §7.3: the archive target preflight (read-only) and the library's candidates for the film's NFO
 // actors. With no explicit target, a sole candidate is checked; `target_path` ends in `film_dir`.
 // `missing`: the chosen performer or directory is gone; `candidates` is null while the library is offline.
-export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate";
+// #361 §9.6: `performer_id` / `category_id` also name the rules' preselection (checked in the same call);
+// `archived`: the folder holds this engine's verified copy of this package (a retry, §9.5);
+// `actor_exists`: a new actor's directory already exists (readonly / invalid arrive as `permission`).
+export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate" | "actor_exists";
+export interface TargetCategory {
+  id: string; label: string; path: string; prefixes: string[]; film_count: number | null; prefix_match: boolean;
+}
+export type TargetKind = "performer" | "category" | "new_actor" | "manual";
 export interface TargetPreflight {
   film_dir: string; performer_id: string | null; target_path: string | null; absent: boolean | null;
   target_dir: string | null; manual: boolean;
   error_code: TargetErrorCode | null; message: string | null;
   candidates: { query: string[]; items: Performer[] } | null;
+  category_id: string | null; archived: boolean | null;
+  categories: TargetCategory[] | null; selected: { kind: TargetKind; id: string } | null;
+  second_hint: string | null; new_actor: { library_id: string | null; name: string } | null;
 }
+// The other targets of the preflight and 确认入库 (§10): a category, or a new actor directory
+// (`library_id` + `actor_name`); 确认入库 may add a second category to an actor target.
+export interface TargetQuery { category_id?: string; library_id?: string; actor_name?: string }
+export interface ConfirmTarget { category_id?: string; new_actor?: { library_id: string; name: string }; second_category_id?: string }
 // U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons
 // (backend `workflow/planning.py`). `lookup` is the Miko metadata preview (v2 L).
 export type LookupStatus = "succeeded" | "failed" | "running" | "queued";
@@ -938,9 +954,9 @@ export const api = {
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>
     get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
-  workflowConfirm: (filmId: string, performer_id?: Performer["id"], target_dir?: string) =>
+  workflowConfirm: (filmId: string, performer_id?: Performer["id"], target_dir?: string, other?: ConfirmTarget) =>
     send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`,
-      target_dir === undefined ? { performer_id } : { target_dir }),
+      target_dir === undefined ? { performer_id, ...other } : { target_dir }),
   workflowRetry: (filmId: string, stage: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
   workflowOpenFolder: (filmId: string, which: "output" | "archive") =>
@@ -956,10 +972,11 @@ export const api = {
     send<{ results: PlanResult[] }>("agent", "POST", "/control/workflow/plans", { plans }),
   workflowLookup: (filmId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/lookup`),
-  workflowTarget: (filmId: string, performerId?: Performer["id"], targetDir?: string) =>
+  workflowTarget: (filmId: string, performerId?: Performer["id"], targetDir?: string, other?: TargetQuery) =>
     get<TargetPreflight>("agent", `/control/workflow/films/${seg(filmId)}/target${
       targetDir !== undefined ? `?${new URLSearchParams({ target_dir: targetDir })}`
-        : performerId === undefined ? "" : `?${new URLSearchParams({ performer_id: String(performerId) })}`}`),
+        : performerId !== undefined ? `?${new URLSearchParams({ performer_id: String(performerId) })}`
+          : other ? `?${new URLSearchParams(Object.entries(other).filter((e): e is [string, string] => e[1] !== undefined))}` : ""}`),
   workflowPause: (paused: boolean) =>
     send<{ paused: boolean }>("agent", "POST", "/control/workflow/pause", { paused }),
   // H3 M1: answer the model download offer of the workflow's own session.

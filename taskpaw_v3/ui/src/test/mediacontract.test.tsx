@@ -34,6 +34,7 @@ function mockApi(target: (performer: string | number | undefined) => TargetPrefl
   vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => C.film[id]);
   vi.spyOn(api, "workflowTarget").mockImplementation(async (_id, performer) => target(performer));
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
+  vi.spyOn(api, "libraries").mockResolvedValue({ items: [], db_path: "library.db" });
   return {
     image: vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,"),
     confirmPlans: vi.spyOn(api, "workflowConfirmPlans").mockResolvedValue({ results: [] }),
@@ -330,7 +331,7 @@ describe("contract: 待确认 and 图文确认", () => {
     wrap(<MediaWorkspace />);
     fireEvent.click(within(await openReview()).getByRole("button", { name: "图文核对入库" }));
     const dialog = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
-    await waitFor(() => expect(within(dialog).getByText("Actor", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByText("Actor", { selector: ".confirmation-layout strong" })).toBeInTheDocument());
     expect(await within(dialog).findByText(C.target.selected.target_path as string)).toBeInTheDocument();
     expect(within(dialog).getByText("\\\\nas-a\\actors\\Actor\\ABC-123")).toBeInTheDocument();
     expect(within(dialog).getByText("最终文件包 · 6 个文件")).toBeInTheDocument();

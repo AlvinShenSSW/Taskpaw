@@ -386,16 +386,19 @@ export function heartbeatText(live: RestoreLive, now: number): string {
   return live.startedAt === null ? head : `${head} · 已用 ${elapsedClock(now - live.startedAt)}`;
 }
 
-// What the preflight says about a film waiting for 确认入库: a target error, else the candidate count.
+// What the preflight says about a film waiting for 确认入库: a target error, else ready when the rules
+// preselected a target (an actor or a category, #361 §9.6) and its check passed — the folder is free or
+// already holds this engine's copy of this package (`archived`, §9.5) — else the candidate count.
 // `missing` (the chosen performer record is gone) asks for a new choice, as no match does.
 // No preflight yet reads 「检查中」, not ready.
 export function reviewStatus(preflight: TargetPreflight | null | undefined): StatusKey {
   if (!preflight) return "checking";
   const code = preflight.error_code;
-  if (code) return code === "missing" ? "nomatch" : code;
+  if (code) return code === "missing" || code === "actor_exists" ? "nomatch" : code;
+  if (preflight.performer_id != null || preflight.category_id != null) return "ready";
   const n = preflight.candidates?.items.length;
   if (n === 0) return "nomatch";
-  if (n !== undefined && n > 1) return "multi";
+  if (n !== undefined) return "multi";
   return "ready";
 }
 
