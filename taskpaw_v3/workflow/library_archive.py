@@ -106,12 +106,19 @@ def _refused(message: str, code: str = "invalid") -> LibraryRefused:
     return LibraryRefused(REFUSED, message, code)
 
 
-def _os_error(exc: OSError, label: str) -> Exception:
-    """A retryable error waits; any other is a permanent refusal."""
+def _os_error(exc: OSError, label: str, gone: str = "missing") -> Exception:
+    """A retryable error waits; any other is a permanent refusal. `gone` is
+    the code of a path that does not exist; any other failure (an expired NAS
+    credential) reads as offline, not as a record that is gone."""
     if retryable(exc):
         return LibraryUnavailable(f"{label}：{exc}")
-    code = "permission" if isinstance(exc, PermissionError) else "missing"
-    return _refused(f"{label}：{exc}", code)
+    if isinstance(exc, PermissionError):
+        code = "permission"
+    elif isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+        code = gone
+    else:
+        code = "offline"
+    return _refused(f"{label}：{exc.strerror or exc}（{exc.filename}）", code)
 
 
 def check_name(name: str) -> str:
@@ -124,11 +131,11 @@ def check_name(name: str) -> str:
         or any(c in name for c in '/\\:\x00<>"|?*')
         or name.startswith(STAGING_PREFIX)
     ):
-        raise _refused(f"名称无效：{name!r}")
+        raise _refused(f"名称无效：「{name}」")
     try:
         _RELATIVE.validate_python(name)
     except ValidationError:
-        raise _refused(f"名称无效：{name!r}") from None
+        raise _refused(f"名称无效：「{name}」") from None
     return name
 
 
@@ -150,6 +157,16 @@ def _names(parent: Path) -> set[str]:
         return {
             e.name.casefold() for e in entries if not e.name.startswith(STAGING_PREFIX)
         }
+
+
+def _known_actor(store: LibraryStore, actor: Path) -> bool:
+    """`actor` is a present performer directory (one an earlier archive of the
+    same new actor created, or the scan found)."""
+    with store.reading() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM performers WHERE path=? AND is_missing=0", (str(actor),)
+        ).fetchone()
+    return row is not None
 
 
 def _raise(exc: OSError) -> None:
@@ -411,11 +428,19 @@ class LibraryArchive:
         return Path(row["path"])
 
     def _prove(
-        self, store: LibraryStore, spec: dict[str, Any], film: str
+        self,
+        store: LibraryStore,
+        spec: dict[str, Any],
+        film: str,
+        *,
+        actor_ready: bool = False,
     ) -> tuple[Path, list[str], bool, Path]:
         """The proved parent, its identity, whether `film` is absent there and
         the film folder. A new actor's parent is the library root; the folder
-        is `<root>\\<name>\\<film>` and the actor directory must not exist."""
+        is `<root>\\<name>\\<film>` and the actor directory must not exist,
+        nor one whose name normalizes the same (張/张). With `actor_ready` (an
+        approved archive, not the dialog's check) an actor directory of that
+        exact name that an earlier archive or scan registered is used."""
         parent = self._parent(store, spec)
         name = spec["actor_name"]
         if spec["library_id"] is not None:
@@ -425,12 +450,24 @@ class LibraryArchive:
         try:
             identity, names = directory_identity(parent), _names(parent)
         except OSError as exc:
-            raise _os_error(exc, "无法读取入库目录") from exc
+            # a library or category root that cannot be found is an offline share
+            root = spec["target_dir"] is None and spec["performer_id"] is None
+            raise _os_error(
+                exc, "无法读取入库目录", "offline" if root else "missing"
+            ) from exc
         if spec["library_id"] is None:
             return parent, identity, film.casefold() not in names, parent / film
-        if name.casefold() in names:
+        actor = parent / name
+        if actor_ready and name.casefold() in names and _known_actor(store, actor):
+            try:
+                inside = _names(actor)
+            except OSError as exc:
+                raise _os_error(exc, "无法读取演员目录") from exc
+            return parent, identity, film.casefold() not in inside, actor / film
+        key = normalize(name)
+        if any(normalize(other) == key for other in names):
             raise _refused(f"{ACTOR_EXISTS}：{name}", "actor_exists")
-        return parent, identity, True, parent / name / film
+        return parent, identity, True, actor / film
 
     @staticmethod
     def _archived(
@@ -532,7 +569,9 @@ class LibraryArchive:
         size = sum(f["size"] for f in approved)
         targets = []
         for spec in specs:
-            parent, identity, _, folder = self._prove(store, spec, film)
+            parent, identity, _, folder = self._prove(
+                store, spec, film, actor_ready=True
+            )
             if not _same(parent, identity, spec["expected_target"]):
                 raise _refused("入库目录已变化，请重新确认入库", "changed")
             targets.append(
@@ -795,7 +834,9 @@ class LibraryArchive:
             )
         size, notes, copies = sum(expected.values()), [], 0
         for spec, target in zip(payload["targets"], task["targets"]):
-            parent, identity, absent, folder = self._prove(store, spec, film)
+            parent, identity, absent, folder = self._prove(
+                store, spec, film, actor_ready=True
+            )
             if not _same(parent, identity, spec["expected_target"]):
                 raise _Failed("入库目录已变化，请重新确认入库")
             if not absent:
@@ -875,13 +916,14 @@ class LibraryArchive:
         self._event(task, "mkdir_actor", index, "started")
         try:
             os.mkdir(actor)
+        except FileExistsError as exc:
+            # the preflight accepted it: an earlier archive of this actor made it
+            if not _known_actor(self._db(), actor):
+                message = f"{ACTOR_EXISTS}：{actor.name}"
+                self._event(task, "mkdir_actor", index, "failed", message)
+                raise _Failed(message) from exc
         except OSError as exc:
-            exists = isinstance(exc, FileExistsError)
-            message = (
-                f"{ACTOR_EXISTS}：{actor.name}"
-                if exists
-                else f"无法创建演员目录：{exc}"
-            )
+            message = f"无法创建演员目录：{exc}"
             self._event(task, "mkdir_actor", index, "failed", message[:2000])
             raise _Failed(message) from exc
         now = now_iso()

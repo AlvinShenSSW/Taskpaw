@@ -239,7 +239,8 @@ def test_a_junction_parent_is_refused(rig, tmp_path):
         (TimeoutError(errno.ETIMEDOUT, "timed out"), "wait"),
         (OSError(errno.ENETUNREACH, "unreachable"), "wait"),
         (PermissionError(errno.EACCES, "denied"), "permission"),
-        (OSError(errno.EIO, "io"), "missing"),
+        (OSError(errno.EIO, "io"), "offline"),  # not a gone record (audit)
+        (FileNotFoundError(errno.ENOENT, "gone"), "missing"),
     ],
 )
 def test_only_a_retryable_os_error_waits(rig, monkeypatch, error, kind):
@@ -679,6 +680,102 @@ def test_a_new_actor_directory_that_appeared_fails_with_actor_exists(rig, monkey
         assert not conn.execute(
             "SELECT 1 FROM performers WHERE folder_name='新人'"
         ).fetchone()
+
+
+def _package(rig, film: str) -> Path:
+    package = rig.tmp / "more" / film
+    for path, data in rig.contents.items():
+        (package / path).parent.mkdir(parents=True, exist_ok=True)
+        (package / path).write_bytes(data)
+    return package
+
+
+def test_films_confirmed_for_the_same_new_actor_all_land_in_it(rig):
+    """Audit: several films confirmed for one new actor before the first one
+    created the directory; the later ones use it instead of failing."""
+    proof = rig.archive.target(None, FILM, library_id=rig.library_id, actor_name="新人")
+    films = {"op-1": rig.package, "op-2": _package(rig, "XYZ-999")}
+    for op, package in films.items():
+        rig.archive.archive(
+            op,
+            package,
+            None,
+            proof["expected_target"],
+            rig.files,
+            library_id=rig.library_id,
+            actor_name="新人",
+        )
+    assert rig.run("op-2")["status"] == "completed"
+    assert rig.run("op-1")["status"] == "completed"
+    actor = rig.root / "新人"
+    assert {p.name for p in actor.iterdir()} == {FILM, "XYZ-999"}
+    assert rig.events("op-2")[:2] == [
+        ("mkdir_actor", 0, "started"),
+        ("mkdir_actor", 0, "succeeded"),
+    ]
+    # an approval submitted after the directory exists is accepted too
+    rig.archive.archive(
+        "op-3",
+        _package(rig, "QRS-777"),
+        None,
+        proof["expected_target"],
+        rig.files,
+        library_id=rig.library_id,
+        actor_name="新人",
+    )
+    assert rig.run("op-3")["status"] == "completed"
+    with rig.store.reading() as conn:
+        (count,) = conn.execute(
+            "SELECT COUNT(*) FROM performers WHERE folder_name='新人'"
+        ).fetchone()
+    assert count == 1
+    # the dialog's check still asks to pick the actor that now exists
+    _refused(
+        "actor_exists",
+        rig.archive.target,
+        None,
+        "NEW-001",
+        library_id=rig.library_id,
+        actor_name="新人",
+    )
+
+
+def test_a_new_actor_name_that_normalizes_like_a_folder_is_refused(rig):
+    """UI walkthrough D1: 张小雨 next to 張小雨 would be a parallel directory."""
+    (rig.root / "張小雨").mkdir()
+    _refused(
+        "actor_exists",
+        rig.archive.target,
+        None,
+        FILM,
+        library_id=rig.library_id,
+        actor_name="张小雨",
+    )
+
+
+def test_an_unreadable_root_reads_offline_not_as_a_gone_record(rig, monkeypatch):
+    category, path = _category(rig)
+    path.rmdir()
+    _refused("offline", rig.archive.target, None, FILM, category_id=category)
+    real = la.directory_identity
+
+    def logon_failure(p):  # an expired NAS credential is no missing record
+        if Path(p) == rig.root:
+            raise OSError(errno.EINVAL, "登录失败", str(p))
+        return real(p)
+
+    monkeypatch.setattr(la, "directory_identity", logon_failure)
+    refused = _refused(
+        "offline",
+        rig.archive.target,
+        None,
+        FILM,
+        library_id=rig.library_id,
+        actor_name="新人",
+    )
+    assert "Errno" not in refused.message and "登录失败" in refused.message
+    rig.actor.rmdir()
+    _refused("missing", rig.archive.target, "actor", FILM)  # the actor dir is gone
 
 
 def test_an_interrupted_actor_mkdir_needs_review_after_a_restart(rig, monkeypatch):
