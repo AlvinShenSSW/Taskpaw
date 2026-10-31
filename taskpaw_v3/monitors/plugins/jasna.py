@@ -85,7 +85,11 @@ judged from ONE listing of the output folder, `<media stem>.srt` (or `.ass` /
 output folder that cannot be listed turns subtitles off for the run. The
 folder is looked at again before each ASR and before each translation is
 submitted (`subtitle exists` / `subtitle state unreadable` skips), and a
-publish never overwrites an existing file. Every
+publish never overwrites an existing file. When a re-check cannot list the
+folder, the library root itself (the output folder) is probed (also when a
+translated `.zh.srt` fails to publish): if it cannot be opened, the run stops
+in error (片库不可访问) and every unfinished film stays queued for the next
+Start (#380). Every
 planned subtitle job reaches exactly one terminal state, settled only by the
 monitor worker thread under `_launch_lock`; blocking side effects of a
 settlement are deferred until the lock is released (D8), and only `_dispatch()`
@@ -173,6 +177,7 @@ from taskpaw_v3.monitors.subs.existing import (
     list_names,
     list_names_missing_ok,
     qualifies,
+    root_reachable,
     skip_reason,
 )
 from taskpaw_v3.monitors.subs.job import (
@@ -3723,6 +3728,34 @@ class JasnaInstance(MonitorInstance):
                 dedupe_key=f"{self.instance_id}:subs-unreadable",
             )
 
+    def _root(self) -> str:
+        return self._cfg.jasna_output_folder.strip()
+
+    def _stop_unreachable(self, emit: EventEmitter) -> None:
+        """#380 (under `_launch_lock`): the output folder — every subtitle's
+        folder — cannot be opened, so the whole run (restores too) ends in
+        error with ONE alert and settles nothing: every unfinished film stays
+        for the next Start. The teardown is `stop()`, deferred until the lock
+        is released; its `_stopping` keeps any queued translator result from
+        being published or settled. Never `_disable_subs` (it bulk-skips)."""
+        root = self._root()
+        self._launch_error = f"片库不可访问: {root}"
+        get_task_log().record(
+            self.instance_id,
+            "task.error",
+            task_type="jasna",
+            severity="error",
+            data={"reason": "library_unreachable"},
+        )
+        emit(
+            "alert",
+            f"{self._cfg.name}: 片库不可访问",
+            f"片库不可访问: {root}。剩余影片保留在队列中，未标记跳过；"
+            "共享恢复后先「停止」再「启动」即可继续。",
+            dedupe_key=f"{self.instance_id}:library-unreachable",
+        )
+        self._deferred.append(self.stop)
+
     def _disable_subs(self, reason: str, emit: EventEmitter) -> None:
         """Flags + settlement only (may run under `_launch_lock`); the blocking
         part — translator cancel, ASR terminate — is DEFERRED until the lock is
@@ -3825,7 +3858,8 @@ class JasnaInstance(MonitorInstance):
         scan), and before an ASR once the hold is held (carried or taken, so
         nothing is listed while the GPU is refused). Subtitles there, or a
         folder that cannot be read, skip the file; every skip requests an
-        advance, so the walk goes on."""
+        advance, so the walk goes on. A folder that cannot be opened at all
+        stops the run instead (#380)."""
         name = video.name
         # #179 C5: the restore's hold when this file was just restored (full
         # kind); None on the subs-only path.
@@ -3838,10 +3872,13 @@ class JasnaInstance(MonitorInstance):
         if self._kinds.get(name) == "translate_only":
             self._gpu_give(carried)
             names = list_names(job.media.parent)
+            lost = names is None and not root_reachable(self._root())
             with self._launch_lock:  # no GPU (D12)
                 if not self._stopping.is_set() and self._subs_disabled is None:
                     skip = self._recheck(job, names)
-                    if skip is None:
+                    if lost:  # #380: the library is gone — stop, settle nothing
+                        self._stop_unreachable(emit)
+                    elif skip is None:
                         self._submit_translation(job, None, emit)
                     else:
                         self._skip_existing(job, skip, emit)
@@ -3866,12 +3903,16 @@ class JasnaInstance(MonitorInstance):
                 return
         self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         names = list_names(job.media.parent)
+        lost = names is None and not root_reachable(self._root())
         release_gpu = False
         with self._launch_lock:
             try:  # K1: we hold the GPU — no raise may skip the give below
                 skip = self._recheck(job, names)
                 if self._stopping.is_set() or self._subs_disabled is not None:
                     release_gpu = True  # D30: no bare return — the release pairs
+                elif lost:  # #380: the library is gone — stop, settle nothing
+                    self._stop_unreachable(emit)
+                    release_gpu = True
                 elif skip is not None:
                     self._skip_existing(job, skip, emit)
                     release_gpu = True
@@ -4032,9 +4073,12 @@ class JasnaInstance(MonitorInstance):
                 self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
                 # #191 (AC5/F15): the file's last look before its translation —
                 # the same class of I/O as the publish itself.
-                skip = self._recheck(job, list_names(job.media.parent))
+                names = list_names(job.media.parent)
+                skip = self._recheck(job, names)
                 if skip is None:
                     self._submit_translation(job, list(outcome.cues), emit)
+                elif names is None and not root_reachable(self._root()):
+                    self._stop_unreachable(emit)  # #380
                 else:
                     self._skip_existing(job, skip, emit)
             elif res.kind == "exists":
@@ -4228,6 +4272,8 @@ class JasnaInstance(MonitorInstance):
                                 emit,
                                 translate_s=result.duration_s,
                             )
+                        elif not root_reachable(self._root()):
+                            self._stop_unreachable(emit)  # #380 (C5-D2)
                         else:
                             self._settle(
                                 job.job_id,

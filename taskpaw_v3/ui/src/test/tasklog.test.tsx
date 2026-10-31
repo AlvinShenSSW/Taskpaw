@@ -66,7 +66,7 @@ const reasonCodes = [
   "asr_launch_failed", "cancelled", "scan_failed", "consecutive_subtitle_failures", "no_llm_key", "restore_failed",
   "unstable", "translation_paused", "subtitle exists", "transcript exists", "subtitle state unreadable",
   "asr failed", "subtitle operation failed", "network", "rate_limit", "refusal", "bad_response", "auth", "invalid", "content",
-  "unavailable", "recovered", "changed",
+  "unavailable", "recovered", "changed", "library_unreachable",
 ];
 
 beforeEach(() => setLang("en"));

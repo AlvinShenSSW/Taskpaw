@@ -129,6 +129,7 @@ const en = {
     duration: { hours: "{{count}} h", minutes: "{{count}} min", seconds: "{{count}} s" },
     reasons: {
       "setup_or_launch_failed": "Setup or launch failed",
+      "library_unreachable": "Library unreachable",
       "child_failed": "Child process failed",
       "ffprobe_missing": "ffprobe was not found",
       "already restored": "Already restored",
@@ -615,6 +616,7 @@ const zh: typeof en = {
     duration: { hours: "{{count}} 小时", minutes: "{{count}} 分", seconds: "{{count}} 秒" },
     reasons: {
       "setup_or_launch_failed": "准备或启动失败",
+      "library_unreachable": "片库不可访问",
       "child_failed": "子进程失败",
       "ffprobe_missing": "未找到 ffprobe",
       "already restored": "已完成修复",
