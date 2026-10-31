@@ -812,19 +812,25 @@ class Finalizer:
             rt.operator, wf.film_id, approval.binding.final_revision
         )
         worked = False
-        scopes: tuple[tuple[Scope, m.StageStatus | None], ...] = (
-            ("workcopy", wf.cleanup_workcopy_status),
-            ("input", wf.cleanup_input_status),
-        )
-        for scope, status in scopes:
-            if status == "succeeded":
-                continue
-            if scope == "input" and not self._package_archived(wf):
-                # deleting this film's originals dirties the package and would block its siblings
-                waiting[wf.film_id] = "包内仍有未入库影片"
-                continue
-            worked |= self._cleanup(wf, approval, final, scope, waiting)
-        return worked
+        if wf.cleanup_workcopy_status != "succeeded":
+            worked = self._cleanup(wf, approval, final, "workcopy", waiting)
+            # #378: admitting the workcopy scope bumped the film; judge and CAS
+            # the input scope against the film as it is now
+            wf = rt.store.film_workflow(rt.operator, wf.film_id)
+            approval = wf.approval
+            if (
+                approval is None
+                or approval.approval_id != wf.archive_receipt_approval_id
+            ):
+                waiting[wf.film_id] = "清理等待：审批已变化"
+                return worked
+        if wf.cleanup_input_status == "succeeded":
+            return worked
+        if not self._package_archived(wf):
+            # deleting this film's originals dirties the package and would block its siblings
+            waiting[wf.film_id] = "包内仍有未入库影片"
+            return worked
+        return self._cleanup(wf, approval, final, "input", waiting) or worked
 
     def _cleanup(
         self,
