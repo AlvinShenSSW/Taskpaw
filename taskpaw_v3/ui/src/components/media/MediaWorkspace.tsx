@@ -5,6 +5,7 @@ import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
 import FactCheckIcon from "@mui/icons-material/FactCheck";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import GridViewIcon from "@mui/icons-material/GridView";
+import InsightsIcon from "@mui/icons-material/Insights";
 import LanIcon from "@mui/icons-material/Lan";
 import MenuIcon from "@mui/icons-material/Menu";
 import MovieIcon from "@mui/icons-material/Movie";
@@ -15,6 +16,7 @@ import { Dialog, GlobalStyles, Snackbar, useMediaQuery } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { POWER_CSS } from "../power/powerStyles";
 import { api as requests, type HubServer } from "../../api";
+import { AnalyticsPage } from "./analytics/AnalyticsPage";
 import { DevicesPage } from "./DevicesPage";
 import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
@@ -35,8 +37,9 @@ import {
   errorText, focusOnMount, isPaused, mediaFilmKey, mediaSourceKey, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
-// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). Mac 信息桥 is a later page,
-// marked 「后续」 (operator decision 3); 设备 is live since P2-2, 片库与规则 and 设置 since #361.
+// The eleven pages of the workspace, in rail order (build spec §1 + U1 V2). Mac 信息桥 is a later page,
+// marked 「后续」 (operator decision 3); 设备 is live since P2-2, 片库与规则 and 设置 since #361, 数据分析
+// since the analytics EPIC (C3 #390).
 const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?: boolean }> = [
   { key: "overview", label: "概览", icon: GridViewIcon },
   { key: "pending", label: "待处理", icon: PlaylistAddCheckIcon },
@@ -46,6 +49,7 @@ const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?
   { key: "devices", label: "设备", icon: DesktopWindowsIcon },
   { key: "local", label: "本机", icon: ComputerIcon },
   { key: "libraries", label: "片库与规则", icon: FolderOpenIcon },
+  { key: "analytics", label: "数据分析", icon: InsightsIcon },
   { key: "bridge", label: "Mac 信息桥", icon: LanIcon, later: true },
   { key: "settings", label: "设置", icon: TuneIcon },
 ];
@@ -141,9 +145,11 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower, onOpenSe
   const gpuFilm = films?.current;
 
   let body: ReactNode;
-  // 片库与规则 and 设置 read their own routes, so they do not wait for the pipeline (the Hub has neither)
-  if (page === "libraries" || page === "settings") {
-    body = readOnly ? <ControllerOnly title={current.label} /> : page === "libraries" ? <LibraryPage /> : <SettingsPage />;
+  // 片库与规则, 数据分析 and 设置 read their own routes (数据分析 shows a stopped pipeline itself), so they
+  // do not wait for the pipeline; the Hub has none of them (analytics D10)
+  if (page === "libraries" || page === "analytics" || page === "settings") {
+    body = readOnly ? <ControllerOnly title={current.label} />
+      : page === "libraries" ? <LibraryPage /> : page === "analytics" ? <AnalyticsPage /> : <SettingsPage />;
   } else if (!LIVE_PAGES.has(page)) body = <LaterPage />;
   else if (data.films.isLoading) body = <div className="panel empty"><p>正在读取媒体流水线…</p></div>;
   else if (data.films.error || !films) body = <Notice tone="red" icon={WarningAmberIcon}>无法读取媒体流水线，请重试。{data.films.error ? `（${errorText(data.films.error)}）` : ""}</Notice>;

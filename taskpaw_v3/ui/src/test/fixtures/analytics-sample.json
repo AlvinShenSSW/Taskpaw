@@ -1,0 +1,2961 @@
+{
+ "server_time": "2026-10-31T06:00:00Z",
+ "since": "2026-10-17T16:00:00Z",
+ "coverage": {
+  "archives": "2026-10-10T14:19:31Z",
+  "energy": "2026-10-03T00:00:00Z",
+  "cues": "2026-10-28T00:12:00Z",
+  "devices": "2026-10-28T00:00:00Z",
+  "outages": "2026-10-01T16:00:00Z"
+ },
+ "machines": [
+  {
+   "id": "w-ctrl-0001",
+   "name": "本机",
+   "kind": "controller",
+   "model": "RTX 5060 8GB",
+   "first_seen": "2026-10-01T03:00:00Z",
+   "retired": false,
+   "state_now": "online",
+   "state_reason": "",
+   "state_since": "2026-10-30T23:00:00Z"
+  },
+  {
+   "id": "w-gpu-aurora",
+   "name": "Aurora",
+   "kind": "gpu",
+   "model": "RTX 5070 Ti 16GB",
+   "first_seen": "2026-10-02T08:00:00Z",
+   "retired": false,
+   "state_now": "online",
+   "state_reason": "",
+   "state_since": "2026-10-30T23:00:00Z"
+  },
+  {
+   "id": "w-gpu-birch",
+   "name": "Birch",
+   "kind": "gpu",
+   "model": "RTX 5060 Ti 16GB",
+   "first_seen": "2026-10-02T09:00:00Z",
+   "retired": false,
+   "state_now": "offline",
+   "state_reason": "",
+   "state_since": "2026-10-31T01:10:00Z"
+  },
+  {
+   "id": "w-gpu-cedar",
+   "name": "Cedar",
+   "kind": "gpu",
+   "model": "RTX 5060 Ti 16GB",
+   "first_seen": "2026-10-03T10:00:00Z",
+   "retired": false,
+   "state_now": "paused",
+   "state_reason": "admission",
+   "state_since": "2026-10-31T03:00:00Z"
+  },
+  {
+   "id": "w-gpu-dune",
+   "name": "Dune",
+   "kind": "gpu",
+   "model": "RTX 5060 Ti 16GB",
+   "first_seen": "2026-10-03T11:00:00Z",
+   "retired": false,
+   "state_now": "online",
+   "state_reason": "",
+   "state_since": "2026-10-30T23:00:00Z"
+  },
+  {
+   "id": "w-gpu-ember",
+   "name": "Ember",
+   "kind": "gpu",
+   "model": "RTX 5060 Ti 16GB",
+   "first_seen": "2026-10-30T09:00:00Z",
+   "retired": false,
+   "state_now": "online",
+   "state_reason": "",
+   "state_since": "2026-10-30T09:00:00Z"
+  },
+  {
+   "id": "w-gpu-fern",
+   "name": "Fern",
+   "kind": "gpu",
+   "model": "RTX 5060 Ti 16GB",
+   "first_seen": "2026-10-02T12:00:00Z",
+   "retired": true,
+   "state_now": "offline",
+   "state_reason": "",
+   "state_since": null
+  }
+ ],
+ "films": [
+  {
+   "code": "ZZC-102",
+   "archived_at": "2026-10-10T14:19:31Z",
+   "created_at": "2026-10-09T11:40:16Z",
+   "res": "1080p",
+   "duration_s": 6840,
+   "input_bytes": 6913202426,
+   "worker": "w-gpu-fern",
+   "queue_s": 72620,
+   "restore_s": 18066,
+   "asr_s": 585,
+   "translate_s": 84,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 112,
+   "archive_s": 136,
+   "lead_s": 95955,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     903.6,
+     18072
+    ]
+   ],
+   "controller_wh": 44.8,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-103",
+   "archived_at": "2026-10-10T17:40:09Z",
+   "created_at": "2026-10-09T15:11:24Z",
+   "res": "4K",
+   "duration_s": 7560,
+   "input_bytes": 14530893009,
+   "worker": "w-gpu-cedar",
+   "queue_s": 54734,
+   "restore_s": 35911,
+   "asr_s": 605,
+   "translate_s": 83,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 192,
+   "archive_s": 74,
+   "lead_s": 95325,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1895.5,
+     35914
+    ]
+   ],
+   "controller_wh": 55.8,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-101",
+   "archived_at": "2026-10-10T21:23:00Z",
+   "created_at": "2026-10-10T09:21:25Z",
+   "res": "4K",
+   "duration_s": 10680,
+   "input_bytes": 21506555327,
+   "worker": "w-gpu-aurora",
+   "queue_s": 9666,
+   "restore_s": 29359,
+   "asr_s": 580,
+   "translate_s": 80,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 165,
+   "archive_s": 126,
+   "lead_s": 43295,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     2448.6,
+     29383
+    ]
+   ],
+   "controller_wh": 50.5,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-105",
+   "archived_at": "2026-10-11T06:29:50Z",
+   "created_at": "2026-10-10T19:45:29Z",
+   "res": "1080p",
+   "duration_s": 6900,
+   "input_bytes": 6082237155,
+   "worker": "w-gpu-fern",
+   "queue_s": 14310,
+   "restore_s": 19086,
+   "asr_s": 604,
+   "translate_s": 63,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 101,
+   "archive_s": 24,
+   "lead_s": 38661,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     956.1,
+     19121
+    ]
+   ],
+   "controller_wh": 56.5,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-104",
+   "archived_at": "2026-10-11T09:07:11Z",
+   "created_at": "2026-10-09T23:04:47Z",
+   "res": "4K",
+   "duration_s": 10380,
+   "input_bytes": 17950666988,
+   "worker": "w-gpu-birch",
+   "queue_s": 69327,
+   "restore_s": 45483,
+   "asr_s": 558,
+   "translate_s": 82,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 95,
+   "archive_s": 136,
+   "lead_s": 122544,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     2528.4,
+     45512
+    ]
+   ],
+   "controller_wh": 55.7,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": true,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-108",
+   "archived_at": "2026-10-12T11:33:23Z",
+   "created_at": "2026-10-11T09:42:21Z",
+   "res": "4K",
+   "duration_s": 6060,
+   "input_bytes": 10367642094,
+   "worker": "w-gpu-birch",
+   "queue_s": 65658,
+   "restore_s": 23067,
+   "asr_s": 390,
+   "translate_s": 70,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 100,
+   "archive_s": 53,
+   "lead_s": 93062,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1282.6,
+     23087
+    ]
+   ],
+   "controller_wh": 76.9,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-106",
+   "archived_at": "2026-10-12T18:39:18Z",
+   "created_at": "2026-10-11T16:55:24Z",
+   "res": "4K",
+   "duration_s": 10140,
+   "input_bytes": 22942853486,
+   "worker": "w-gpu-fern",
+   "queue_s": 30549,
+   "restore_s": 58766,
+   "asr_s": 560,
+   "translate_s": 59,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 94,
+   "archive_s": 129,
+   "lead_s": 92634,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     2939.3,
+     58786
+    ]
+   ],
+   "controller_wh": 42.8,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-107",
+   "archived_at": "2026-10-12T23:51:39Z",
+   "created_at": "2026-10-11T20:49:24Z",
+   "res": "1080p",
+   "duration_s": 7860,
+   "input_bytes": 7004954506,
+   "worker": "w-gpu-cedar",
+   "queue_s": 68549,
+   "restore_s": 21823,
+   "asr_s": 453,
+   "translate_s": 61,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 242,
+   "archive_s": 111,
+   "lead_s": 97335,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1152.5,
+     21836
+    ]
+   ],
+   "controller_wh": 44.1,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-109",
+   "archived_at": "2026-10-13T14:24:20Z",
+   "created_at": "2026-10-12T20:13:01Z",
+   "res": "1080p",
+   "duration_s": 8160,
+   "input_bytes": 5197891510,
+   "worker": "w-gpu-dune",
+   "queue_s": 38908,
+   "restore_s": 19108,
+   "asr_s": 380,
+   "translate_s": 47,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 94,
+   "archive_s": 29,
+   "lead_s": 65479,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1064.1,
+     19153
+    ]
+   ],
+   "controller_wh": 62.6,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-110",
+   "archived_at": "2026-10-13T19:32:52Z",
+   "created_at": "2026-10-13T01:20:01Z",
+   "res": "1080p",
+   "duration_s": 10080,
+   "input_bytes": 7268199980,
+   "worker": "w-gpu-dune",
+   "queue_s": 36528,
+   "restore_s": 22864,
+   "asr_s": 336,
+   "translate_s": 38,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 214,
+   "archive_s": 39,
+   "lead_s": 65571,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1270.7,
+     22873
+    ]
+   ],
+   "controller_wh": 47.3,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-111",
+   "archived_at": "2026-10-14T05:58:19Z",
+   "created_at": "2026-10-13T16:01:54Z",
+   "res": "1080p",
+   "duration_s": 10140,
+   "input_bytes": 6866341795,
+   "worker": "w-gpu-fern",
+   "queue_s": 15669,
+   "restore_s": 27617,
+   "asr_s": 472,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 183,
+   "archive_s": 75,
+   "lead_s": 50185,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     1382.4,
+     27648
+    ]
+   ],
+   "controller_wh": 43.2,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-113",
+   "archived_at": "2026-10-14T13:46:12Z",
+   "created_at": "2026-10-13T22:02:06Z",
+   "res": "1080p",
+   "duration_s": 7800,
+   "input_bytes": 8056352243,
+   "worker": "w-gpu-dune",
+   "queue_s": 30096,
+   "restore_s": 19903,
+   "asr_s": 519,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "no_speech": 1
+   },
+   "scrape_s": 244,
+   "archive_s": 47,
+   "lead_s": 56646,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1106.9,
+     19925
+    ]
+   ],
+   "controller_wh": 41.9,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-112",
+   "archived_at": "2026-10-14T14:49:30Z",
+   "created_at": "2026-10-14T01:34:57Z",
+   "res": "4K",
+   "duration_s": 6180,
+   "input_bytes": 10865441650,
+   "worker": "w-gpu-cedar",
+   "queue_s": 13180,
+   "restore_s": 30598,
+   "asr_s": 551,
+   "translate_s": 59,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 162,
+   "archive_s": 89,
+   "lead_s": 47673,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1615.6,
+     30611
+    ]
+   ],
+   "controller_wh": 46.2,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-114",
+   "archived_at": "2026-10-15T07:25:42Z",
+   "created_at": "2026-10-13T23:10:49Z",
+   "res": "4K",
+   "duration_s": 7920,
+   "input_bytes": 13884731723,
+   "worker": "w-gpu-cedar",
+   "queue_s": 65977,
+   "restore_s": 43052,
+   "asr_s": 659,
+   "translate_s": 57,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 170,
+   "archive_s": 131,
+   "lead_s": 116093,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     2274.8,
+     43102
+    ]
+   ],
+   "controller_wh": 73.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-116",
+   "archived_at": "2026-10-15T12:11:53Z",
+   "created_at": "2026-10-14T12:14:47Z",
+   "res": "4K",
+   "duration_s": 10200,
+   "input_bytes": 16458653914,
+   "worker": "w-gpu-birch",
+   "queue_s": 31648,
+   "restore_s": 48533,
+   "asr_s": 403,
+   "translate_s": 64,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 147,
+   "archive_s": 56,
+   "lead_s": 86226,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     2699.6,
+     48592
+    ]
+   ],
+   "controller_wh": 70.5,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-115",
+   "archived_at": "2026-10-15T16:41:08Z",
+   "created_at": "2026-10-15T02:01:10Z",
+   "res": "4K",
+   "duration_s": 6660,
+   "input_bytes": 10527735326,
+   "worker": "w-gpu-fern",
+   "queue_s": 12248,
+   "restore_s": 32352,
+   "asr_s": 470,
+   "translate_s": 79,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 166,
+   "archive_s": 54,
+   "lead_s": 52798,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     1619.4,
+     32387
+    ]
+   ],
+   "controller_wh": 73.1,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-117",
+   "archived_at": "2026-10-15T19:00:29Z",
+   "created_at": "2026-10-15T17:52:20Z",
+   "res": "4K",
+   "duration_s": 10740,
+   "input_bytes": 19109772410,
+   "worker": null,
+   "queue_s": null,
+   "restore_s": null,
+   "asr_s": 534,
+   "translate_s": 42,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 270,
+   "archive_s": 25,
+   "lead_s": 4089,
+   "restore_wh": [],
+   "controller_wh": 61.1,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k"
+   ]
+  },
+  {
+   "code": "ZZA-120",
+   "archived_at": "2026-10-16T04:31:14Z",
+   "created_at": "2026-10-15T13:48:01Z",
+   "res": "1080p",
+   "duration_s": 5760,
+   "input_bytes": 4008051824,
+   "worker": "w-gpu-fern",
+   "queue_s": 32017,
+   "restore_s": 18215,
+   "asr_s": 322,
+   "translate_s": 74,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 234,
+   "archive_s": 115,
+   "lead_s": 52993,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     911.8,
+     18235
+    ]
+   ],
+   "controller_wh": 75.7,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-121",
+   "archived_at": "2026-10-16T14:05:40Z",
+   "created_at": "2026-10-15T12:52:14Z",
+   "res": "4K",
+   "duration_s": 8460,
+   "input_bytes": 19834252745,
+   "worker": "w-gpu-aurora",
+   "queue_s": 62829,
+   "restore_s": 24210,
+   "asr_s": 527,
+   "translate_s": 52,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 171,
+   "archive_s": 100,
+   "lead_s": 90806,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     2022,
+     24264
+    ]
+   ],
+   "controller_wh": 55.6,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-119",
+   "archived_at": "2026-10-16T15:53:56Z",
+   "created_at": "2026-10-16T03:53:03Z",
+   "res": "4K",
+   "duration_s": 6720,
+   "input_bytes": 9180082624,
+   "worker": "w-gpu-cedar",
+   "queue_s": 6541,
+   "restore_s": 29139,
+   "asr_s": 539,
+   "translate_s": 89,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 190,
+   "archive_s": 91,
+   "lead_s": 43253,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1539.5,
+     29170
+    ]
+   ],
+   "controller_wh": 75.3,
+   "energy_partial": true,
+   "target": "new_actor",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-118",
+   "archived_at": "2026-10-16T23:38:40Z",
+   "created_at": "2026-10-16T05:28:41Z",
+   "res": "1080p",
+   "duration_s": 6600,
+   "input_bytes": 6390167619,
+   "worker": "w-gpu-aurora",
+   "queue_s": 51329,
+   "restore_s": 10069,
+   "asr_s": 356,
+   "translate_s": 39,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 204,
+   "archive_s": 132,
+   "lead_s": 65399,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     840.4,
+     10085
+    ],
+    [
+     "w-gpu-dune",
+     50,
+     900
+    ]
+   ],
+   "controller_wh": 59.7,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-123",
+   "archived_at": "2026-10-17T08:45:08Z",
+   "created_at": "2026-10-16T10:55:19Z",
+   "res": "4K",
+   "duration_s": 8280,
+   "input_bytes": 13513130254,
+   "worker": "w-gpu-aurora",
+   "queue_s": 56080,
+   "restore_s": 19122,
+   "asr_s": 488,
+   "translate_s": 80,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 171,
+   "archive_s": 68,
+   "lead_s": 78589,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1593.8,
+     19125
+    ]
+   ],
+   "controller_wh": 47.7,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-122",
+   "archived_at": "2026-10-17T15:54:32Z",
+   "created_at": "2026-10-16T12:44:08Z",
+   "res": "4K",
+   "duration_s": 9300,
+   "input_bytes": 22424278697,
+   "worker": "w-gpu-fern",
+   "queue_s": 44618,
+   "restore_s": 46149,
+   "asr_s": 348,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 272,
+   "archive_s": 85,
+   "lead_s": 97824,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     2310.4,
+     46208
+    ]
+   ],
+   "controller_wh": 48.8,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-125",
+   "archived_at": "2026-10-18T14:55:24Z",
+   "created_at": "2026-10-18T02:15:37Z",
+   "res": "1080p",
+   "duration_s": 10800,
+   "input_bytes": 11075536956,
+   "worker": "w-gpu-fern",
+   "queue_s": 8364,
+   "restore_s": 28997,
+   "asr_s": 471,
+   "translate_s": 76,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 247,
+   "archive_s": 61,
+   "lead_s": 45587,
+   "restore_wh": [
+    [
+     "w-gpu-fern",
+     1451.3,
+     29025
+    ]
+   ],
+   "controller_wh": 46.7,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-124",
+   "archived_at": "2026-10-18T20:28:28Z",
+   "created_at": "2026-10-18T13:33:41Z",
+   "res": "4K",
+   "duration_s": 5940,
+   "input_bytes": 13411389195,
+   "worker": "w-gpu-aurora",
+   "queue_s": 4908,
+   "restore_s": 17151,
+   "asr_s": 672,
+   "translate_s": 77,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 98,
+   "archive_s": 67,
+   "lead_s": 24887,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1430.8,
+     17170
+    ]
+   ],
+   "controller_wh": 45.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-126",
+   "archived_at": "2026-10-19T12:46:09Z",
+   "created_at": "2026-10-18T15:08:58Z",
+   "res": "4K",
+   "duration_s": 9540,
+   "input_bytes": 14237545783,
+   "worker": "w-gpu-aurora",
+   "queue_s": 51337,
+   "restore_s": 21563,
+   "asr_s": 318,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "no_speech": 1
+   },
+   "scrape_s": 158,
+   "archive_s": 61,
+   "lead_s": 77831,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1799.7,
+     21596
+    ]
+   ],
+   "controller_wh": 76.3,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-127",
+   "archived_at": "2026-10-19T18:20:28Z",
+   "created_at": "2026-10-19T00:51:39Z",
+   "res": "4K",
+   "duration_s": 9660,
+   "input_bytes": 12982272233,
+   "worker": "w-gpu-cedar",
+   "queue_s": 13339,
+   "restore_s": 43444,
+   "asr_s": 415,
+   "translate_s": 48,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 167,
+   "archive_s": 77,
+   "lead_s": 62929,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     2295.5,
+     43493
+    ],
+    [
+     "w-gpu-dune",
+     50,
+     900
+    ]
+   ],
+   "controller_wh": 54.1,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-130",
+   "archived_at": "2026-10-20T06:34:58Z",
+   "created_at": "2026-10-19T08:26:12Z",
+   "res": "1080p",
+   "duration_s": 9780,
+   "input_bytes": 6746965143,
+   "worker": "w-gpu-cedar",
+   "queue_s": 44553,
+   "restore_s": 27947,
+   "asr_s": 451,
+   "translate_s": 54,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 187,
+   "archive_s": 54,
+   "lead_s": 79726,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1475.1,
+     27949
+    ]
+   ],
+   "controller_wh": 79.4,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-131",
+   "archived_at": "2026-10-20T10:28:55Z",
+   "created_at": "2026-10-20T01:45:29Z",
+   "res": "1080p",
+   "duration_s": 7140,
+   "input_bytes": 6164629613,
+   "worker": "w-gpu-aurora",
+   "queue_s": 17691,
+   "restore_s": 9985,
+   "asr_s": 477,
+   "translate_s": 38,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 91,
+   "archive_s": 85,
+   "lead_s": 31406,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     836.7,
+     10040
+    ]
+   ],
+   "controller_wh": 42.5,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-128",
+   "archived_at": "2026-10-20T18:49:38Z",
+   "created_at": "2026-10-20T05:05:59Z",
+   "res": "1080p",
+   "duration_s": 9240,
+   "input_bytes": 8883885502,
+   "worker": "w-ctrl-0001",
+   "queue_s": 10810,
+   "restore_s": 33674,
+   "asr_s": 634,
+   "translate_s": 88,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 239,
+   "archive_s": 78,
+   "lead_s": 49419,
+   "restore_wh": [
+    [
+     "w-ctrl-0001",
+     1030.4,
+     33723
+    ]
+   ],
+   "controller_wh": 73.9,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": true,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-129",
+   "archived_at": "2026-10-20T20:29:14Z",
+   "created_at": "2026-10-20T11:22:28Z",
+   "res": "1080p",
+   "duration_s": 7260,
+   "input_bytes": 4717628785,
+   "worker": "w-gpu-dune",
+   "queue_s": 5665,
+   "restore_s": 19729,
+   "asr_s": 477,
+   "translate_s": 47,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 2,
+    "no_speech": 1
+   },
+   "scrape_s": 260,
+   "archive_s": 91,
+   "lead_s": 32806,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1097.6,
+     19757
+    ]
+   ],
+   "controller_wh": 52.3,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-133",
+   "archived_at": "2026-10-21T04:36:01Z",
+   "created_at": "2026-10-20T08:42:02Z",
+   "res": "4K",
+   "duration_s": 8400,
+   "input_bytes": 19164879351,
+   "worker": "w-gpu-dune",
+   "queue_s": 30355,
+   "restore_s": 36833,
+   "asr_s": 361,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 191,
+   "archive_s": 40,
+   "lead_s": 71639,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     2048.9,
+     36881
+    ]
+   ],
+   "controller_wh": 64.8,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-132",
+   "archived_at": "2026-10-21T07:01:58Z",
+   "created_at": "2026-10-19T20:58:37Z",
+   "res": "4K",
+   "duration_s": 8700,
+   "input_bytes": 13747470194,
+   "worker": "w-ctrl-0001",
+   "queue_s": 60803,
+   "restore_s": 58877,
+   "asr_s": 606,
+   "translate_s": 33,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 170,
+   "archive_s": 48,
+   "lead_s": 122601,
+   "restore_wh": [
+    [
+     "w-ctrl-0001",
+     1799.6,
+     58895
+    ]
+   ],
+   "controller_wh": 77.6,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-134",
+   "archived_at": "2026-10-21T14:07:44Z",
+   "created_at": "2026-10-21T11:35:57Z",
+   "res": "4K",
+   "duration_s": 7020,
+   "input_bytes": 13499588111,
+   "worker": null,
+   "queue_s": null,
+   "restore_s": null,
+   "asr_s": 447,
+   "translate_s": 49,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 212,
+   "archive_s": 37,
+   "lead_s": 9107,
+   "restore_wh": [],
+   "controller_wh": 59.6,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k"
+   ]
+  },
+  {
+   "code": "ZZA-135",
+   "archived_at": "2026-10-22T06:40:47Z",
+   "created_at": "2026-10-21T15:48:28Z",
+   "res": "1080p",
+   "duration_s": 5880,
+   "input_bytes": 6181740420,
+   "worker": "w-ctrl-0001",
+   "queue_s": 30122,
+   "restore_s": 20057,
+   "asr_s": 671,
+   "translate_s": 57,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 91,
+   "archive_s": 60,
+   "lead_s": 53539,
+   "restore_wh": [
+    [
+     "w-ctrl-0001",
+     614.3,
+     20105
+    ]
+   ],
+   "controller_wh": 51.1,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-136",
+   "archived_at": "2026-10-22T17:49:20Z",
+   "created_at": "2026-10-22T04:03:04Z",
+   "res": "1080p",
+   "duration_s": 10440,
+   "input_bytes": 10512184595,
+   "worker": "w-gpu-cedar",
+   "queue_s": 14979,
+   "restore_s": 27523,
+   "asr_s": 521,
+   "translate_s": 82,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 272,
+   "archive_s": 88,
+   "lead_s": 49576,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1453.4,
+     27538
+    ],
+    [
+     "w-gpu-dune",
+     50,
+     900
+    ]
+   ],
+   "controller_wh": 63.6,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-140",
+   "archived_at": "2026-10-23T07:38:20Z",
+   "created_at": "2026-10-22T01:40:58Z",
+   "res": "4K",
+   "duration_s": 9780,
+   "input_bytes": 17614566592,
+   "worker": "w-gpu-cedar",
+   "queue_s": 50312,
+   "restore_s": 49767,
+   "asr_s": 646,
+   "translate_s": 36,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 104,
+   "archive_s": 112,
+   "lead_s": 107842,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     2627.4,
+     49782
+    ]
+   ],
+   "controller_wh": 79.3,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-137",
+   "archived_at": "2026-10-23T16:30:04Z",
+   "created_at": "2026-10-23T02:44:29Z",
+   "res": "1080p",
+   "duration_s": 7380,
+   "input_bytes": 6416609346,
+   "worker": "w-gpu-birch",
+   "queue_s": 23101,
+   "restore_s": 16843,
+   "asr_s": 493,
+   "translate_s": 41,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 252,
+   "archive_s": 42,
+   "lead_s": 49535,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     936,
+     16848
+    ]
+   ],
+   "controller_wh": 65.3,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-138",
+   "archived_at": "2026-10-23T18:49:14Z",
+   "created_at": "2026-10-23T03:28:13Z",
+   "res": "1080p",
+   "duration_s": 9300,
+   "input_bytes": 10760108527,
+   "worker": "w-gpu-dune",
+   "queue_s": 24361,
+   "restore_s": 24045,
+   "asr_s": 305,
+   "translate_s": 33,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 287,
+   "archive_s": 136,
+   "lead_s": 55261,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1338.9,
+     24100
+    ]
+   ],
+   "controller_wh": 43.6,
+   "energy_partial": true,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-139",
+   "archived_at": "2026-10-23T21:09:14Z",
+   "created_at": "2026-10-22T19:32:44Z",
+   "res": "4K",
+   "duration_s": 6060,
+   "input_bytes": 9576944070,
+   "worker": "w-gpu-birch",
+   "queue_s": 55729,
+   "restore_s": 28955,
+   "asr_s": 575,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "no_speech": 1
+   },
+   "scrape_s": 160,
+   "archive_s": 131,
+   "lead_s": 92190,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1610.1,
+     28981
+    ]
+   ],
+   "controller_wh": 46.4,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-142",
+   "archived_at": "2026-10-24T04:09:34Z",
+   "created_at": "2026-10-23T03:30:54Z",
+   "res": "4K",
+   "duration_s": 9360,
+   "input_bytes": 20423286436,
+   "worker": "w-gpu-dune",
+   "queue_s": 38913,
+   "restore_s": 46452,
+   "asr_s": 569,
+   "translate_s": 75,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 203,
+   "archive_s": 138,
+   "lead_s": 88720,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     2581.9,
+     46474
+    ]
+   ],
+   "controller_wh": 77.1,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": true,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-141",
+   "archived_at": "2026-10-24T07:19:54Z",
+   "created_at": "2026-10-23T19:29:38Z",
+   "res": "4K",
+   "duration_s": 7860,
+   "input_bytes": 13894936823,
+   "worker": "w-gpu-aurora",
+   "queue_s": 12760,
+   "restore_s": 22731,
+   "asr_s": 636,
+   "translate_s": 70,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 252,
+   "archive_s": 59,
+   "lead_s": 42616,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1896.8,
+     22761
+    ]
+   ],
+   "controller_wh": 50.1,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-143",
+   "archived_at": "2026-10-25T00:46:14Z",
+   "created_at": "2026-10-23T23:39:47Z",
+   "res": "1080p",
+   "duration_s": 6900,
+   "input_bytes": 6546188119,
+   "worker": "w-gpu-birch",
+   "queue_s": 66881,
+   "restore_s": 16434,
+   "asr_s": 599,
+   "translate_s": 34,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 249,
+   "archive_s": 110,
+   "lead_s": 90387,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     915.9,
+     16487
+    ]
+   ],
+   "controller_wh": 74.9,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-147",
+   "archived_at": "2026-10-25T05:16:25Z",
+   "created_at": "2026-10-24T03:51:10Z",
+   "res": "1080p",
+   "duration_s": 6600,
+   "input_bytes": 4348155626,
+   "worker": "w-gpu-dune",
+   "queue_s": 72110,
+   "restore_s": 13793,
+   "asr_s": 602,
+   "translate_s": 86,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 95,
+   "archive_s": 30,
+   "lead_s": 91515,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     769.3,
+     13848
+    ]
+   ],
+   "controller_wh": 51.1,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-146",
+   "archived_at": "2026-10-25T10:05:12Z",
+   "created_at": "2026-10-24T05:42:26Z",
+   "res": null,
+   "duration_s": 8880,
+   "input_bytes": 6257749688,
+   "worker": "w-gpu-birch",
+   "queue_s": 74824,
+   "restore_s": 22452,
+   "asr_s": 612,
+   "translate_s": 76,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 146,
+   "archive_s": 34,
+   "lead_s": 102166,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1249.1,
+     22483
+    ]
+   ],
+   "controller_wh": 71.9,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-144",
+   "archived_at": "2026-10-25T11:06:47Z",
+   "created_at": "2026-10-25T01:19:45Z",
+   "res": "1080p",
+   "duration_s": 6780,
+   "input_bytes": 7592552259,
+   "worker": "w-gpu-birch",
+   "queue_s": 13015,
+   "restore_s": 15260,
+   "asr_s": 599,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 132,
+   "archive_s": 88,
+   "lead_s": 35222,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     850.6,
+     15310
+    ]
+   ],
+   "controller_wh": 56.3,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-145",
+   "archived_at": "2026-10-25T12:14:34Z",
+   "created_at": "2026-10-24T11:33:26Z",
+   "res": "4K",
+   "duration_s": 5820,
+   "input_bytes": 10218821607,
+   "worker": "w-gpu-aurora",
+   "queue_s": 66299,
+   "restore_s": 13257,
+   "asr_s": 664,
+   "translate_s": 86,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 176,
+   "archive_s": 57,
+   "lead_s": 88868,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1109.3,
+     13311
+    ],
+    [
+     "w-gpu-dune",
+     50,
+     900
+    ]
+   ],
+   "controller_wh": 78.9,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-150",
+   "archived_at": "2026-10-26T03:40:16Z",
+   "created_at": "2026-10-25T14:58:19Z",
+   "res": "4K",
+   "duration_s": 7380,
+   "input_bytes": 11612897338,
+   "worker": "w-gpu-birch",
+   "queue_s": 8558,
+   "restore_s": 31587,
+   "asr_s": 651,
+   "translate_s": 61,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 242,
+   "archive_s": 46,
+   "lead_s": 45717,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1755.7,
+     31602
+    ]
+   ],
+   "controller_wh": 75.2,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-151",
+   "archived_at": "2026-10-26T06:45:23Z",
+   "created_at": "2026-10-26T04:16:17Z",
+   "res": "1080p",
+   "duration_s": 10680,
+   "input_bytes": 10660938056,
+   "worker": null,
+   "queue_s": null,
+   "restore_s": null,
+   "asr_s": 530,
+   "translate_s": 57,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 257,
+   "archive_s": 88,
+   "lead_s": 8946,
+   "restore_wh": [],
+   "controller_wh": 56.3,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles"
+   ]
+  },
+  {
+   "code": "ZZD-148",
+   "archived_at": "2026-10-26T19:10:34Z",
+   "created_at": "2026-10-25T20:13:47Z",
+   "res": "1080p",
+   "duration_s": 5520,
+   "input_bytes": 4555145788,
+   "worker": "w-gpu-birch",
+   "queue_s": 61725,
+   "restore_s": 12723,
+   "asr_s": 664,
+   "translate_s": 41,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 271,
+   "archive_s": 22,
+   "lead_s": 82607,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     709.9,
+     12779
+    ]
+   ],
+   "controller_wh": 40.6,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-149",
+   "archived_at": "2026-10-26T20:02:45Z",
+   "created_at": "2026-10-25T20:17:53Z",
+   "res": "4K",
+   "duration_s": 6660,
+   "input_bytes": 11485948395,
+   "worker": "w-gpu-birch",
+   "queue_s": 53086,
+   "restore_s": 29315,
+   "asr_s": 466,
+   "translate_s": 85,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 275,
+   "archive_s": 110,
+   "lead_s": 85492,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1629.9,
+     29338
+    ]
+   ],
+   "controller_wh": 53.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-154",
+   "archived_at": "2026-10-27T05:53:37Z",
+   "created_at": "2026-10-26T05:52:38Z",
+   "res": "4K",
+   "duration_s": 5700,
+   "input_bytes": 7626977865,
+   "worker": "w-gpu-birch",
+   "queue_s": 58631,
+   "restore_s": 21391,
+   "asr_s": 405,
+   "translate_s": 79,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 257,
+   "archive_s": 52,
+   "lead_s": 86459,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1190.2,
+     21424
+    ],
+    [
+     "w-gpu-dune",
+     50,
+     900
+    ]
+   ],
+   "controller_wh": 76,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-152",
+   "archived_at": "2026-10-27T08:55:26Z",
+   "created_at": "2026-10-26T07:30:17Z",
+   "res": "1080p",
+   "duration_s": 8880,
+   "input_bytes": 10086868748,
+   "worker": "w-gpu-birch",
+   "queue_s": 62746,
+   "restore_s": 19944,
+   "asr_s": 501,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "no_speech": 1
+   },
+   "scrape_s": 167,
+   "archive_s": 125,
+   "lead_s": 91509,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1110.4,
+     19987
+    ]
+   ],
+   "controller_wh": 78.6,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-153",
+   "archived_at": "2026-10-27T10:49:53Z",
+   "created_at": "2026-10-26T09:30:38Z",
+   "res": "1080p",
+   "duration_s": 6120,
+   "input_bytes": 4013024082,
+   "worker": "w-gpu-birch",
+   "queue_s": 69909,
+   "restore_s": 12369,
+   "asr_s": 670,
+   "translate_s": 70,
+   "translated": true,
+   "cues": null,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 111,
+   "archive_s": 76,
+   "lead_s": 91155,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     689.6,
+     12413
+    ]
+   ],
+   "controller_wh": 58,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-155",
+   "archived_at": "2026-10-28T07:58:46Z",
+   "created_at": "2026-10-27T08:55:39Z",
+   "res": "1080p",
+   "duration_s": 10680,
+   "input_bytes": 10837068824,
+   "worker": "w-gpu-dune",
+   "queue_s": 47285,
+   "restore_s": 27766,
+   "asr_s": 448,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 130,
+   "archive_s": 76,
+   "lead_s": 82987,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1543.7,
+     27787
+    ]
+   ],
+   "controller_wh": 66.6,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-157",
+   "archived_at": "2026-10-28T14:18:48Z",
+   "created_at": "2026-10-27T20:51:51Z",
+   "res": "1080p",
+   "duration_s": 6720,
+   "input_bytes": 4391605225,
+   "worker": "w-gpu-dune",
+   "queue_s": 43973,
+   "restore_s": 15396,
+   "asr_s": 492,
+   "translate_s": 37,
+   "translated": true,
+   "cues": 1326,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 190,
+   "archive_s": 107,
+   "lead_s": 62817,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     857.1,
+     15427
+    ]
+   ],
+   "controller_wh": 42.5,
+   "energy_partial": true,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-156",
+   "archived_at": "2026-10-28T23:23:33Z",
+   "created_at": "2026-10-28T03:15:42Z",
+   "res": "1080p",
+   "duration_s": 6780,
+   "input_bytes": 7910647801,
+   "worker": "w-gpu-cedar",
+   "queue_s": 49254,
+   "restore_s": 16052,
+   "asr_s": 613,
+   "translate_s": 85,
+   "translated": true,
+   "cues": 1466,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 237,
+   "archive_s": 118,
+   "lead_s": 72471,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     848.6,
+     16079
+    ]
+   ],
+   "controller_wh": 68.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-158",
+   "archived_at": "2026-10-28T23:38:17Z",
+   "created_at": "2026-10-28T03:32:31Z",
+   "res": "1080p",
+   "duration_s": 8520,
+   "input_bytes": 9177973676,
+   "worker": "w-gpu-cedar",
+   "queue_s": 45593,
+   "restore_s": 22209,
+   "asr_s": 645,
+   "translate_s": 74,
+   "translated": true,
+   "cues": 1779,
+   "subtitles": {
+    "generated_ja": 2,
+    "no_speech": 1
+   },
+   "scrape_s": 284,
+   "archive_s": 55,
+   "lead_s": 72346,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1174.3,
+     22249
+    ]
+   ],
+   "controller_wh": 78.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Bloom",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-159",
+   "archived_at": "2026-10-29T04:57:03Z",
+   "created_at": "2026-10-27T23:42:06Z",
+   "res": "4K",
+   "duration_s": 7920,
+   "input_bytes": 19263082082,
+   "worker": "w-gpu-cedar",
+   "queue_s": 53965,
+   "restore_s": 43138,
+   "asr_s": 416,
+   "translate_s": 70,
+   "translated": true,
+   "cues": 1773,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 140,
+   "archive_s": 124,
+   "lead_s": 105297,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     2278.2,
+     43166
+    ]
+   ],
+   "controller_wh": 63,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-160",
+   "archived_at": "2026-10-29T14:08:27Z",
+   "created_at": "2026-10-28T21:25:12Z",
+   "res": "4K",
+   "duration_s": 7140,
+   "input_bytes": 16130713149,
+   "worker": "w-gpu-birch",
+   "queue_s": 26072,
+   "restore_s": 27918,
+   "asr_s": 575,
+   "translate_s": 61,
+   "translated": true,
+   "cues": 1087,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 269,
+   "archive_s": 116,
+   "lead_s": 60195,
+   "restore_wh": [
+    [
+     "w-gpu-birch",
+     1552.9,
+     27953
+    ]
+   ],
+   "controller_wh": 41.8,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Coral",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZC-162",
+   "archived_at": "2026-10-30T05:41:23Z",
+   "created_at": "2026-10-29T00:34:37Z",
+   "res": "4K",
+   "duration_s": 8580,
+   "input_bytes": 16111468357,
+   "worker": "w-gpu-dune",
+   "queue_s": 55393,
+   "restore_s": 39655,
+   "asr_s": 623,
+   "translate_s": 59,
+   "translated": true,
+   "cues": 1418,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 271,
+   "archive_s": 85,
+   "lead_s": 104806,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     2205.1,
+     39692
+    ]
+   ],
+   "controller_wh": 71.4,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Amber",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-161",
+   "archived_at": "2026-10-30T09:37:10Z",
+   "created_at": "2026-10-29T09:47:09Z",
+   "res": "4K",
+   "duration_s": 7800,
+   "input_bytes": 19083555424,
+   "worker": "w-gpu-cedar",
+   "queue_s": 47476,
+   "restore_s": 33839,
+   "asr_s": 526,
+   "translate_s": 77,
+   "translated": true,
+   "cues": 1544,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 103,
+   "archive_s": 122,
+   "lead_s": 85801,
+   "restore_wh": [
+    [
+     "w-gpu-cedar",
+     1788.9,
+     33895
+    ]
+   ],
+   "controller_wh": 43.8,
+   "energy_partial": false,
+   "target": "new_actor",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZB-166",
+   "archived_at": "2026-10-31T02:46:37Z",
+   "created_at": "2026-10-30T01:45:11Z",
+   "res": "1080p",
+   "duration_s": 10320,
+   "input_bytes": 8640059222,
+   "worker": "w-gpu-dune",
+   "queue_s": 64629,
+   "restore_s": 22786,
+   "asr_s": 384,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "reused_zh": 1
+   },
+   "scrape_s": 149,
+   "archive_s": 70,
+   "lead_s": 90086,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     1269,
+     22842
+    ]
+   ],
+   "controller_wh": 45.1,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Iris",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZE-164",
+   "archived_at": "2026-10-31T02:48:11Z",
+   "created_at": "2026-10-30T13:02:24Z",
+   "res": "4K",
+   "duration_s": 8160,
+   "input_bytes": 16230651019,
+   "worker": "w-gpu-aurora",
+   "queue_s": 21568,
+   "restore_s": 22148,
+   "asr_s": 603,
+   "translate_s": 37,
+   "translated": true,
+   "cues": 1690,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 253,
+   "archive_s": 114,
+   "lead_s": 49547,
+   "restore_wh": [
+    [
+     "w-gpu-aurora",
+     1846.4,
+     22157
+    ]
+   ],
+   "controller_wh": 50.6,
+   "energy_partial": false,
+   "target": "category",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZD-163",
+   "archived_at": "2026-10-31T04:24:43Z",
+   "created_at": "2026-10-29T22:25:05Z",
+   "res": "4K",
+   "duration_s": 9060,
+   "input_bytes": 16431420258,
+   "worker": "w-gpu-dune",
+   "queue_s": 66668,
+   "restore_s": 37850,
+   "asr_s": 650,
+   "translate_s": 53,
+   "translated": true,
+   "cues": 1713,
+   "subtitles": {
+    "generated_ja": 1
+   },
+   "scrape_s": 260,
+   "archive_s": 64,
+   "lead_s": 107978,
+   "restore_wh": [
+    [
+     "w-gpu-dune",
+     2104.9,
+     37888
+    ]
+   ],
+   "controller_wh": 77.6,
+   "energy_partial": false,
+   "target": "performer",
+   "actor": "Actor Dawn",
+   "second": false,
+   "marks": [
+    "chinese_subtitles",
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  },
+  {
+   "code": "ZZA-165",
+   "archived_at": "2026-10-31T04:46:06Z",
+   "created_at": "2026-10-30T12:36:26Z",
+   "res": "4K",
+   "duration_s": 7080,
+   "input_bytes": 15007739715,
+   "worker": "w-gpu-ember",
+   "queue_s": 21340,
+   "restore_s": 27249,
+   "asr_s": 434,
+   "translate_s": null,
+   "translated": false,
+   "cues": null,
+   "subtitles": {
+    "no_speech": 1
+   },
+   "scrape_s": 219,
+   "archive_s": 69,
+   "lead_s": 58180,
+   "restore_wh": [
+    [
+     "w-gpu-ember",
+     1516.2,
+     27292
+    ]
+   ],
+   "controller_wh": 49.5,
+   "energy_partial": false,
+   "target": "manual",
+   "actor": null,
+   "second": false,
+   "marks": [
+    "uncensored",
+    "4k",
+    "restored"
+   ]
+  }
+ ],
+ "failures": [
+  {
+   "at": "2026-10-08T05:00:00Z",
+   "code": "ZZA-001",
+   "stage": "restore",
+   "machine": "w-gpu-birch",
+   "severity": "fail",
+   "type": "ltx_failed",
+   "exhausted": false,
+   "note": "Jasna LTX 失败（退出码 1）",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-19T03:20:00Z",
+   "code": "ZZB-031",
+   "stage": "restore",
+   "machine": "w-gpu-cedar",
+   "severity": "fail",
+   "type": "missing_model",
+   "exhausted": false,
+   "note": "缺少 LTX 模型文件",
+   "outcome": "reassigned"
+  },
+  {
+   "at": "2026-10-20T11:40:00Z",
+   "code": "ZZC-036",
+   "stage": "restore",
+   "machine": "w-gpu-dune",
+   "severity": "fail",
+   "type": "ltx_failed",
+   "exhausted": false,
+   "note": "Jasna LTX 失败（退出码 1）",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-22T08:15:00Z",
+   "code": "ZZD-044",
+   "stage": "asr",
+   "machine": "w-ctrl-0001",
+   "severity": "warn",
+   "type": "interrupted",
+   "exhausted": false,
+   "note": "上一次运行被中断",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-25T02:30:00Z",
+   "code": "ZZE-055",
+   "stage": "restore",
+   "machine": "w-gpu-aurora",
+   "severity": "fail",
+   "type": "ltx_failed",
+   "exhausted": false,
+   "note": "Jasna LTX 失败（退出码 1）",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-26T07:05:00Z",
+   "code": "ZZA-060",
+   "stage": "translate",
+   "machine": "w-ctrl-0001",
+   "severity": "warn",
+   "type": "translate_paused",
+   "exhausted": false,
+   "note": "翻译暂停：翻译服务无响应",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-27T09:45:00Z",
+   "code": "ZZB-066",
+   "stage": "restore",
+   "machine": "w-gpu-dune",
+   "severity": "warn",
+   "type": "stopped",
+   "exhausted": false,
+   "note": "已停止并重新排队",
+   "outcome": "reassigned"
+  },
+  {
+   "at": "2026-10-28T04:10:00Z",
+   "code": "ZZC-071",
+   "stage": "restore",
+   "machine": "w-gpu-cedar",
+   "severity": "fail",
+   "type": "missing_ffprobe",
+   "exhausted": false,
+   "note": "找不到 ffprobe",
+   "outcome": "needs_action"
+  },
+  {
+   "at": "2026-10-29T10:00:00Z",
+   "code": "ZZD-074",
+   "stage": "translate",
+   "machine": "w-ctrl-0001",
+   "severity": "fail",
+   "type": "translate_paused",
+   "exhausted": true,
+   "note": "翻译暂停：翻译服务无响应",
+   "outcome": "needs_action"
+  },
+  {
+   "at": "2026-10-29T13:30:00Z",
+   "code": "ZZE-075",
+   "stage": "scrape",
+   "machine": "w-ctrl-0001",
+   "severity": "fail",
+   "type": "scrape_whitelist",
+   "exhausted": false,
+   "note": "白名单以外的文件",
+   "outcome": "needs_action"
+  },
+  {
+   "at": "2026-10-30T02:00:00Z",
+   "code": "ZZA-080",
+   "stage": "restore",
+   "machine": "w-gpu-aurora",
+   "severity": "warn",
+   "type": "transient",
+   "exhausted": false,
+   "note": "[WinError 5] 拒绝访问",
+   "outcome": "retried_ok"
+  },
+  {
+   "at": "2026-10-30T05:00:00Z",
+   "code": "ZZA-081",
+   "stage": "return",
+   "machine": "w-ctrl-0001",
+   "severity": "fail",
+   "type": "transient",
+   "exhausted": true,
+   "note": "[WinError 5] 拒绝访问",
+   "outcome": "needs_action"
+  },
+  {
+   "at": "2026-10-30T20:00:00Z",
+   "code": "ZZB-082",
+   "stage": "archive",
+   "machine": "w-ctrl-0001",
+   "severity": "fail",
+   "type": "other",
+   "exhausted": false,
+   "note": "目标目录不可写",
+   "outcome": "retrying"
+  },
+  {
+   "at": "2026-10-31T00:20:00Z",
+   "code": "ZZC-083",
+   "stage": "restore",
+   "machine": "w-gpu-birch",
+   "severity": "fail",
+   "type": "machine_fault",
+   "exhausted": false,
+   "note": "[WinError 4551] 应用程序控制策略已阻止此文件",
+   "outcome": "reassigned"
+  },
+  {
+   "at": "2026-10-31T00:40:00Z",
+   "code": "ZZD-084",
+   "stage": "restore",
+   "machine": "w-gpu-birch",
+   "severity": "fail",
+   "type": "machine_fault",
+   "exhausted": false,
+   "note": "[WinError 4551] 应用程序控制策略已阻止此文件",
+   "outcome": "reassigned"
+  },
+  {
+   "at": "2026-10-31T01:00:00Z",
+   "code": "ZZE-085",
+   "stage": "restore",
+   "machine": "w-gpu-birch",
+   "severity": "fail",
+   "type": "machine_fault",
+   "exhausted": false,
+   "note": "[WinError 4551] 应用程序控制策略已阻止此文件",
+   "outcome": "reassigned"
+  },
+  {
+   "at": "2026-10-31T04:00:00Z",
+   "code": "ZZA-086",
+   "stage": "restore",
+   "machine": "w-gpu-dune",
+   "severity": "warn",
+   "type": "interrupted",
+   "exhausted": false,
+   "note": "上一次运行被中断",
+   "outcome": "retrying"
+  }
+ ],
+ "devices": {
+  "available": true,
+  "reason": "",
+  "spans": [
+   {
+    "machine": "w-ctrl-0001",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-28T00:00:00Z",
+    "end": "2026-10-29T15:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-ctrl-0001",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-29T16:30:00Z",
+    "end": "2026-10-30T22:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-ctrl-0001",
+    "state": "paused",
+    "reason": "global",
+    "start": "2026-10-30T22:00:00Z",
+    "end": "2026-10-30T23:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-ctrl-0001",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-30T23:00:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   },
+   {
+    "machine": "w-gpu-aurora",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-28T00:01:00Z",
+    "end": "2026-10-29T15:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-aurora",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-29T16:31:00Z",
+    "end": "2026-10-30T22:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-aurora",
+    "state": "paused",
+    "reason": "global",
+    "start": "2026-10-30T22:00:00Z",
+    "end": "2026-10-30T23:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-aurora",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-30T23:00:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   },
+   {
+    "machine": "w-gpu-birch",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-28T00:01:00Z",
+    "end": "2026-10-29T15:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-birch",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-29T16:31:00Z",
+    "end": "2026-10-31T01:10:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-birch",
+    "state": "offline",
+    "reason": "",
+    "start": "2026-10-31T01:10:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   },
+   {
+    "machine": "w-gpu-cedar",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-28T00:01:00Z",
+    "end": "2026-10-29T15:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-cedar",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-29T16:31:00Z",
+    "end": "2026-10-31T03:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-cedar",
+    "state": "paused",
+    "reason": "admission",
+    "start": "2026-10-31T03:00:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   },
+   {
+    "machine": "w-gpu-dune",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-28T00:01:00Z",
+    "end": "2026-10-29T15:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-dune",
+    "state": "offline",
+    "reason": "",
+    "start": "2026-10-29T16:31:00Z",
+    "end": "2026-10-29T18:00:00Z",
+    "open": false
+   },
+   {
+    "machine": "w-gpu-dune",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-29T18:00:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   },
+   {
+    "machine": "w-gpu-ember",
+    "state": "online",
+    "reason": "",
+    "start": "2026-10-30T09:00:00Z",
+    "end": "2026-10-31T05:59:30Z",
+    "open": true
+   }
+  ]
+ },
+ "outages": [
+  {
+   "start": "2026-10-26T06:50:00Z",
+   "end": "2026-10-26T07:25:00Z",
+   "paused": false
+  },
+  {
+   "start": "2026-10-29T09:40:00Z",
+   "end": "2026-10-29T10:30:00Z",
+   "paused": true
+  },
+  {
+   "start": "2026-10-31T05:30:00Z",
+   "end": null,
+   "paused": false
+  }
+ ],
+ "inbox": {
+  "total_bytes": 1000000000000,
+  "free_bytes": 410000000000,
+  "used_bytes": 590000000000,
+  "pending_bytes": 320000000000,
+  "pending_films": 23,
+  "freed_bytes_per_day_7d": 160000000000,
+  "avg_input_bytes_7d": 13000000000
+ }
+}

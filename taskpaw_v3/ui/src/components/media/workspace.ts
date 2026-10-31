@@ -29,7 +29,7 @@ export const PREFLIGHT_MS = 30000;
 export const PREFLIGHT_MAX = 10;
 
 export type PageKey =
-  | "overview" | "pending" | "queue" | "review" | "exceptions" | "devices" | "local" | "libraries" | "bridge" | "settings";
+  | "overview" | "pending" | "queue" | "review" | "exceptions" | "devices" | "local" | "libraries" | "analytics" | "bridge" | "settings";
 
 export interface MediaData {
   films: ReturnType<typeof useQuery<WorkflowFilms>>;

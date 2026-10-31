@@ -658,6 +658,68 @@ export interface HubSettingsState {
 export type OpenclawTest = { ok: true; at: string; elapsed_s: number } | { ok: false; error: "unreachable" | "token" | "timeout" | "http"; status?: number };
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
+// 数据分析 (EPIC 2026-10-31 §7): GET /control/workflow/analytics, controller only. Times are UTC `Z`;
+// an absent stage or a source without records is null, never 0.
+export type AnalyticsMachineState = "online" | "paused" | "offline" | "unknown" | "off";
+export type AnalyticsStateReason = "" | "admission" | "worker" | "global" | "version";
+export interface AnalyticsCoverage {
+  archives: string | null; energy: string | null; cues: string | null; devices: string | null; outages: string | null;
+}
+export interface AnalyticsMachine {
+  id: string; name: string; kind: "gpu" | "controller";
+  model: string | null; // latest probe ("RTX 5060 Ti 16GB"); null if never probed
+  first_seen: string | null; // earliest worker boot (the UI tolerates null for a machine without one)
+  retired: boolean;
+  state_now: AnalyticsMachineState; state_reason: AnalyticsStateReason; state_since: string | null;
+}
+export type AnalyticsSubtitleDecision = "reused_zh" | "source_ja" | "generated_ja" | "no_speech";
+export interface AnalyticsFilm {
+  code: string; archived_at: string; created_at: string;
+  res: "4K" | "1080p" | null;
+  duration_s: number | null; input_bytes: number | null;
+  worker: string | null; // the succeeded restore's worker; null = no restore
+  queue_s: number | null; restore_s: number | null; asr_s: number | null; translate_s: number | null;
+  translated: boolean; cues: number | null;
+  subtitles: Partial<Record<AnalyticsSubtitleDecision, number>>;
+  scrape_s: number | null; archive_s: number | null; lead_s: number | null;
+  restore_wh: Array<[worker: string, wh: number, seconds: number]>; // failed attempts included
+  controller_wh: number | null; energy_partial: boolean;
+  target: "performer" | "category" | "new_actor" | "manual";
+  actor: string | null; second: boolean; marks: string[];
+}
+export type AnalyticsFailureType =
+  | "interrupted" | "stopped" | "translate_paused" | "transient"
+  | "machine_fault" | "missing_model" | "missing_ffprobe" | "ltx_failed" | "scrape_whitelist" | "other";
+export interface AnalyticsFailure {
+  at: string; code: string; stage: "restore" | "asr" | "translate" | "return" | "scrape" | "archive";
+  machine: string; // the controller's id for worker-less stages
+  severity: "fail" | "warn"; // warn never counts in 失败率
+  type: AnalyticsFailureType;
+  exhausted: boolean; // a transient type whose retries are used up (then severity is fail)
+  note: string;
+  outcome: "retried_ok" | "reassigned" | "retrying" | "needs_action";
+}
+export interface AnalyticsSpan {
+  machine: string; state: "online" | "paused" | "offline"; reason: AnalyticsStateReason;
+  start: string; end: string; open: boolean;
+}
+export interface AnalyticsOutage { start: string; end: string | null; paused: boolean }
+export interface AnalyticsInbox {
+  total_bytes: number; free_bytes: number; used_bytes: number; pending_bytes: number; pending_films: number;
+  freed_bytes_per_day_7d: number; avg_input_bytes_7d: number;
+}
+export interface WorkflowAnalytics {
+  server_time: string;
+  since: string | null; // echo; null for all history
+  coverage: AnalyticsCoverage;
+  machines: AnalyticsMachine[];
+  films: AnalyticsFilm[];
+  failures: AnalyticsFailure[];
+  devices: { available: boolean; reason: string; spans: AnalyticsSpan[] };
+  outages: AnalyticsOutage[];
+  inbox: AnalyticsInbox | null;
+}
+
 const seg = (id: string | number) => encodeURIComponent(String(id));
 const LIBRARY = "/control/workflow/library";
 
@@ -772,7 +834,8 @@ async function get<T>(role: "agent" | "hub", path: string, signal?: AbortSignal)
 }
 
 // The library's GETs (#361) keep the backend's `detail`, as send() does: 「不是可读的 Filmpaw 片库…」
-// says more than "path → 422". The plain get() stays as it is for its other callers.
+// says more than "path → 422"; 数据分析 uses it for its 409/503 notices. The plain get() stays as it
+// is for its other callers.
 async function libraryGet<T>(path: string): Promise<T> {
   const { baseUrl, controlToken } = cfg("agent");
   const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
@@ -987,6 +1050,9 @@ export const api = {
     send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
   // P2-2: 设备 (every command carries the worker's `expected_version`) and the worker console.
   workflowDevices: () => get<DevicesView>("agent", "/control/workflow/devices"),
+  // 数据分析 (EPIC 2026-10-31 §7): keeps the 409/503 `detail` for the page's notices; `since` omitted = all history
+  workflowAnalytics: (since?: string) =>
+    libraryGet<WorkflowAnalytics>(`/control/workflow/analytics${since ? `?${new URLSearchParams({ since })}` : ""}`),
   workflowAddDevice: (name: string, address: string) =>
     send<PairingCode>("agent", "POST", "/control/workflow/devices", { name, address }),
   workflowRepairDevice: (id: string, expected_version: number) =>
