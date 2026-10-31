@@ -199,6 +199,30 @@ def _damaged(path: Path) -> None:
     path.write_bytes(b"this is not a database file at all" * 200)
 
 
+def _damaged_page(path: Path) -> None:
+    """A valid header and schema over a damaged data page (Codex r1)."""
+    conn = dh.open_database(path)
+    conn.executemany(
+        "INSERT INTO device_spans(worker_id,state,reason,started_at,last_seen_at,closed)"
+        " VALUES (?,'online','','2026-10-31T00:00:00Z','2026-10-31T00:00:30Z',1)",
+        [(f"worker-{i:04d}-" + "x" * 40,) for i in range(400)],
+    )
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    data = bytearray(path.read_bytes())
+    size = int.from_bytes(data[16:18], "big")
+    pages = len(data) // size
+    data[(pages - 1) * size : pages * size] = bytes([0xFF]) * size
+    path.write_bytes(bytes(data))
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:  # the header and schema still read fine: only a full check sees it
+        assert probe.execute("PRAGMA application_id").fetchone()[0] == dh.APPLICATION_ID
+        assert dh._layout(probe) == dh._expected()
+    finally:
+        probe.close()
+
+
 @pytest.mark.parametrize(
     "make, reason",
     [
@@ -208,8 +232,9 @@ def _damaged(path: Path) -> None:
         (_version(0), dh.REFUSED_VERSION),
         (_mismatched, dh.REFUSED_SCHEMA),
         (_damaged, dh.REFUSED_DAMAGED),
+        (_damaged_page, dh.REFUSED_DAMAGED),
     ],
-    ids=["foreign-id", "other-app", "newer", "unknown", "ddl", "damaged"],
+    ids=["foreign-id", "other-app", "newer", "unknown", "ddl", "damaged", "page"],
 )
 def test_a_foreign_newer_or_mismatched_file_is_refused_untouched(world, make, reason):
     make(world.path)

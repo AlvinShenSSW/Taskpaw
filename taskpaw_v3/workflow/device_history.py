@@ -169,6 +169,14 @@ def _check(conn: sqlite3.Connection) -> bool:
         raise Refused(REFUSED_VERSION)
     if layout != _expected():
         raise Refused(REFUSED_SCHEMA)
+    # a damaged data page leaves the header and schema readable (Codex r1);
+    # the file is small, so a full check of every page costs little
+    try:
+        ok = conn.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+    except sqlite3.DatabaseError as exc:
+        raise Refused(REFUSED_DAMAGED) from exc
+    if not ok:
+        raise Refused(REFUSED_DAMAGED)
     return False
 
 
