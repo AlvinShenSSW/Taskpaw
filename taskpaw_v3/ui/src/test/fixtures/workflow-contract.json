@@ -2846,5 +2846,114 @@
       "second_hint": null,
       "new_actor": null
     }
+  },
+  "analytics": {
+    "server_time": "2026-10-21T08:00:00Z",
+    "since": null,
+    "coverage": {
+      "archives": "2026-10-21T08:00:00Z",
+      "energy": "2026-10-21T08:00:00Z",
+      "cues": null,
+      "devices": "2026-10-21T08:00:00Z",
+      "outages": "2026-10-21T08:00:00Z"
+    },
+    "machines": [
+      {
+        "id": "worker-local",
+        "name": "本机",
+        "kind": "controller",
+        "model": "RTX 5060 8GB",
+        "first_seen": "2026-10-21T08:00:00Z",
+        "retired": false,
+        "state_now": "online",
+        "state_reason": "",
+        "state_since": "2026-10-21T08:00:00Z"
+      }
+    ],
+    "films": [
+      {
+        "code": "Film",
+        "archived_at": "2026-10-21T08:00:00Z",
+        "created_at": "2026-10-21T08:00:00Z",
+        "res": "1080p",
+        "duration_s": 120,
+        "input_bytes": 50,
+        "worker": "worker-local",
+        "queue_s": 1800,
+        "restore_s": 5420,
+        "asr_s": 610,
+        "translate_s": 1230,
+        "translated": null,
+        "cues": null,
+        "subtitles": {},
+        "scrape_s": 95,
+        "archive_s": 40,
+        "lead_s": 9000,
+        "restore_wh": [
+          [
+            "worker-local",
+            812.5,
+            10800.0
+          ]
+        ],
+        "controller_wh": 3250.0,
+        "energy_partial": false,
+        "target": "performer",
+        "actor": "Actor",
+        "second": false,
+        "marks": [
+          "uncensored",
+          "chinese_subtitles"
+        ]
+      }
+    ],
+    "failures": [
+      {
+        "at": "2026-10-21T08:00:00Z",
+        "code": "Film",
+        "stage": "translate",
+        "machine": "worker-local",
+        "severity": "fail",
+        "type": "other",
+        "exhausted": false,
+        "note": "LLM 超时：翻译服务 120 秒没有响应",
+        "outcome": "needs_action"
+      }
+    ],
+    "devices": {
+      "available": true,
+      "reason": "",
+      "spans": [
+        {
+          "machine": "worker-local",
+          "state": "online",
+          "reason": "",
+          "start": "2026-10-21T08:00:00Z",
+          "end": "2026-10-21T08:00:00Z",
+          "open": true
+        }
+      ]
+    },
+    "outages": [
+      {
+        "start": "2026-10-21T08:00:00Z",
+        "end": "2026-10-21T08:00:00Z",
+        "paused": true
+      },
+      {
+        "start": "2026-10-21T08:00:00Z",
+        "end": null,
+        "paused": false
+      }
+    ],
+    "inbox": {
+      "total_bytes": 1000000000000,
+      "free_bytes": 360000000000,
+      "used_bytes": 640000000000,
+      "pending_bytes": 117,
+      "pending_films": 1,
+      "freed_bytes_per_day_7d": 7,
+      "avg_input_bytes_7d": 50
+    }
   }
 }

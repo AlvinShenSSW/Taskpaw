@@ -17,9 +17,13 @@ import os
 import re
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from taskpaw_v3.core import power
+from taskpaw_v3.core.config import WorkflowSettings
+from taskpaw_v3.core.tasklog import TaskLog, set_task_log
 from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.plugins.jasna_progress import (
     console_text,
@@ -38,7 +42,16 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
 )
 from taskpaw_v3.tests.test_workflow_plan_routes import with_lookup
+from taskpaw_v3.workflow import analytics as analytics_module
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow.analytics import (
+    DOWN,
+    PAUSED,
+    TRANSLATE_TASK,
+    UP,
+    AnalyticsFacts,
+)
+from taskpaw_v3.workflow.device_history import DeviceHistory
 from taskpaw_v3.workflow.exec_restore import (
     launch_params,
     progress_text,
@@ -318,10 +331,83 @@ def build(tmp_path: Path) -> dict[str, Any]:
                 "film": {names[f]: details[f] for f in film_ids},
                 "plans": plans,
                 "target": target,
+                "analytics": analytics_world(tmp_path / "analytics"),
             }
         )
     finally:
         rt.close()
+
+
+# EPIC #387 C2: the 数据分析 fact durations are real elapsed seconds (near 0
+# here), so they become these operator-sized values; null stays null.
+ANALYTICS_DURATIONS = {
+    "queue_s": 1800,
+    "restore_s": 5420,
+    "asr_s": 610,
+    "translate_s": 1230,
+    "scrape_s": 95,
+    "archive_s": 40,
+    "lead_s": 9000,
+}
+INBOX_DISK = SimpleNamespace(
+    total=1_000_000_000_000, used=640_000_000_000, free=360_000_000_000
+)
+
+
+def analytics_world(tmp_path: Path) -> Any:
+    """`GET /analytics` over a World of its own (the main one has an intake
+    root, so its unbound film cannot be archived): one film archived end to
+    end and one whose translate needs the operator, the controller's device
+    history (C1) and the translator's outages in a task log of its own."""
+    tmp_path.mkdir()
+    world = World(tmp_path)
+    rt = world.rt
+    try:
+        world.scrape()
+        failed = ret.add_real_film(rt)
+        rt.executors["translate"] = FailingTranslate(rt)
+        ret.run_all(ret.dispatcher(rt))
+        host = Host(world)
+        host.dispatcher = SimpleNamespace(paused=False)
+        with world.fake:  # 确认入库
+            host.finalizer.run_once()
+            host.finalizer.confirm(world.film, "actor")
+            world.ticks(host.finalizer)
+        host.analytics = AnalyticsFacts()
+        recorder = DeviceHistory(tmp_path / "analytics.db", rt, host.dispatcher, None)
+        assert recorder.open(), recorder.reason
+        assert recorder.tick()
+        host.device_history = recorder
+        task_log = TaskLog(tmp_path / "agent")
+        for kind in (DOWN, PAUSED, UP, DOWN):
+            task_log.record(
+                TRANSLATE_TASK, kind, task_type="workflow", data={"model": "m"}
+            )
+        set_task_log(task_log)
+        try:
+            client = _client(
+                lambda: host, WorkflowSettings(inbox_root=str(world.inbox))
+            )
+            with patch.object(
+                analytics_module.shutil, "disk_usage", return_value=INBOX_DISK
+            ):
+                body = ok(client.get(f"{BASE}/analytics"))
+        finally:
+            set_task_log(None)
+            recorder.stop()
+        for film in body["films"]:
+            film.update(
+                {k: v for k, v in ANALYTICS_DURATIONS.items() if film[k] is not None}
+            )
+        names = {
+            world.film: "film-archived",
+            failed: "film-failed",
+            rt.identity.worker_id: "worker-local",
+        }
+        return Stable(tmp_path, {world.nas.parent: NAS}, names)(body)
+    finally:
+        rt.close()
+        world.fake.close()
 
 
 def test_the_ui_fixture_matches_the_backend(tmp_path):
@@ -373,3 +459,20 @@ def test_the_fixture_covers_every_page_the_ui_tests():
     assert data["films"]["energy_rates"]
     assert all("prediction" in e for e in data["plans"]["plans"])
     assert data["film"]["film-review"]["energy"] == rows["film-review"]["energy"]
+    # EPIC #387 C2: 数据分析 — the archived film, the failed translate, the
+    # controller's device span, an open outage and the INBOX
+    analytics = data["analytics"]
+    (film,) = analytics["films"]
+    assert film["target"] == "performer" and film["res"] == "1080p"
+    assert film["restore_wh"][0][0] == "worker-local"
+    assert analytics["coverage"]["archives"] and analytics["coverage"]["devices"]
+    failure = next(f for f in analytics["failures"] if f["stage"] == "translate")
+    assert (failure["severity"], failure["outcome"]) == ("fail", "needs_action")
+    assert failure["note"] == TRANSLATE_ERROR
+    assert analytics["devices"]["available"] is True
+    assert analytics["devices"]["spans"][0]["machine"] == "worker-local"
+    assert [o["end"] is None for o in analytics["outages"]] == [False, True]
+    assert analytics["outages"][0]["paused"] is True
+    assert analytics["inbox"]["total_bytes"] == INBOX_DISK.total
+    machine = analytics["machines"][0]
+    assert (machine["kind"], machine["state_now"]) == ("controller", "online")

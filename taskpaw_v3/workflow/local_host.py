@@ -22,6 +22,7 @@ from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 
 from . import intake_models as im
 from . import models as m
+from .analytics import AnalyticsFacts
 from .auth import STAGE_ROLES
 from .device_history import DeviceHistory
 from .exec_common import MISSING_LTX
@@ -302,6 +303,8 @@ class LocalWorkflowHost:
         self.fleet: FleetLive | None = None
         # EPIC #387 C1: each machine's online / 停领 / offline spans (controller)
         self.device_history: DeviceHistory | None = None
+        # EPIC #387 C2: the 数据分析 route's per-receipt film facts
+        self.analytics = AnalyticsFacts()
         self.transfers: Transfers | None = None
         # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
         self.cancels: set[str] = set()
