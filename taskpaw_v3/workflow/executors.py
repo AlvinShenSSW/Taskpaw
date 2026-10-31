@@ -20,7 +20,12 @@ from .owned_process import OwnedJob
 if TYPE_CHECKING:
     from .stage_results import StageResult
 
-ErrorClass = Literal["transient", "permission", "needs_attention", "cancelled"]
+# `machine`: the controller's own class for a remote failure caused by the
+# worker's machine, not the film; that worker is put on 停领 and the attempt is a
+# free retry elsewhere (never sent by a worker).
+ErrorClass = Literal[
+    "transient", "permission", "needs_attention", "cancelled", "machine"
+]
 ComputeStage = Literal["restore", "asr", "translate"]
 
 # The error class survives restarts in the attempt's evidence kind (D18).

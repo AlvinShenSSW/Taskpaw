@@ -22,6 +22,7 @@ from taskpaw_v3.workflow import board, planning
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.executors import ExecOutcome
 from taskpaw_v3.workflow.plan import TIER_LABELS
+from taskpaw_v3.workflow.remote_attempts import MACHINE_FAULT_MARK
 from taskpaw_v3.workflow.timing import film_timing, summary_text
 
 if TYPE_CHECKING:
@@ -134,10 +135,17 @@ class WorkflowEvents:
         if outcome.error_class == "cancelled":
             return
         if not outcome.ok:
+            # a machine fault is requeued, not final: its own key per attempt
+            # (the stage's version) leaves the film's failure key unspent
+            kind = (
+                f"workflow.stage.machine:{job.stage}:{job.version}"
+                if outcome.error_class == "machine"
+                else f"workflow.stage.failed:{job.stage}"
+            )
             self.emit(
                 job.film_id,
                 job.input_revision,
-                f"workflow.stage.failed:{job.stage}",
+                kind,
                 f"{name} {outcome.message or '处理失败'}",
                 "warn",
             )
@@ -305,7 +313,14 @@ class WorkflowEvents:
                 "workflow.film.needs_confirmation",
                 f"{name} 待确认入库{candidate}",
             )
-        if row["group"] == "attention" and row.get("attention_kind") is None:
+        machine_fault = row.get("status") == "failed" and MACHINE_FAULT_MARK in (
+            row.get("note") or ""
+        )  # a requeue in flight: `resolved` tells it under its own key
+        if (
+            row["group"] == "attention"
+            and row.get("attention_kind") is None
+            and not machine_fault
+        ):
             stage = row.get("stage")
             state = row.get("status")
             kind = "failed" if state == "failed" else "needs_attention"

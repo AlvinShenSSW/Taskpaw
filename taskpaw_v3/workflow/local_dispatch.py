@@ -150,7 +150,9 @@ def fits(manifest: m.InputManifest, limit: tuple[int, int]) -> bool:
     return 0 < width <= limit[0] and 0 < height <= limit[1]
 
 
-_FREE_RETRY = frozenset({INTERRUPTED_KIND, failed_kind("cancelled")})
+_FREE_RETRY = frozenset(
+    {INTERRUPTED_KIND, failed_kind("cancelled"), failed_kind("machine")}
+)
 _TRANSIENT = failed_kind("transient")
 
 
@@ -211,7 +213,8 @@ def run_stage(
 def should_retry(attempts: Sequence[Any]) -> bool:
     """C6 / T08-P1a R3: decided only by persisted evidence kinds, oldest first.
 
-    Interruptions and stops are retried without counting; a transient failure
+    Interruptions, stops and machine faults (their worker is already on 停领,
+    so the retry runs elsewhere) are retried without counting; a transient failure
     is retried while at most MAX_AUTO_RETRIES transient attempts have failed;
     permission and needs-attention failures are never retried.
     """

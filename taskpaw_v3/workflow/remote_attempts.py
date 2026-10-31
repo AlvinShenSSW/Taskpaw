@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import shutil
 import threading
 import uuid
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from . import models as m
 from .auth import AuthProof
+from .devices import set_admission
 from .exec_common import write_text_atomic
 from .executors import ErrorClass, ExecOutcome
 from .local_dispatch import resolution, retry_if_due
@@ -39,6 +41,17 @@ ROUTED_STAGES = ("restore",)  # OD7: all a worker's staged copy is for
 _FINISHED = ("succeeded", "skipped")
 Verdict = Literal["interrupted", "finish", "held"]
 Resolved = Callable[[m.PendingComputeJob, ExecOutcome], None]
+# Windows application control (Smart App Control, App Control for Business)
+# refusing the tools: that machine fails every film the same way.
+_MACHINE_FAULT = re.compile(r"\[WinError 4551\]")
+# The note's mark: the observer reads it on a stage still failed for the
+# moment before its free retry, and leaves the film's failure key unspent.
+MACHINE_FAULT_MARK = "环境异常，已停领，本片改派其他机器"
+MACHINE_FAULT_NOTE = (
+    "{name} " + MACHINE_FAULT_MARK + "：Windows 应用程序控制阻止了文件"
+    "（WinError 4551），可关闭该机的「智能应用控制」后在「设备」页点「恢复」。"
+    "原始错误：{message}"
+)
 
 
 class AttemptRefused(Exception):
@@ -244,9 +257,7 @@ def finish(
         if body.outcome == "succeeded":
             outcome = _verify(rt, transfers, owned, manifest, body)
         else:
-            outcome = ExecOutcome.failed(
-                body.error_class or "needs_attention", body.message or "失败"
-            )
+            outcome = _failed(rt, worker_id, body)
         operation_id = _attempt(rt, assignment).operation_id
         try:
             rt.store.resolve_assignment(
@@ -268,6 +279,36 @@ def finish(
             raise AttemptRefused(409, exc.code) from None
         _after(rt, transfers, owned, outcome, on_resolved)
         return {"state": "resolved", "outcome": "succeeded" if outcome.ok else "failed"}
+
+
+def _failed(rt: LocalRuntime, worker_id: str, body: FinishBody) -> ExecOutcome:
+    """The worker's failure as reported; a machine fault puts its worker on
+    停领 first, so the free retry is routed and claimed elsewhere. When the
+    hold does not land the failure stays for the operator, never a retry loop
+    on the same machine."""
+    message = body.message or "失败"
+    if body.error_class != "cancelled" and _MACHINE_FAULT.search(message):
+        name = _hold(rt, worker_id)
+        if name is None:  # even a `transient` report: no retry onto that machine
+            return ExecOutcome.failed("needs_attention", message)
+        note = MACHINE_FAULT_NOTE.format(name=name, message=message)
+        return ExecOutcome.failed("machine", note[:2048])
+    return ExecOutcome.failed(body.error_class or "needs_attention", message)
+
+
+def _hold(rt: LocalRuntime, worker_id: str) -> str | None:
+    """停领 `worker_id`; its name once it takes no new work, else None."""
+    for _ in range(3):
+        worker = rt.store.get_worker(rt.operator, worker_id).worker
+        if worker.admission_state != "enabled":
+            return worker.name  # already 停领, disabled or revoked: claims refused
+        try:
+            return set_admission(rt, worker_id, worker.version, "draining").name
+        except m.WorkflowError as exc:
+            if exc.code != "cas_conflict":
+                log.warning("停领 of %s after a machine fault: %s", worker_id, exc)
+                return None
+    return None
 
 
 def _verify(
