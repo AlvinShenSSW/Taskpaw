@@ -308,6 +308,13 @@ def _loopback_equiv(a: str, b: str) -> bool:
         return a == b
 
 
+def _probe_hosts(host: str) -> tuple[str, ...]:
+    """`host`, plus the canonical loopback pair when it is a loopback (#377)."""
+    if bind_is_loopback(_norm_host(host)):
+        return (host, "127.0.0.1", "::1")
+    return (host,)
+
+
 def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
     """Would a bind to `want_host` collide with an existing listener on `laddr_ip`
     (same port assumed)? True if either side is a wildcard (all-interfaces), the two are
@@ -475,9 +482,12 @@ def reclaim_ports_from_stale_instance(
                 )
                 return False
     # Fast path — every port binds with startup's own semantics, so nothing of ours
-    # holds one: skip the process scan (about 0.7 s per enumeration on Windows).
-    free = {(host, port): port_available(host, port) for host, port, _w in specs}
-    if all(free.values()):
+    # holds one: skip the process scan (about 0.7 s per enumeration on Windows). A
+    # loopback port must also be free on its 127.0.0.1/::1 partner: an old backend
+    # there still holds the state lease even though the new bind succeeds.
+    if all(
+        port_available(h, port) for host, port, _w in specs for h in _probe_hosts(host)
+    ):
         return False
     # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
     # sockets without root (macOS), so a port that is neither ours nor bindable is
@@ -490,7 +500,7 @@ def reclaim_ports_from_stale_instance(
         if ours:
             for proc in ours:
                 to_kill[proc.pid] = proc
-        elif not free[(host, port)]:
+        elif not port_available(host, port):  # re-probed: it may be taken by now
             log.warning(
                 "not reclaiming the %s ports: %s (%s:%d) is unavailable "
                 "and has no identified TaskPaw listener "

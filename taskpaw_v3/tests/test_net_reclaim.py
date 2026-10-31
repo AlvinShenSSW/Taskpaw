@@ -435,6 +435,62 @@ def test_multiport_all_ports_free_skips_process_enumeration(monkeypatch):
     )
 
 
+def test_fast_path_still_reclaims_across_the_loopback_pair(monkeypatch):
+    # Codex gate: our stale backend listens on 127.0.0.1 while the new config uses
+    # ::1 — the ::1 bind succeeds, but the old process still holds the state lease,
+    # so the fast path must not skip the scan.
+    log: list = []
+    proc = _FakeProc(
+        330,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5681, 330, ip="127.0.0.1")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    killed = lambda: any(entry[0] == "terminate" for entry in log)  # noqa: E731
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: host != "127.0.0.1" or killed(),
+    )
+    assert net.reclaim_ports_from_stale_instance(
+        [("::1", 5681, "agent control API")], role="agent"
+    )
+    assert ("terminate", 330) in log
+
+
+def test_a_port_taken_during_the_scan_keeps_the_old_agent(monkeypatch):
+    # Codex gate: a foreign service binds a previously free port while processes
+    # are enumerated — re-probe after the scan and leave the old agent running.
+    log: list = []
+    proc = _FakeProc(
+        340,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5680, 340)],
+    )
+    fake = _CountingPsutil([proc])
+    monkeypatch.setattr(net, "psutil", fake)
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: port == 5681 and fake.iterations == 0,
+    )
+    assert (
+        net.reclaim_ports_from_stale_instance(
+            [
+                ("127.0.0.1", 5680, "agent network API"),
+                ("127.0.0.1", 5681, "agent control API"),
+            ],
+            role="agent",
+        )
+        is False
+    )
+    assert ("terminate", 340) not in log
+
+
 def test_multiport_enumerates_processes_once_for_all_ports(monkeypatch):
     # One stale backend of ours on all three ports: one enumeration, one terminate.
     log: list = []

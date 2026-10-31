@@ -178,7 +178,10 @@ class GracefulShutdown:
                 "Desktop shell closed stdin (error %d) → graceful shutdown",
                 ctypes.get_last_error(),
             )
-            threading.Thread(target=self.shutdown, name="taskpaw-stdin-eof").start()
+            # Explicitly non-daemon: a thread started here would inherit daemon.
+            threading.Thread(
+                target=self.shutdown, name="taskpaw-stdin-eof", daemon=False
+            ).start()
 
         threading.Thread(
             target=poll, name="taskpaw-stdin-lifeline", daemon=True

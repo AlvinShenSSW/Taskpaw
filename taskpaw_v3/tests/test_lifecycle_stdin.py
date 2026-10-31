@@ -84,7 +84,8 @@ def test_closed_pipe_runs_graceful_shutdown(monkeypatch, std_input_restored):
     r, w = os.pipe()
     gs = GracefulShutdown()
     ran: list[bool] = []
-    gs.register("probe", lambda: ran.append(True))
+    # Codex gate: the stopper must be non-daemon even though the poller is daemon.
+    gs.register("probe", lambda: ran.append(threading.current_thread().daemon))
     monkeypatch.setenv(ENV, "1")
     watcher = None
     try:
@@ -95,7 +96,7 @@ def test_closed_pipe_runs_graceful_shutdown(monkeypatch, std_input_restored):
         os.close(w)
         w = -1
         assert gs.stopped.wait(5)
-        assert ran == [True]
+        assert ran == [False]
     finally:
         if w != -1:
             os.close(w)
