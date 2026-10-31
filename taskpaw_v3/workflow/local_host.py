@@ -23,6 +23,7 @@ from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
+from .device_history import DeviceHistory
 from .exec_common import MISSING_LTX
 from .executors import StageExecutor
 from .finalize import Finalizer
@@ -299,6 +300,8 @@ class LocalWorkflowHost:
         self.sources: SourceWatch | None = None
         # P2-2: the workers' live state, while the worker API is on
         self.fleet: FleetLive | None = None
+        # EPIC #387 C1: each machine's online / 停领 / offline spans (controller)
+        self.device_history: DeviceHistory | None = None
         self.transfers: Transfers | None = None
         # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
         self.cancels: set[str] = set()
@@ -413,6 +416,15 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.scheduler.start()
+            if self.settings.role == "controller":
+                # after the dispatcher and FleetLive it reads; a refused or
+                # unusable analytics.db leaves it off with its reason
+                self.device_history = DeviceHistory(
+                    self.data_dir / "analytics.db", rt, self.dispatcher, self.fleet
+                )
+                if self._stopping.is_set():
+                    return
+                self.device_history.start()
             if self._stopping.is_set():
                 return
             self.state, self.reason = "running", rt.reason
@@ -455,6 +467,8 @@ class LocalWorkflowHost:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             confirmed &= not self._thread.is_alive()
+        if self.device_history is not None:  # a tick reads the store: joined first
+            confirmed &= self.device_history.stop()
         ticker = self._ticker
         if ticker is not None:
             ticker.join(timeout=max(0.0, deadline - time.monotonic()))

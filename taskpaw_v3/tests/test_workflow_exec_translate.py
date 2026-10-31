@@ -23,7 +23,7 @@ from taskpaw_v3.tests.workflow_exec_helpers import (
     video,
 )
 from taskpaw_v3.workflow.exec_translate import NO_MODEL
-from taskpaw_v3.workflow.executors import failed_kind
+from taskpaw_v3.workflow.executors import SUCCEEDED_KIND, failed_kind
 from taskpaw_v3.workflow.stage_results import check_file, load_stage_result
 
 MOVIE = "movie-破解.mp4"
@@ -121,6 +121,44 @@ def test_reused_chinese_and_no_speech_pass_through(rt, tools, subs, mode):
     assert only(rt, film, "translate") == before
     assert FakeTranslator.instances == []
     assert not list((rt.work_dir / job.attempt_id).glob("*.srt"))
+    (attempt,) = attempts(rt, film, "translate")
+    assert attempt.evidence[-1].summary.note == "无需翻译"
+    assert attempt.evidence[-1].summary.item_count is None  # EPIC #387 C1
+
+
+def test_success_records_the_translated_cue_count(rt):
+    """EPIC #387 C1: the success evidence counts the cues written to `.zh.srt`."""
+    film = ready_film(rt, ("movie.ja.srt", JA_SRT, "ja"))
+    assert translate_once(rt, film).status == "succeeded"
+    (attempt,) = attempts(rt, film, "translate")  # read back: still validates
+    (evidence,) = attempt.evidence
+    assert evidence.kind == SUCCEEDED_KIND
+    assert evidence.summary.note == "翻译完成：1 卷"
+    assert evidence.summary.item_count == 3
+
+
+def test_the_cue_count_sums_every_translated_volume(rt, tools):
+    files = [
+        File("cd1-破解.mp4", video(), volume=1),
+        File("cd2-破解.mp4", video(), volume=2),
+        File("cd3-破解.mp4", video(), volume=3),
+        File("cd1.ja.srt", JA_SRT.encode(), "source_subtitle", "ja", "cd1-破解.mp4"),
+        File("cd3.zh.srt", ZH_SRT.encode(), "source_subtitle", "zh", "cd3-破解.mp4"),
+    ]
+    film = add_film(rt, files)
+    d = dispatcher(rt)
+    assert d.run_once() is True and d.run_once() is True
+    assert translate_once(rt, film).status == "succeeded"
+    videos = load_stage_result(rt, film, "translate").videos
+    written = [
+        len(srt.load(check_file(rt.work_dir, v.subtitle.zh)))
+        for v in videos
+        if v.subtitle.decision in ("source_ja", "generated_ja")
+    ]
+    assert len(written) == 2 and written[0] == 3 and written[1] > 0
+    (attempt,) = attempts(rt, film, "translate")
+    assert attempt.evidence[-1].summary.note == "翻译完成：2 卷"
+    assert attempt.evidence[-1].summary.item_count == sum(written)
 
 
 def test_no_llm_key_needs_attention(rt):
