@@ -125,20 +125,21 @@ describe("uptimeLanes (设备在线, AC2)", () => {
     span("gpu-a", "online", T0 + 15 * H, NOW - 30_000, { open: true }),
   ];
 
-  it("splits a lane into recorded states and 无记录 gaps; an open span runs to now", () => {
+  it("splits a lane into recorded states and 无记录 gaps; an open span ends at its last recorded tick (C4-X3)", () => {
     const d = data({ coverage: { ...data().coverage, devices: iso(T0) }, devices: { available: true, reason: "", spans } });
     const A = analyse(d);
     const lane = uptimeLanes(d, A).find((l) => l.m.id === "gpu-a")!;
     expect(lane.from).toBe(A.R.start);
     expect(lane.to).toBe(NOW);
-    expect(lane.segs.map((s) => s.state)).toEqual(["none", "online", "none", "paused", "offline", "online"]);
+    expect(lane.segs.map((s) => s.state)).toEqual(["none", "online", "none", "paused", "offline", "online", "none"]);
     expect(lane.segs[0]).toMatchObject({ s: A.R.start, e: T0 });
     expect(lane.segs[3].reason).toBe("worker");
-    expect(lane.segs[5]).toMatchObject({ e: NOW, open: true });
+    expect(lane.segs[5]).toMatchObject({ e: NOW - 30_000, open: true });
+    expect(lane.segs[6]).toMatchObject({ s: NOW - 30_000, e: NOW }); // after the last tick: unrecorded, never online
     expect(lane.offline).toBe(H);
     expect(lane.paused).toBe(2 * H);
-    expect(lane.none).toBe(T0 - A.R.start + 2 * H);
-    const recorded = NOW - T0 - 2 * H;
+    expect(lane.none).toBe(T0 - A.R.start + 2 * H + 30_000);
+    const recorded = NOW - 30_000 - T0 - 2 * H;
     expect(lane.online).toBe(recorded - 3 * H);
     // 在线率 = (online + 停领) ÷ recorded time; unrecorded time is listed apart, never counted as offline
     expect(lane.rate).toBeCloseTo(((recorded - H) / recorded) * 100);

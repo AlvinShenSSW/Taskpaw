@@ -673,12 +673,13 @@ export interface UptimeLane {
   isNew: boolean;
   from: number; // the range start, or first_seen for a 新加入 machine (D14)
   to: number; // now, or the range end
-  segs: LaneSegment[]; // contiguous from `from` to `to`; gaps are 无记录
+  segs: LaneSegment[]; // contiguous from `from` to `to`; gaps (and time after the last recorded tick) are 无记录
   online: number; paused: number; offline: number; none: number; // ms
   rate: number | null; // 在线率 %: (online + 停领) ÷ recorded time; null without any record
 }
 const overlaps = (s: number, e: number, a: number, b: number) => s < b && e > a;
-const spanEnd = (sp: AnalyticsSpan, now: number) => (sp.open ? now : Date.parse(sp.end)); // an open span runs to now (machineDays)
+// an open span ends at its last recorded tick: time after it is unrecorded (§6.2, as machineDays / C4-X3)
+const spanEnd = (sp: AnalyticsSpan) => Date.parse(sp.end);
 
 /** The machines of the 设备在线 panel: the GPU fleet in scope (retired ones only with a span in range), then 本机. */
 function laneMachines(data: WorkflowAnalytics, A: Analysis): AnalyticsMachine[] {
@@ -686,7 +687,7 @@ function laneMachines(data: WorkflowAnalytics, A: Analysis): AnalyticsMachine[] 
   if (A.machine !== ALL_MACHINES) return A.fleet;
   const byName = (a: AnalyticsMachine, b: AnalyticsMachine) => a.name.localeCompare(b.name);
   const seen = (m: AnalyticsMachine) => data.devices.spans.some((sp) => sp.machine === m.id
-    && overlaps(Date.parse(sp.start), spanEnd(sp, A.now), A.R.start, A.visEnd));
+    && overlaps(Date.parse(sp.start), spanEnd(sp), A.R.start, A.visEnd));
   const retired = data.machines.filter((m) => m.kind === "gpu" && m.retired && seen(m)).sort(byName);
   return [...[...A.fleet].sort(byName), ...retired, ...(A.controller ? [A.controller] : [])];
 }
@@ -707,10 +708,10 @@ export function uptimeLanes(data: WorkflowAnalytics, A: Analysis): UptimeLane[] 
       const spans = data.devices.spans.filter((sp) => sp.machine === m.id).sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
       let at = from;
       for (const sp of spans) {
-        const a = Math.max(at, Date.parse(sp.start)), b = Math.min(to, spanEnd(sp, A.now));
+        const a = Math.max(at, Date.parse(sp.start)), b = Math.min(to, spanEnd(sp));
         if (b <= a) continue;
         push(at, a, "none");
-        push(a, b, sp.state, sp.reason, sp.open && b === to);
+        push(a, b, sp.state, sp.reason, sp.open);
         at = b;
       }
       push(at, to, "none");
@@ -827,7 +828,7 @@ export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures
   const end = Math.min(A.R.end, A.now);
   let offline = 0;
   data.devices.spans.forEach((sp, i) => {
-    const s = Date.parse(sp.start), e = spanEnd(sp, A.now);
+    const s = Date.parse(sp.start), e = spanEnd(sp);
     if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
     offline += 1;
     count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
