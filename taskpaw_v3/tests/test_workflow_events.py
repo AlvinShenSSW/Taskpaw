@@ -20,6 +20,7 @@ from taskpaw_v3.workflow import board, planning
 from taskpaw_v3.workflow.executors import ExecOutcome
 from taskpaw_v3.workflow.local_dispatch import LocalDispatcher
 from taskpaw_v3.workflow.local_host import LocalWorkflowHost
+from taskpaw_v3.workflow.remote_attempts import MACHINE_FAULT_MARK
 from taskpaw_v3.workflow.timing import WorkflowLog, film_timing, summary_text
 
 
@@ -208,6 +209,30 @@ def test_a_machine_fault_notice_leaves_the_failure_key_unspent(observer, monkeyp
         "Film B 停领",
         "Film failure",
     ]
+
+
+def test_the_observer_skips_a_machine_fault_before_its_retry(observer, monkeypatch):
+    """Codex 4.0.2 r2 P2: polled between the resolve and the free retry, the
+    stage is still failed; the film's failure key stays for a real failure."""
+    sink, queue = observer
+    failed = film(stages=board_film({}, statuses={"restore": "failed"}).stages)
+    note = f"B {MACHINE_FAULT_MARK}：WinError 4551"
+    held = failed.model_copy(
+        update={
+            "stages": tuple(
+                s.model_copy(update={"note": note}) if s.stage == "restore" else s
+                for s in failed.stages
+            )
+        }
+    )
+    host, _ = host_for(monkeypatch, [held])
+    sink.observe(host)
+    assert not [r for r in queue.recent() if r["level"] == "warn"]
+    job = SimpleNamespace(film_id=held.film_id, input_revision=1, stage="restore")
+    sink.resolved(
+        host.runtime, job, "Film", ExecOutcome.failed("needs_attention", "failure")
+    )
+    assert [r["message"] for r in queue.recent()] == ["Film failure"]
 
 
 def test_translated_uses_existing_summary_and_keeps_tasklog(observer, monkeypatch):

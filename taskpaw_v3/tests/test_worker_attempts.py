@@ -370,8 +370,9 @@ def test_a_film_failure_still_waits_for_the_operator(api, rt, world):
     assert worker.admission_state == "enabled"
 
 
+@pytest.mark.parametrize("reported", [None, "transient"])
 def test_a_machine_fault_whose_hold_fails_waits_for_the_operator(
-    api, rt, world, monkeypatch
+    api, rt, world, monkeypatch, reported
 ):
     """No free retry unless the worker is off the queue: never a fast loop."""
     from taskpaw_v3.workflow import models as m
@@ -383,10 +384,14 @@ def test_a_machine_fault_whose_hold_fails_waits_for_the_operator(
     monkeypatch.setattr(remote_attempts, "set_admission", refuse)
     joined, _, film_id, _ = world
     a = _claimed(api, rt, world)
-    body = {"outcome": "failed", "message": f"执行器异常：{BLOCKED}"}
+    body = {
+        "outcome": "failed",
+        "error_class": reported,
+        "message": f"执行器异常：{BLOCKED}",
+    }
     assert finish(api, joined, a, body).status_code == 200
     record = job(rt, film_id, "restore")
-    assert record.status == "failed"
+    assert record.status == "failed"  # a `transient` report is no retry either
     (attempt,) = rt.store.list_attempts(rt.operator, record.job_id)
     assert attempt.evidence[0].kind == "exec_failed:needs_attention"
 

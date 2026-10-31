@@ -44,8 +44,11 @@ Resolved = Callable[[m.PendingComputeJob, ExecOutcome], None]
 # Windows application control (Smart App Control, App Control for Business)
 # refusing the tools: that machine fails every film the same way.
 _MACHINE_FAULT = re.compile(r"\[WinError 4551\]")
+# The note's mark: the observer reads it on a stage still failed for the
+# moment before its free retry, and leaves the film's failure key unspent.
+MACHINE_FAULT_MARK = "环境异常，已停领，本片改派其他机器"
 MACHINE_FAULT_NOTE = (
-    "{name} 环境异常，已停领，本片改派其他机器：Windows 应用程序控制阻止了文件"
+    "{name} " + MACHINE_FAULT_MARK + "：Windows 应用程序控制阻止了文件"
     "（WinError 4551），可关闭该机的「智能应用控制」后在「设备」页点「恢复」。"
     "原始错误：{message}"
 )
@@ -286,9 +289,10 @@ def _failed(rt: LocalRuntime, worker_id: str, body: FinishBody) -> ExecOutcome:
     message = body.message or "失败"
     if body.error_class != "cancelled" and _MACHINE_FAULT.search(message):
         name = _hold(rt, worker_id)
-        if name is not None:
-            note = MACHINE_FAULT_NOTE.format(name=name, message=message)
-            return ExecOutcome.failed("machine", note[:2048])
+        if name is None:  # even a `transient` report: no retry onto that machine
+            return ExecOutcome.failed("needs_attention", message)
+        note = MACHINE_FAULT_NOTE.format(name=name, message=message)
+        return ExecOutcome.failed("machine", note[:2048])
     return ExecOutcome.failed(body.error_class or "needs_attention", message)
 
 
