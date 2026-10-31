@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,11 @@ from .intake_protocol import ProbeArtifact
 from .intake_runner import SnapshotRunner
 from .intake_watch import DirectoryWatcher, DirtyBatch
 from .store import WorkflowStore
+
+log = logging.getLogger("taskpaw.workflow.intake")
+# Intake-adapter command history is pruned hourly once older than an hour (#376).
+PRUNE_INTERVAL_SECONDS = 3600
+PRUNE_RETENTION = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,7 @@ class IntakeService:
         self._reason = "observed"
         self._scanning = False
         self._last_scan = -math.inf
+        self._last_prune = -math.inf
         self._started = False
 
     @property
@@ -314,6 +321,8 @@ class IntakeService:
         scan = None
         complete = False
         reason: im.Reason = "partial_observation"
+        # Visited this scan but left unwritten: unchanged, so not marked seen.
+        unchanged: set[str] = set()
         try:
             current = self.store.get_intake_configuration(self.auth, self.root_id)
             if current != self.config:
@@ -339,6 +348,12 @@ class IntakeService:
                     self._mark_seen(previous, scan)
                     continue
                 observation = self._observe(candidate.relative_path, previous)
+                if previous and self.store.intake_observation_unchanged(
+                    self.auth, observation
+                ):
+                    unchanged.add(previous.package_id)
+                    self._remember(observation, previous)
+                    continue
                 recorded = self.store.observe_intake(
                     self.auth, self.meta(), observation
                 )
@@ -363,7 +378,11 @@ class IntakeService:
                 cursor = None
                 while True:
                     page = self.store.list_intake_unseen(
-                        self.auth, self.root_id, scan.scan_id, after_package_id=cursor
+                        self.auth,
+                        self.root_id,
+                        scan.scan_id,
+                        after_package_id=cursor,
+                        seen=frozenset(unchanged),
                     )
                     for item in page.items:
                         if item.state != "missing":
@@ -453,6 +472,20 @@ class IntakeService:
             with self._state_lock:
                 self._stable.pop(candidates[0], None)
 
+    def _prune(self) -> None:
+        """Delete old intake-adapter history in batches; a stop ends it early."""
+        if self.monotonic() - self._last_prune < PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_prune = self.monotonic()
+        before = self.clock() - PRUNE_RETENTION
+        try:
+            while not self._stop.is_set() and self.store.prune_intake_history(
+                self.auth, before=before
+            ):
+                pass
+        except (OSError, ValueError, RuntimeError):
+            log.warning("intake history prune failed", exc_info=True)
+
     def _snapshot(self) -> None:
         try:
             self.run_ready_once()
@@ -492,6 +525,8 @@ class IntakeService:
                         daemon=False,
                     )
                     self._worker.start()
+                # After the ready check: the scan and admission stay adjacent.
+                self._prune()
             except (OSError, ValueError, RuntimeError):
                 self._reason = "recovery_required"
                 self._stop.set()

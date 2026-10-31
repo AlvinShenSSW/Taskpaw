@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import traceback
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
@@ -260,6 +261,84 @@ def test_partial_root_scan_never_marks_unobserved_package_missing(service, monke
     assert not obj.scan_once()
     assert h.store.get_intake(adapter, first.package_id).state != "missing"
     assert h.store.get_intake_root_scan(adapter, config.root_id).required
+
+
+def test_unchanged_package_rescan_writes_no_command_rows_but_is_seen(service, package):
+    h, adapter, _, obj, mono = service
+
+    def scan():
+        h.clock.value += timedelta(seconds=30)
+        mono[0] += 30
+        assert obj.scan_once()
+        return Counter(
+            row[0] for row in h.store._conn.execute("SELECT command_kind FROM audit")
+        )
+
+    assert obj.scan_once()
+    (view,) = h.store.list_intakes(adapter, im.IntakeListQuery()).items
+    h.store._conn.execute(
+        "UPDATE intake_packages SET state='operational_ready',reason='eligible',"
+        "dirty=0 WHERE package_id=?",
+        (view.package_id,),
+    )
+    before = scan()  # at most one fixpoint write
+    after = scan()
+    assert after - before == Counter(
+        begin_intake_root_scan=1, finish_intake_root_scan=1
+    )
+    assert h.store._conn.execute("SELECT count(*) FROM request_results").fetchone()[
+        0
+    ] == sum(after.values())
+    assert h.store.get_intake(adapter, view.package_id).state == "operational_ready"
+    package[1].rename(package[0].parent / "outside-input")
+    scan()
+    assert h.store.get_intake(adapter, view.package_id).state == "missing"
+
+
+def test_prune_runs_hourly_until_empty_and_never_stops_intake(
+    service, monkeypatch, caplog
+):
+    h, _, _, obj, mono = service
+    calls = []
+    results = iter((1000, 3, 0, 0))
+
+    def fake(auth, *, before):
+        calls.append(before)
+        return next(results)
+
+    monkeypatch.setattr(h.store, "prune_intake_history", fake)
+    obj._prune()
+    assert calls == [h.clock.now() - timedelta(hours=1)] * 3
+    mono[0] += 3599
+    obj._prune()
+    assert len(calls) == 3
+    mono[0] += 1
+    obj._prune()
+    assert len(calls) == 4
+    for error in (WorkflowError("authority_unavailable"), OSError("synthetic")):
+
+        def failing(auth, *, before, error=error):
+            raise error
+
+        monkeypatch.setattr(h.store, "prune_intake_history", failing)
+        mono[0] += 3600
+        obj._prune()
+        assert not obj._stop.is_set()
+    assert caplog.text.count("intake history prune failed") == 2
+
+
+def test_stop_ends_the_prune_after_the_batch_in_flight(service, monkeypatch):
+    h, _, _, obj, _ = service
+    calls = []
+
+    def fake(auth, *, before):
+        calls.append(before)
+        obj._stop.set()
+        return 1000
+
+    monkeypatch.setattr(h.store, "prune_intake_history", fake)
+    obj._prune()
+    assert len(calls) == 1
 
 
 def test_actual_notification_thread_and_service_are_joined_before_stop_returns(

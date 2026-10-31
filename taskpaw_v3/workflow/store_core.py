@@ -116,6 +116,8 @@ class WorkflowCore:
             lease.acquire()
             conn = schema.connect_new(path) if create else schema.connect_existing(path)
             schema.configure_connection(conn)
+            if not create:
+                schema.reclaim_free_pages(conn)
             return cls(path, lease, conn, clock or SystemClock())
         except BaseException as exc:
             if conn is not None:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
 
+from taskpaw_v3.workflow import schema
 from taskpaw_v3.workflow.auth import authenticate, digest_secret
 from taskpaw_v3.workflow.models import (
     AuthorityBootstrap,
@@ -153,3 +156,68 @@ def test_failed_mutation_has_no_partial_credential_revocation(harness):
             ),
         )
     authenticate(h.store, grant.credential_id, secret)
+
+
+def free_pages(h, rows=3000):
+    """Leave a closed store whose file is mostly free pages (#376 reclaim)."""
+    conn = h.store._conn
+    conn.execute("BEGIN IMMEDIATE")
+    conn.executemany(
+        "INSERT INTO audit(event_id,authority_id,epoch,command_kind,created_at,"
+        "body_json) VALUES(?,?,1,'filler','t',?)",
+        (
+            (identity(), h.bootstrap.authority_id, json.dumps({"p": "x" * 4000}))
+            for _ in range(rows)
+        ),
+    )
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DELETE FROM audit WHERE command_kind='filler'")
+    conn.commit()
+    h.store.close()
+    return h.path.stat().st_size
+
+
+def test_open_vacuums_a_mostly_free_database_once(harness, monkeypatch):
+    h = harness
+    size = free_pages(h)
+    monkeypatch.setattr(schema, "RECLAIM_MIN_FREE_BYTES", 1 << 20)
+    h.store = WorkflowStore.open(h.path, clock=h.clock)
+    assert h.store._conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    authenticate(h.store, h.bootstrap.operator_credential_id, h.secret)
+    h.store.close()
+    assert h.path.stat().st_size < size // 4
+    assert not h.path.with_name(h.path.name + "-wal").exists()
+    h.store = WorkflowStore.open(h.path, clock=h.clock)
+    authenticate(h.store, h.bootstrap.operator_credential_id, h.secret)
+
+
+def test_open_leaves_a_database_below_the_reclaim_threshold(harness):
+    h = harness
+    size = free_pages(h)
+    h.store = WorkflowStore.open(h.path, clock=h.clock)
+    assert h.store._conn.execute("PRAGMA freelist_count").fetchone()[0] > 0
+    h.store.close()
+    assert h.path.stat().st_size == size
+
+
+def test_failed_vacuum_is_logged_and_leaves_the_file_open(harness, monkeypatch, caplog):
+    h = harness
+    free_pages(h)
+    monkeypatch.setattr(schema, "RECLAIM_MIN_FREE_BYTES", 1 << 20)
+    conn = sqlite3.connect(h.path, isolation_level=None)
+
+    class RefusingVacuum:
+        def execute(self, sql, *args):
+            if sql == "VACUUM":
+                raise sqlite3.OperationalError("synthetic disk full")
+            return conn.execute(sql, *args)
+
+    try:
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        schema.reclaim_free_pages(RefusingVacuum())
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] == free > 0
+    finally:
+        conn.close()
+    assert "free-page reclaim failed" in caplog.text
+    h.store = WorkflowStore.open(h.path, clock=h.clock)

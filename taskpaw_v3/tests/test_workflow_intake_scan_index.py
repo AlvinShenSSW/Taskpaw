@@ -92,3 +92,20 @@ def test_scan_index_is_scoped_and_cannot_mark_a_replaced_observation_seen(intake
     )
     with pytest.raises(WorkflowError, match="cas_conflict"):
         h.store.mark_intake_scan_seen(adapter, h.meta(), seen)
+
+
+def test_unseen_page_excludes_packages_the_scan_visited_without_marking(intake):
+    h, _, adapter, root = intake
+    h.store.configure_intake_root(h.operator, h.meta(), root)
+    observed = f.observation(h, root)
+    h.store.observe_intake(adapter, h.meta(), observed)
+    scan = begin(h, root)
+    started = h.store.begin_intake_root_scan(adapter, h.meta(), scan)
+    visited = frozenset({observed.package_id})
+    assert not h.store.list_intake_unseen(
+        adapter, root.root_id, scan.scan_id, seen=visited
+    ).items
+    assert len(h.store.list_intake_unseen(adapter, root.root_id, scan.scan_id).items)
+    h.store.begin_intake_root_scan(adapter, h.meta(), begin(h, root, started.version))
+    with pytest.raises(WorkflowError, match="binding_changed"):
+        h.store.list_intake_unseen(adapter, root.root_id, scan.scan_id, seen=visited)
