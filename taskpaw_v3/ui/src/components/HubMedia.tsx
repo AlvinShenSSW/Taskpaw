@@ -13,7 +13,7 @@ import type {
 // row the dispatch, counts and every GPU node (also those the Hub does not poll).
 
 type T = (key: string, options?: Record<string, unknown>) => string;
-const DATA = { fontFamily: '"Fira Code","Noto Sans SC",ui-monospace,monospace',
+const DATA = { fontFamily: '"Fira Code","Noto Sans SC","Microsoft YaHei","PingFang SC",ui-monospace,monospace',
   fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" } as const;
 const NODE_DOT: Record<string, string> = { online: "ok", lost: "error", waiting: "starting" };
 const gb = (mib: number) => (mib / 1024).toFixed(1);

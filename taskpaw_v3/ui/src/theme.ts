@@ -14,10 +14,10 @@ export const statusColors: Record<string, string> = {
   stopped: "#475569",
 };
 
-// CJK-aware font stacks (#89): Fira first (Latin/numerals), Noto Sans SC + system
-// CJK as fallback so Chinese renders in-brand. Numerals stay Fira (tabular).
+// CJK-aware font stacks: Fira first (Latin/numerals, self-hosted #379), then the system
+// CJK font (Microsoft YaHei on Windows); Noto Sans SC only if installed. Numerals stay Fira.
 const SANS = '"Fira Sans","Noto Sans SC",system-ui,"PingFang SC","Microsoft YaHei",sans-serif';
-const MONO = '"Fira Code","Noto Sans SC",ui-monospace,monospace';
+const MONO = '"Fira Code","Noto Sans SC","Microsoft YaHei","PingFang SC",ui-monospace,monospace';
 
 export const theme = createTheme({
   palette: {

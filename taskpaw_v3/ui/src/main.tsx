@@ -1,15 +1,13 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ThemeProvider, CssBaseline } from "@mui/material";
-import { ControlCredentialError } from "./api";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { createQueryClient } from "./queryClient";
 import { theme } from "./theme";
 import { App } from "./App";
 import "./i18n"; // initialize i18next before the app renders (#78)
 
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { refetchInterval: 5000, retry: (count, error) => !(error instanceof ControlCredentialError) && count < 1 } },
-});
+const queryClient = createQueryClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

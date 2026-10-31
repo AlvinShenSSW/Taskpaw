@@ -1,10 +1,15 @@
-import { Fragment, useEffect, useId, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Stack, TextField, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import { api, type LogEntry, type LogDays, type LogParams } from "../api";
 import { compareLogIds, formatLogDay, localLogDay, logDetails, logSafeText, logText, logTime, mergeLogEntries, renderLogSentence } from "./TaskLog.helpers";
 
-function LogRow({ entry, compact }: { entry: LogEntry; compact: boolean }) {
+// Today's list keeps the newest rows; older ones return through "Load earlier" (#379).
+const LOG_WINDOW = 200;
+const NO_ENTRIES: LogEntry[] = [];
+
+// Memoized: merges keep each entry's object identity, so a poll renders only new rows.
+const LogRow = memo(function LogRow({ entry, compact }: { entry: LogEntry; compact: boolean }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const mirrored = entry.kind === "event.mirrored";
@@ -31,11 +36,11 @@ function LogRow({ entry, compact }: { entry: LogEntry; compact: boolean }) {
       </Box>}
     </Box>
   );
-}
+});
 
-export function TaskLogRows({ entries = [], compact = false }: { entries?: LogEntry[]; compact?: boolean }) {
+export const TaskLogRows = memo(function TaskLogRows({ entries = NO_ENTRIES, compact = false }: { entries?: LogEntry[]; compact?: boolean }) {
   const { t } = useTranslation();
-  const rows = mergeLogEntries(entries);
+  const rows = useMemo(() => mergeLogEntries(entries), [entries]);
   if (!rows.length) return <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>{t("logs.empty")}</Typography>;
   return <Box component="ul" sx={{ p: 0, m: 0 }}>
     {rows.map((entry, index) => <Fragment key={entry.id}>
@@ -44,13 +49,16 @@ export function TaskLogRows({ entries = [], compact = false }: { entries?: LogEn
       <LogRow entry={entry} compact={compact} />
     </Fragment>)}
   </Box>;
-}
+});
 
 type Session = {
   day: string;
   boot: string | null;
   cursor: string;
   before: string | null;
+  rows: LogEntry[];
+  limit: number;
+  daysKey: string | null;
   busy: boolean;
   active: boolean;
   load: (older?: boolean) => Promise<void>;
@@ -89,7 +97,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   useEffect(() => {
     const live = selection === "today";
     const day = live ? localLogDay() : selection;
-    const current: Session = { day, boot: null, cursor: `${day}-0`, before: null, busy: false, active: true, load: async () => {} };
+    const current: Session = { day, boot: null, cursor: `${day}-0`, before: null, rows: [], limit: LOG_WINDOW, daysKey: null, busy: false, active: true, load: async () => {} };
     session.current = current;
     const filters = { task, severity, q };
     const restart = () => { if (current.active) setRevision(n => n + 1); };
@@ -97,7 +105,8 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
       const result = await api.logDays();
       if (!current.active) return;
       if (current.boot && current.boot !== result.boot) { restart(); return; }
-      setDays(result.days);
+      const key = result.days.map(d => `${d.day}:${d.count}`).join(",");
+      if (key !== current.daysKey) { current.daysKey = key; setDays(result.days); }
     }
     current.load = async (older = false) => {
       if (!current.active || current.busy) return;
@@ -112,12 +121,16 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
         setBefore(result.next_before);
         const rows = mergeLogEntries(result.entries);
         if (!older) current.cursor = rows[0]?.id ?? `${day}-0`;
-        setEntries(previous => older ? mergeLogEntries(previous, rows) : rows);
+        // Rows the operator explicitly loaded are never trimmed again in this session.
+        current.limit = older ? Infinity : LOG_WINDOW;
+        current.rows = older ? mergeLogEntries(current.rows, rows) : rows;
+        setEntries(current.rows);
         await readDays();
       } catch { if (current.active) setError(true); }
       finally { current.busy = false; if (current.active) { setBusy(false); setLoading(false); } }
     };
     async function poll() {
+      if (document.hidden) return;
       const nowDay = localLogDay();
       if (current.active) setToday(nowDay);
       if (!current.active || current.busy) return;
@@ -136,7 +149,22 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
           // Today's live timeline carries forward over midnight with date
           // headers; an explicitly selected historical day stays day-scoped.
           const visible = result.entries.filter(e => e.id.slice(0, 8) >= day);
-          setEntries(previous => mergeLogEntries(previous, visible));
+          let rows = mergeLogEntries(current.rows, visible);
+          if (rows.length > current.limit) {
+            const kept = rows.slice(0, current.limit);
+            const oldest = kept[kept.length - 1].id;
+            // The server pages "before" within `day` only, so a cursor on a later day
+            // would hide those rows from "Load earlier": start the new Today instead.
+            // A client clock behind the log ids trims normally (no restart loop); the
+            // trimmed next-day rows return once the session restarts (tab re-entry or
+            // the next real midnight).
+            if (oldest.slice(0, 8) > day && localLogDay() > day) { restart(); return; }
+            rows = kept;
+            current.before = oldest;
+            setBefore(oldest);
+          }
+          current.rows = rows;
+          setEntries(rows);
           if (result.entries.length < 500) break;
         }
         await readDays();

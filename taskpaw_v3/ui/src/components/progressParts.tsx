@@ -9,7 +9,7 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ScheduleIcon from "@mui/icons-material/Schedule";
 import { useTranslation } from "react-i18next";
 
-export const MONO = '"Fira Code","Noto Sans SC",ui-monospace,monospace';
+export const MONO = '"Fira Code","Noto Sans SC","Microsoft YaHei","PingFang SC",ui-monospace,monospace';
 export const DATA = { fontFamily: MONO, fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" } as const;
 
 export function ProgressFrame({ testId, label, title, position, children }: {
