@@ -326,6 +326,71 @@ def test_a_cancelled_finish_is_a_free_retry_and_closes_the_route(api, rt, world)
     assert rt.store.film_route(rt.operator, film_id, 1) is None  # routed afresh
 
 
+BLOCKED = "[WinError 4551] 应用程序控制策略已阻止此文件。"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"执行器异常：{BLOCKED}",
+        "Jasna LTX 失败（退出码 1），不会自动重跑：OSError: "
+        + BLOCKED
+        + ' Error loading "D:\\Jasna\\torch\\lib\\zlibwapi.dll" or one of its dependencies.',
+    ],
+)
+def test_a_machine_fault_holds_the_worker_and_requeues_the_film(
+    api, rt, world, message
+):
+    """4.0.2: a worker whose Windows blocks the tools fails every film; it is
+    put on 停领 and the film is a free retry for another machine."""
+    joined, _, film_id, _ = world
+    a = _claimed(api, rt, world)
+    body = {"outcome": "failed", "error_class": "needs_attention", "message": message}
+    done = finish(api, joined, a, body)
+    assert done.status_code == 200 and done.json()["outcome"] == "failed"
+    worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
+    assert worker.admission_state == "draining"
+    record = job(rt, film_id, "restore")
+    assert record.status == "pending"  # retried at once, uncounted
+    assert rt.store.film_route(rt.operator, film_id, 1) is None  # routed afresh
+    (attempt,) = rt.store.list_attempts(rt.operator, record.job_id)
+    assert attempt.evidence[0].kind == "exec_failed:machine"
+    note = attempt.evidence[0].summary.note
+    assert note.startswith(f"{worker.name} 环境异常，已停领") and note.endswith(message)
+    assert should_retry([attempt, attempt, attempt, attempt])  # never exhausted
+
+
+def test_a_film_failure_still_waits_for_the_operator(api, rt, world):
+    joined, _, film_id, _ = world
+    a = _claimed(api, rt, world)
+    body = {"outcome": "failed", "message": "Jasna LTX 失败（退出码 1）：bad frame"}
+    assert finish(api, joined, a, body).status_code == 200
+    assert job(rt, film_id, "restore").status == "failed"
+    worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
+    assert worker.admission_state == "enabled"
+
+
+def test_a_machine_fault_whose_hold_fails_waits_for_the_operator(
+    api, rt, world, monkeypatch
+):
+    """No free retry unless the worker is off the queue: never a fast loop."""
+    from taskpaw_v3.workflow import models as m
+    from taskpaw_v3.workflow import remote_attempts
+
+    def refuse(*_args, **_kw):
+        raise m.WorkflowError("precondition_failed")
+
+    monkeypatch.setattr(remote_attempts, "set_admission", refuse)
+    joined, _, film_id, _ = world
+    a = _claimed(api, rt, world)
+    body = {"outcome": "failed", "message": f"执行器异常：{BLOCKED}"}
+    assert finish(api, joined, a, body).status_code == 200
+    record = job(rt, film_id, "restore")
+    assert record.status == "failed"
+    (attempt,) = rt.store.list_attempts(rt.operator, record.job_id)
+    assert attempt.evidence[0].kind == "exec_failed:needs_attention"
+
+
 def test_a_stale_or_foreign_finish_is_409(api, rt, clock, world):
     joined, _, film_id, _ = world
     a = _claimed(api, rt, world)
