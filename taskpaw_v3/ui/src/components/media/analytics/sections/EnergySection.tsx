@@ -1,6 +1,6 @@
 // 用电 「估算」 (EPIC 2026-10-31 §8.4 item 6; C5 #392 AC1): estimated kWh per bucket (+ the previous period),
-// 每片平均 / 最多 / 最少, per resolution, per machine — restore energy attributed to the machine that ran each
-// attempt (restore_wh, failed attempts on films finished elsewhere included) plus 本机's post-processing
+// 每片平均 / 最多 / 最少, per resolution, per machine — the films' restore energy attributed to the machine that
+// ran each attempt (restore_wh, failed attempts included; the groups sum to the total) plus 本机's post-processing
 // (controller_wh) — and the top 5 films. C3's honesty rule: a film without a reading is missing, never 0 kWh;
 // an incomplete total says 「部分」, and no previous-period comparison unless both periods are fully measured.
 import type { AnalyticsFilm, WorkflowAnalytics } from "../../../../api";
@@ -26,7 +26,7 @@ export function EnergySection({ data, A, res, compare }: { data: WorkflowAnalyti
   const kwhOf = (f: AnalyticsFilm) => filmKwh(f, A.ctrl);
   const incomplete = r.missing + r.partial;
   const prev = compare && A.prevOk ? e.prev : null;
-  const vals = e.buckets.map((b) => b.kwh);
+  const vals = e.buckets.map((b) => b.kwh ?? 0); // a bucket with no reading draws no bar (its tooltip says why)
   const filmLine = (f: AnalyticsFilm) => [f.code, f.worker ? machineName(data, f.worker) : null, resText(f), f.restore_s != null ? `修复 ${fH(f.restore_s / 3600)}` : null]
     .filter(Boolean).join(" · ");
   const tip = (i: number): TipContent => {
@@ -34,7 +34,7 @@ export function EnergySection({ data, A, res, compare }: { data: WorkflowAnalyti
     return {
       title: bucketTitle(R, i, A.now),
       rows: [
-        { color: "var(--c1)", value: `${fKwh(b.kwh)} kWh`, label: "用电（估算）" },
+        { color: "var(--c1)", value: b.kwh === null ? "无用电记录" : `${fKwh(b.kwh)} kWh`, label: "用电（估算）" },
         { value: `${b.films} 部`, label: "影片" },
         ...(prev ? [{ color: "var(--c-prev)", value: `${fKwh(prev[i])} kWh`, label: "上一周期同位置" }] : []),
       ],
@@ -88,7 +88,7 @@ export function EnergySection({ data, A, res, compare }: { data: WorkflowAnalyti
         <div>
           <Block title="按分辨率"><HBarChart rows={resRows} labelWidth={120} valueWidth={78} label="按分辨率的每片平均用电" /></Block>
           <div style={{ height: 14 }} />
-          <Block title="按机器" desc={A.ctrl ? "本机的后处理（ASR、翻译、回传、刮削）" : "GPU 修复用电记在运行它的机器上（含在其他影片上失败的尝试），加上本机的后处理"}>
+          <Block title="按机器" desc={A.ctrl ? "本机的后处理（ASR、翻译、回传、刮削）" : "这些影片的修复用电记在运行每次尝试的机器上（含失败的尝试），加上本机的后处理，合计等于总用电"}>
             <HBarChart rows={mRows} labelWidth={120} valueWidth={84} label="按机器的估算用电" />
           </Block>
         </div>
@@ -102,7 +102,7 @@ export function EnergySection({ data, A, res, compare }: { data: WorkflowAnalyti
       <DataTable caption="用电"
         cols={[{ label: "时段" }, { label: "用电 kWh", num: true }, { label: "影片", num: true }, { label: "无用电记录", num: true },
           ...(prev ? [{ label: "上一周期 kWh", num: true }] : [])]}
-        rows={e.buckets.map((b, i) => [bucketTitle(R, i, A.now), `${fKwh(b.kwh)}${b.partial ? PARTIAL : ""}`, b.films, b.missing, ...(prev ? [fKwh(prev[i])] : [])])} />
+        rows={e.buckets.map((b, i) => [bucketTitle(R, i, A.now), b.kwh === null ? "—" : `${fKwh(b.kwh)}${b.partial ? PARTIAL : ""}`, b.films, b.missing, ...(prev ? [fKwh(prev[i])] : [])])} />
       {note}
       <div className="divider" />
       <DataTable caption="用电分组" cols={[{ label: "分组" }, { label: "kWh", num: true }]}

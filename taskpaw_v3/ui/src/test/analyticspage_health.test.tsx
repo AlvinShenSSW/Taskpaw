@@ -95,6 +95,18 @@ describe("用电 (AC1)", () => {
     expect(tipOf(cols[i])).toMatch(/1 部无用电记录/);
   });
 
+  it("a bucket whose films all lack a reading shows 「—」 / 「无用电记录」, not 0 kWh (C5-X3)", async () => {
+    const strip = new Set(["ZZA-150", "ZZB-151"]); // every film archived on local 10-26
+    await mount({ ...FIXTURE, films: FIXTURE.films.map((f) => (strip.has(f.code) ? { ...f, restore_wh: [], controller_wh: null } : f)) });
+    const cols = roveItems(within(energy()).getByRole("img", { name: "每个时段的估算用电" }));
+    const tip = tipOf(cols.find((g) => tipOf(g).includes("10-26"))!);
+    expect(tip).toContain("无用电记录");
+    expect(tip).not.toContain("0.00 kWh");
+    view(energy(), "表格");
+    const row = within(within(energy()).getByRole("table", { name: "用电" })).getByRole("row", { name: /^10-26/ });
+    expect(row.querySelectorAll("td")[1].textContent).toBe("—");
+  });
+
   it("对比上一周期: no previous line while either period's readings are incomplete", async () => {
     await mount();
     fireEvent.click(screen.getByRole("switch", { name: "对比上一周期" }));
@@ -212,7 +224,7 @@ describe("异常与报警 (AC3, D5, D6, D16)", () => {
     expect(rows).toContainEqual(["Dune", "0"]); // a stop and an interruption are warnings
   });
 
-  it("merged list newest first with outcome labels; 14 rows, then 「显示更多」", async () => {
+  it("merged list newest first with outcome labels; 14 rows, then 「显示更多」; a filter change resets the rows, not the view", async () => {
     await mount();
     const list = () => within(alerts()).getByRole("table", { name: "最近的异常与报警" });
     const rows = () => Array.from(list().querySelectorAll("tbody tr"));
@@ -225,7 +237,13 @@ describe("异常与报警 (AC3, D5, D6, D16)", () => {
     fireEvent.click(within(alerts()).getByRole("button", { name: "显示更多" }));
     expect(rows()).toHaveLength(18);
     expect(within(alerts()).queryByRole("button", { name: "显示更多" })).toBeNull();
+    expect(list()).toHaveTextContent("已恢复"); // Dune came back online right after its offline span
     await range("30 天"); // a new filter starts at 14 rows again
+    expect(rows()).toHaveLength(14);
+    view(alerts(), "表格");
+    fireEvent.click(within(alerts()).getByRole("button", { name: "显示更多" }));
+    await range("7 天"); // C5-X4: the chosen 表格 view survives a filter change
+    expect(within(alerts()).getByRole("table", { name: "按类型" })).toBeInTheDocument();
     expect(rows()).toHaveLength(14);
   });
 

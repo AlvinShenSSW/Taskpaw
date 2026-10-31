@@ -6,6 +6,7 @@
 import AutorenewIcon from "@mui/icons-material/Autorenew";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import HourglassEmptyIcon from "@mui/icons-material/HourglassEmpty";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import WifiOffIcon from "@mui/icons-material/WifiOff";
@@ -40,8 +41,10 @@ function BurstNotice({ data, b }: { data: WorkflowAnalytics; b: Burst }) {
   );
 }
 
-export function AlertsSection({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
-  const [shown, setShown] = useState(PAGE);
+/** `resetKey` names the filters: a new one starts the event list at 14 rows again, keeping the panel's view. */
+export function AlertsSection({ data, A, resetKey }: { data: WorkflowAnalytics; A: Analysis; resetKey: string }) {
+  const [page, setPage] = useState({ key: resetKey, shown: PAGE });
+  const shown = page.key === resetKey ? page.shown : PAGE;
   const a = alertFigures(data, A);
   const desc = `失败（红）需要重试或改派，警告（琥珀）多为自动恢复 · ${A.R.name}失败 ${a.fails} 次、警告 ${a.warns} 次`
     + `${a.offline ? ` · 设备离线 ${a.offline} 次` : ""}${a.outages ? ` · 翻译服务中断 ${a.outages} 次` : ""}`;
@@ -61,7 +64,7 @@ export function AlertsSection({ data, A }: { data: WorkflowAnalytics; A: Analysi
   const needs = a.events.filter((e) => e.outcome === "需要处理").length;
   const typeChip = (e: AlertEvent) => <Chip tone={SEV[e.severity].tone}><Icon of={SEV[e.severity].icon} />{e.label}</Chip>;
   const outcomeChip = (e: AlertEvent) => (
-    <Chip tone={e.tone}><Icon of={e.outcome === "重试中" ? HourglassEmptyIcon : TONE_ICON[e.tone]} />{e.outcome}</Chip>
+    <Chip tone={e.tone}><Icon of={e.outcome === "重试中" ? HourglassEmptyIcon : e.outcome === "记录中断" ? HelpOutlineIcon : TONE_ICON[e.tone]} />{e.outcome}</Chip>
   );
   const recent = () => (
     <Block title="最近的异常与报警" desc={`显示 ${list.length} 条，共 ${a.events.length} 条${needs ? ` · ${needs} 条需要处理` : ""}`}>
@@ -84,7 +87,7 @@ export function AlertsSection({ data, A }: { data: WorkflowAnalytics; A: Analysi
         </table>
       </div>
       {shown < a.events.length && (
-        <button type="button" className="link-btn more" onClick={() => setShown((n) => n + PAGE)}>显示更多</button>
+        <button type="button" className="link-btn more" onClick={() => setPage({ key: resetKey, shown: shown + PAGE })}>显示更多</button>
       )}
     </Block>
   );

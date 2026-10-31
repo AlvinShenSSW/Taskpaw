@@ -62,6 +62,20 @@ describe("energyFigures (用电, AC1)", () => {
     expect(e.byMachine[e.byMachine.length - 1].label).toBe("本机（后处理）");
   });
 
+  it("the per-machine breakdown lists every restore_wh contributor, so groups + 本机后处理 sum to the total (C5-X2)", () => {
+    // 本机 only contributed a failed restore attempt: it is not a machine-table row, but its energy is in the total
+    const fs = [film(day(30), { restore_wh: [["gpu-a", 800, 14400], [CTRL, 200, 3600]], controller_wh: 50 }), film(day(29), { worker: "gpu-b", restore_wh: [["gpu-b", 400, 7200]], controller_wh: 20 })];
+    const d = data({ films: fs });
+    for (const machineFilter of ["all", "gpu-a"]) {
+      const e = energyFigures(d, analyse(d, { machine: machineFilter }), "all");
+      const groups = e.byMachine.reduce((a, g) => a + (g.kwh ?? 0), 0);
+      expect(groups).toBeCloseTo(e.reading.kwh!);
+    }
+    const all = energyFigures(d, analyse(d), "all");
+    expect(all.byMachine.map((g) => g.label)).toEqual(["gpu-a", "gpu-b", "本机（修复）", "本机（后处理）"]);
+    expect(all.byMachine.find((g) => g.label === "本机（修复）")!.kwh).toBeCloseTo(0.2);
+  });
+
   it("sums measured films only: a film without a reading is missing, never 0 kWh; partial ones are flagged", () => {
     const d = data({ films: films() });
     const e = energyFigures(d, analyse(d), "all");
@@ -71,7 +85,9 @@ describe("energyFigures (用电, AC1)", () => {
     expect(e.reading.kwh).toBeCloseTo(0.85 + 0.74 + 0.33);
     expect(e.perFilm).toBeCloseTo((0.85 + 0.74 + 0.33) / 3);
     const i29 = e.buckets.findIndex((b) => b.missing === 1);
-    expect(e.buckets[i29]).toEqual({ kwh: 0, films: 1, missing: 1, partial: 0 });
+    // archived films but no reading at all: unknown (null), not 0 kWh; an empty bucket is a true 0 (C5-X3)
+    expect(e.buckets[i29]).toEqual({ kwh: null, films: 1, missing: 1, partial: 0 });
+    expect(e.buckets.find((b) => b.films === 0)).toEqual({ kwh: 0, films: 0, missing: 0, partial: 0 });
     expect(e.buckets.find((b) => b.partial === 1)!.kwh).toBeCloseTo(0.33);
   });
 
@@ -216,7 +232,13 @@ describe("alertFigures (异常与报警, AC3)", () => {
     failure(T + 3 * H, { machine: CTRL, stage: "translate", type: "translate_paused", severity: "warn", note: "翻译暂停：无响应", outcome: "retrying" }),
     failure(T + 4 * H, { machine: "gpu-b", type: "interrupted", severity: "warn", note: "上一次运行被中断", outcome: "retried_ok" }),
   ];
-  const devices = { available: true, reason: "", spans: [span("gpu-b", "offline", T - H, T - 30 * MIN), span("gpu-a", "offline", T + 5 * H, NOW - 30_000, { open: true })] };
+  const devices = {
+    available: true, reason: "", spans: [
+      span("gpu-b", "offline", T - 5 * H, T - 4 * H), span("gpu-b", "online", T - 4 * H, T - 3 * H), // seen back online: 已恢复
+      span("gpu-b", "offline", T - H, T - 30 * MIN), // closed by a restart / stall, recovery never observed (§6.2)
+      span("gpu-a", "offline", T + 5 * H, NOW - 30_000, { open: true }),
+    ],
+  };
   const outages = [{ start: iso(T + 6 * H), end: iso(T + 7 * H), paused: false }];
   const d = data({ failures: fails, devices, outages, coverage: { ...data().coverage, devices: iso(T - DAY), outages: iso(T - 2 * DAY) } });
 
@@ -227,7 +249,7 @@ describe("alertFigures (异常与报警, AC3)", () => {
     expect(t["临时失败（重试已用尽）"]).toMatchObject({ n: 1, severity: "fail" });
     expect(t["翻译暂停"]).toMatchObject({ n: 1, severity: "warn" });
     expect(t["运行中断"]).toMatchObject({ n: 1, severity: "warn" });
-    expect(t["设备离线"]).toMatchObject({ n: 2, severity: "warn" });
+    expect(t["设备离线"]).toMatchObject({ n: 3, severity: "warn" });
     expect(t["翻译服务中断"]).toMatchObject({ n: 1, severity: "warn" });
     expect(a.types.map((x) => x.severity)).toEqual([...a.types.filter((x) => x.severity === "fail"), ...a.types.filter((x) => x.severity === "warn")].map((x) => x.severity));
     expect(a.types.some((x) => /CPU/.test(x.label))).toBe(false); // D6
@@ -240,7 +262,8 @@ describe("alertFigures (异常与报警, AC3)", () => {
     expect(a.events.map((e) => e.at)).toEqual([...a.events.map((e) => e.at)].sort((x, y) => y - x));
     expect(a.events[0]).toMatchObject({ kind: "outage", label: "翻译服务中断", outcome: "已自动恢复" });
     expect(a.events.find((e) => e.kind === "offline" && e.machine === "gpu-a")).toMatchObject({ outcome: "仍离线" });
-    expect(a.events.find((e) => e.kind === "offline" && e.machine === "gpu-b")).toMatchObject({ outcome: "已恢复" });
+    const gpuB = a.events.filter((e) => e.kind === "offline" && e.machine === "gpu-b").sort((x, y) => x.at - y.at);
+    expect(gpuB.map((e) => e.outcome)).toEqual(["已恢复", "记录中断"]); // C5-X1: a closed span alone is no recovery
     const labels = a.events.filter((e) => e.kind === "failure").map((e) => e.outcome);
     expect(new Set(labels)).toEqual(new Set(["已自动改派", "需要处理", "重试中", "已重试成功"]));
     expect(a.events.filter((e) => e.burst)).toHaveLength(3);

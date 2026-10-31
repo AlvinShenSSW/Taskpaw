@@ -142,8 +142,7 @@ export function AnalyticsPage() {
           <DurationsSection A={A} />
           <EnergySection data={data} A={A} res={res} compare={compare} />
           <UptimeSection data={data} A={A} />
-          {/* keyed by the filters, so a new filter starts the event list at 14 rows again */}
-          <AlertsSection key={`${viewRange}|${machineNow}|${res}`} data={data} A={A} />
+          <AlertsSection data={data} A={A} resetKey={`${viewRange}|${machineNow}|${res}`} />
           <SourcesSection data={data} A={A} />
         </div>
         <div className="sr-only" aria-live="polite">

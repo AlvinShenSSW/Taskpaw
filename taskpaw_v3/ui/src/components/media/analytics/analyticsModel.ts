@@ -616,7 +616,8 @@ export function durationFigures(A: Analysis): DurationFigures {
 }
 
 // ---- 用电 (§8.4 item 6; C5 AC1) ----
-export interface EnergyBucket { kwh: number; films: number; missing: number; partial: number }
+// kWh: 0 for a bucket without archives; null when it has archives but none carries a reading (unknown, not 0)
+export interface EnergyBucket { kwh: number | null; films: number; missing: number; partial: number }
 export interface EnergyGroup { key: string; label: string; kwh: number | null; partial: boolean }
 export interface EnergyFigures {
   reading: EnergyReading; // the films in range, by C3's rule (energyReading)
@@ -627,7 +628,7 @@ export interface EnergyFigures {
   least: AnalyticsFilm | null; // among complete readings only: a lower bound cannot claim to be the least
   top: AnalyticsFilm[]; // the 5 highest readings
   byRes: Array<{ series: ResSeries; avg: number | null; films: number; measured: number }>;
-  byMachine: EnergyGroup[]; // restore energy per machine from restore_wh, then 本机's post-processing
+  byMachine: EnergyGroup[]; // restore energy per contributing machine (restore_wh of the films in range), then 本机's post-processing
 }
 export function energyFigures(data: WorkflowAnalytics, A: Analysis, res: ResFilter): EnergyFigures {
   const { cur, ctrl } = A;
@@ -639,8 +640,9 @@ export function energyFigures(data: WorkflowAnalytics, A: Analysis, res: ResFilt
     if (!b) continue;
     b.films += 1;
     if (!hasEnergyReading(f, ctrl)) b.missing += 1;
-    else { b.kwh += kwhOf(f); if (f.energy_partial) b.partial += 1; }
+    else { b.kwh = (b.kwh ?? 0) + kwhOf(f); if (f.energy_partial) b.partial += 1; }
   }
+  for (const b of buckets) if (b.films > 0 && b.missing === b.films) b.kwh = null;
   const comparable = energyComplete(reading) && energyComplete(A.prev ? energyReading(A.prev, ctrl) : null);
   const ranked = cur.filter((f) => hasEnergyReading(f, ctrl)).sort((a, b) => kwhOf(b) - kwhOf(a));
   const complete = ranked.filter((f) => !f.energy_partial);
@@ -648,11 +650,31 @@ export function energyFigures(data: WorkflowAnalytics, A: Analysis, res: ResFilt
     const films = cur.filter((f) => f.res === series.res), read = films.filter((f) => hasEnergyReading(f, ctrl));
     return { series, films: films.length, measured: read.length, avg: avg(read.map(kwhOf)) };
   });
-  // restore_wh holds every restore attempt with energy, so a machine's sum includes its failed attempts on
-  // films another machine finished (machineRows); under the 本机 filter only the post-processing counts
-  const machines: EnergyGroup[] = ctrl ? [] : machineRows(data, A).map((r) => ({
-    key: r.m.id, label: r.m.kind === "controller" ? "本机（修复）" : r.m.name, kwh: r.kwh, partial: r.kwhPartial > 0,
-  }));
+  // The breakdown splits exactly the films the total counts: every restore_wh contributor (failed attempts
+  // included, 本机 too when it restored) and every restoring worker without a reading (「—」), so the groups
+  // plus 本机's post-processing sum to the total. Under the 本机 filter only the post-processing counts.
+  // Per group, C4's rule: incomplete when a film it fed is energy_partial or a film it restored lacks its reading.
+  const machines: EnergyGroup[] = [];
+  if (!ctrl) {
+    const fed = new Map<string, Set<AnalyticsFilm>>(), wh = new Map<string, number>();
+    for (const f of cur) {
+      for (const [w, e] of f.restore_wh) {
+        fed.set(w, (fed.get(w) ?? new Set()).add(f));
+        wh.set(w, (wh.get(w) ?? 0) + e);
+      }
+    }
+    const ids = new Set([...fed.keys(), ...cur.map((f) => f.worker).filter((w): w is string => w !== null)]);
+    const isCtrl = (id: string) => id === A.controller?.id;
+    const order = [...ids].sort((a, b) => Number(isCtrl(a)) - Number(isCtrl(b)) || machineName(data, a).localeCompare(machineName(data, b)));
+    for (const id of order) {
+      const own = fed.get(id) ?? new Set<AnalyticsFilm>();
+      const touched = new Set([...own, ...cur.filter((f) => f.worker === id)]);
+      machines.push({
+        key: id, label: isCtrl(id) ? "本机（修复）" : machineName(data, id), kwh: own.size ? wh.get(id)! / 1000 : null,
+        partial: [...touched].some((f) => f.energy_partial || !own.has(f)),
+      });
+    }
+  }
   const post = cur.filter((f) => f.controller_wh != null);
   machines.push({
     key: "post", label: "本机（后处理）", kwh: post.length ? sum(post.map((f) => f.controller_wh!)) / 1000 : null,
@@ -803,6 +825,15 @@ export interface AlertFigures {
   fails: number; warns: number; offline: number; outages: number; // warns = failure rows of severity warn
 }
 
+const TICK = 30_000; // the recorder's tick (§6.2)
+/** A closed offline span is a recovery only when the same machine's next span starts as it ends (within a tick)
+ *  and is online or 停领. The recorder also closes spans on a controller restart or a stall (§6.2): then
+ *  nothing says the machine came back, so the outcome is 「记录中断」, not 「已恢复」. */
+function recovered(spans: AnalyticsSpan[], sp: AnalyticsSpan): boolean {
+  const end = spanEnd(sp);
+  return spans.some((n) => n !== sp && n.machine === sp.machine && n.state !== "offline" && Math.abs(Date.parse(n.start) - end) <= TICK);
+}
+
 export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures {
   const ctrlId = A.controller?.id;
   const bursts = failureBursts(A.failures, A.now);
@@ -831,10 +862,12 @@ export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures
     const s = Date.parse(sp.start), e = spanEnd(sp);
     if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
     offline += 1;
+    const back = !sp.open && recovered(data.devices.spans, sp);
     count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
     events.push({
       key: `d${i}`, at: s, machine: sp.machine, kind: "offline", label: CLIENT_TYPE.offline.label, severity: "warn", code: null,
-      outcome: sp.open ? "仍离线" : "已恢复", tone: sp.open ? "red" : "neutral", note: `离线 ${fSpan(e - s)}${sp.open ? "，至今" : ""}`, burst: false,
+      outcome: sp.open ? "仍离线" : back ? "已恢复" : "记录中断", tone: sp.open ? "red" : "neutral",
+      note: `离线 ${fSpan(e - s)}${sp.open ? "，至今" : back ? "" : "，之后没有记录"}`, burst: false,
     });
   });
   const outages = scope === null || A.ctrl ? outageFigures(data, A).items : [];
