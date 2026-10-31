@@ -185,7 +185,9 @@ describe("KPI honesty (Codex r1)", () => {
     const at = ["2026-10-30T01:00:00Z", "2026-10-30T02:00:00Z"];
     const unmeasured = at.map((t, i) => ({ ...FIXTURE.films[FIXTURE.films.length - 1], code: `ZZN-90${i}`, archived_at: t,
       restore_wh: [] as WorkflowAnalytics["films"][number]["restore_wh"], controller_wh: null }));
-    const films = [...FIXTURE.films, ...unmeasured].sort((a, b) => a.archived_at.localeCompare(b.archived_at));
+    // only missing readings here (no partial film), so the note keeps 「N 部无用电记录」
+    const films = [...FIXTURE.films.map((f) => ({ ...f, energy_partial: false })), ...unmeasured]
+      .sort((a, b) => a.archived_at.localeCompare(b.archived_at));
     mount({ ...FIXTURE, films });
     await screen.findByRole("group", { name: /^完成影片/ });
     const measured = FIXTURE.films.filter((f) => in7d(f.archived_at));
@@ -197,6 +199,21 @@ describe("KPI honesty (Codex r1)", () => {
     expect(energy).toHaveTextContent(`每片平均 ${(kwh / measured.length).toFixed(2)} kWh`);
     expect(within(energy).getByText("上一周期无可比数据")).toBeInTheDocument();
     expect(within(tile("完成影片")).queryByText("部分")).toBeNull();
+  });
+
+  it("a partial energy reading marks 「部分」 with 「用电记录不全」 and does not compare (C3-X5)", async () => {
+    // every film in range is measured, two of them only partly; none missing
+    const partial = new Set(FIXTURE.films.filter((f) => in7d(f.archived_at)).slice(0, 2).map((f) => f.code));
+    const films = FIXTURE.films.map((f) => (in7d(f.archived_at)
+      ? { ...f, controller_wh: f.controller_wh ?? 50, energy_partial: partial.has(f.code) }
+      : { ...f, energy_partial: false }));
+    mount({ ...FIXTURE, films });
+    await screen.findByRole("group", { name: /^完成影片/ });
+    const energy = tile("总用电");
+    expect(within(energy).getByText("部分")).toBeInTheDocument();
+    expect(energy).toHaveTextContent("2 部用电记录不全");
+    expect(energy).not.toHaveTextContent("无用电记录");
+    expect(within(energy).getByText("上一周期无可比数据")).toBeInTheDocument();
   });
 
   it("the GPU spark's latest point is the live state, not a drop past the last recorded tick (C3-X3)", async () => {

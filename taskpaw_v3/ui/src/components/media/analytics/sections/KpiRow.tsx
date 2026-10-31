@@ -26,6 +26,7 @@ export function KpiRow({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
   const spark = (fn: (s: number, e: number) => number | null, fmt: (v: number) => string) => ({ vals: sliceValues(A, fn), labels, fmt });
   const leadAvg = avg(k.lead), restoreAvg = avg(k.restore);
   const fails = A.failures.filter(isFail);
+  const incomplete = k.energyMissing + k.energyPartial; // films without, or with only part of, a reading
   return (
     <div className="kpis">
       <KpiTile label="完成影片" value={fInt(k.films)} unit="部" delta={d(k.films, k.prevFilms, "up")}
@@ -38,10 +39,11 @@ export function KpiRow({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
         : <KpiTile label="平均修复时长" value={n1(restoreAvg)} unit="小时" delta={d(restoreAvg, k.prevRestoreAvg, "down")}
           note={`4K ${fH(avg(k.restore4k))} · 1080P ${fH(avg(k.restore1080))}`}
           spark={spark((s, e) => avg(restoreHours(A, inSlice(s, e))), fH)} />}
-      <KpiTile label="总用电" tag={<><EstimateChip />{k.energyMissing > 0 && k.energyMeasured > 0 && <span className="chip tag amber" title="部分影片没有用电记录，只合计有记录的影片">部分</span>}</>}
+      <KpiTile label="总用电" tag={<><EstimateChip />{incomplete > 0 && k.energyMeasured > 0 && <span className="chip tag amber" title="部分影片没有或缺少用电记录，只合计已有的记录">部分</span>}</>}
         value={k.energyMeasured ? fKwh(k.energy) : "—"} unit={k.energyMeasured ? "kWh" : undefined}
         delta={d(k.energyMeasured ? k.energy : null, k.prevEnergy, "none")}
-        note={[k.energyMeasured ? `每片平均 ${fKwh(k.energyPerFilm)} kWh` : null, k.energyMissing ? `${k.energyMissing} 部无用电记录` : null].filter(Boolean).join(" · ")}
+        note={[k.energyMeasured ? `每片平均 ${fKwh(k.energyPerFilm)} kWh` : null,
+          k.energyPartial ? `${incomplete} 部用电记录不全` : k.energyMissing ? `${k.energyMissing} 部无用电记录` : null].filter(Boolean).join(" · ")}
         spark={spark((s, e) => energyReading(inSlice(s, e), A.ctrl).kwh, (v) => `${fKwh(v)} kWh`)} />
       <KpiTile label="失败率" value={k.failRate === null ? "—" : n1(k.failRate)} unit={k.failRate === null ? undefined : "%"}
         delta={d(k.failRate, k.prevFailRate, "down", true)} note={`失败 ${k.fails} 次 · 警告 ${k.warns} 次`}

@@ -220,10 +220,15 @@ export const filmKwh = (f: AnalyticsFilm, ctrl: boolean) => (ctrl ? 0 : restoreK
 /** Whether a film carries any energy evidence (under the 本机 filter: 本机's post-processing reading). */
 export const hasEnergyReading = (f: AnalyticsFilm, ctrl: boolean) => f.controller_wh != null || (!ctrl && f.restore_wh.length > 0);
 /** Estimated energy of the films with a reading; films without one count as missing, never as 0 kWh.
- *  `kwh` is null when no film has a reading. The KPI and C5's 用电 panel share this rule. */
-export function energyReading(films: AnalyticsFilm[], ctrl: boolean): { kwh: number | null; measured: number; missing: number } {
+ *  `partial` = measured films with `energy_partial` (§7.1: some attempt lacked energy): their readings are
+ *  summed but the total is incomplete. `kwh` is null when no film has a reading. The KPI and C5's 用电
+ *  panel share this rule. */
+export function energyReading(films: AnalyticsFilm[], ctrl: boolean): { kwh: number | null; measured: number; missing: number; partial: number } {
   const read = films.filter((f) => hasEnergyReading(f, ctrl));
-  return { kwh: read.length ? sum(read.map((f) => filmKwh(f, ctrl))) : null, measured: read.length, missing: films.length - read.length };
+  return {
+    kwh: read.length ? sum(read.map((f) => filmKwh(f, ctrl))) : null,
+    measured: read.length, missing: films.length - read.length, partial: read.filter((f) => f.energy_partial).length,
+  };
 }
 
 /** D14: a machine is 「新加入」 iff it first booted after the first 10 % of the effective range. */
@@ -263,9 +268,9 @@ export interface KpiFigures {
   restore: number[]; restore4k: number[]; restore1080: number[]; prevRestoreAvg: number | null;
   ctrlRestored: boolean; // 本机 restored a film in range (D11)
   // kWh, estimated, over films with a reading only (energyReading); prevEnergy is null unless both
-  // periods are fully measured, so a missing reading never reads as a reduction
+  // periods are fully measured (no missing, no partial film), so a gap never reads as a reduction
   energy: number; prevEnergy: number | null; energyPerFilm: number | null;
-  energyMeasured: number; energyMissing: number;
+  energyMeasured: number; energyMissing: number; energyPartial: number;
   fails: number; warns: number; failRate: number | null; prevFailRate: number | null;
 }
 /** Restore hours of `films`; under the 本机 filter only the films 本机 itself restored (D11). */
@@ -282,7 +287,8 @@ export function kpiFigures(A: Analysis): KpiFigures {
   const leadH = leadHours;
   const en = energyReading(cur, ctrl);
   const enPrev = prev ? energyReading(prev, ctrl) : null;
-  const comparable = en.missing === 0 && en.kwh !== null && enPrev !== null && enPrev.missing === 0 && enPrev.kwh !== null;
+  const complete = (r: ReturnType<typeof energyReading> | null) => r !== null && r.kwh !== null && r.missing === 0 && r.partial === 0;
+  const comparable = complete(en) && complete(enPrev);
   const fails = A.failures.filter(isFail).length;
   const prevFails = A.failuresPrev ? A.failuresPrev.filter(isFail).length : null;
   return {
@@ -296,9 +302,9 @@ export function kpiFigures(A: Analysis): KpiFigures {
     restore1080: restoreH(cur.filter((f) => f.res === "1080p")),
     prevRestoreAvg: prev ? avg(restoreH(prev)) : null,
     ctrlRestored: A.controller !== null && cur.some((f) => f.worker === A.controller!.id),
-    energy: en.kwh ?? 0, prevEnergy: comparable ? enPrev.kwh : null,
+    energy: en.kwh ?? 0, prevEnergy: comparable ? enPrev!.kwh : null,
     energyPerFilm: en.kwh !== null ? en.kwh / en.measured : null,
-    energyMeasured: en.measured, energyMissing: en.missing,
+    energyMeasured: en.measured, energyMissing: en.missing, energyPartial: en.partial,
     fails, warns: A.failures.length - fails,
     failRate: failureRate(fails, cur.length),
     prevFailRate: prev && prevFails !== null ? failureRate(prevFails, prev.length) : null,

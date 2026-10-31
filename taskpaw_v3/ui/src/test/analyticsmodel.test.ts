@@ -323,8 +323,8 @@ describe("energy readings (C3-X2): a film without energy evidence is not 0 kWh",
     expect([all.measured, all.missing, ctrl.measured, ctrl.missing]).toEqual([2, 2, 2, 2]);
     expect(all.kwh).toBeCloseTo((1000 + 100 + 60) / 1000, 9);
     expect(ctrl.kwh).toBeCloseTo(0.16, 9);
-    expect(energyReading([film(local(2026, 10, 29, 10), none)], false)).toEqual({ kwh: null, measured: 0, missing: 1 });
-    expect(energyReading([], false)).toEqual({ kwh: null, measured: 0, missing: 0 });
+    expect(energyReading([film(local(2026, 10, 29, 10), none)], false)).toEqual({ kwh: null, measured: 0, missing: 1, partial: 0 });
+    expect(energyReading([], false)).toEqual({ kwh: null, measured: 0, missing: 0, partial: 0 });
   });
 
   it("the KPI averages over measured films and compares only fully measured periods", () => {
@@ -357,5 +357,31 @@ describe("recorded presence (C3-X3): no record is null, never 0 online", () => {
     expect(recordedPresence(spans, ids, local(2026, 10, 31, 13, 59))).toBe(1);
     expect(recordedPresence(spans, ids, local(2026, 10, 31, 14, 10))).toBeNull();
     expect(recordedPresence([span("b", "offline", local(2026, 10, 30), local(2026, 10, 31))], ids, local(2026, 10, 30, 12))).toBe(0);
+  });
+});
+
+describe("partial energy readings (C3-X5)", () => {
+  const cover = local(2026, 10, 10, 9);
+  const R = rangeDef("7d", NOW, cover);
+  const d = (films: AnalyticsFilm[]) => data({ films, coverage: { archives: iso(cover), energy: null, cues: null, devices: null, outages: null } });
+  const full = film(local(2026, 10, 27, 10), { restore_wh: [["gpu-a", 1000, 7200]], controller_wh: 100 });
+  const partial = film(local(2026, 10, 28, 10), { restore_wh: [["gpu-a", 100, 900]], controller_wh: null, energy_partial: true });
+  const prevWeek = [film(local(2026, 10, 20, 10), { restore_wh: [["gpu-a", 900, 7200]], controller_wh: 100 })];
+
+  it("counts partial films apart and still sums their readings", () => {
+    const r = energyReading([full, partial], false);
+    expect([r.measured, r.missing, r.partial]).toEqual([2, 0, 1]);
+    expect(r.kwh).toBeCloseTo(1.2, 9);
+    const ctrl = energyReading([full, partial], true); // 本机: partial has no controller reading
+    expect([ctrl.measured, ctrl.missing, ctrl.partial]).toEqual([1, 1, 0]);
+  });
+
+  it("a partial period never compares (no fake reduction), in either period", () => {
+    const cur = kpiFigures(compute(d([full, partial, ...prevWeek]), R, F, NOW));
+    expect([cur.energyMeasured, cur.energyMissing, cur.energyPartial]).toEqual([2, 0, 1]);
+    expect(cur.prevEnergy).toBeNull();
+    const prevPartial = kpiFigures(compute(d([full, { ...prevWeek[0], energy_partial: true }]), R, F, NOW));
+    expect(prevPartial.prevEnergy).toBeNull();
+    expect(kpiFigures(compute(d([full, ...prevWeek]), R, F, NOW)).prevEnergy).toBeCloseTo(1.0, 9);
   });
 });
