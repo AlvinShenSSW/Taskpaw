@@ -1,5 +1,6 @@
 // KPI row (EPIC 2026-10-31 §8.4 item 1): 完成影片 · 平均全程时长 · 平均修复时长 · 总用电「估算」 · 失败率 ·
-// GPU 在线 N / M. Deltas only with 对比上一周期 (flat texts when the previous period is not covered).
+// GPU 在线 N / M. Every tile shows its delta vs the previous period, or the preview's flat text when there
+// is none to compare (approved preview `dlt`); 对比上一周期 only adds the chart overlays.
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import type { AnalyticsMachine, AnalyticsMachineState, WorkflowAnalytics } from "../../../../api";
@@ -17,12 +18,11 @@ function FlatLine({ icon, text }: { icon: typeof InfoOutlinedIcon; text: string 
   return <div className="delta flat"><Icon of={icon} /><span>{text}</span></div>;
 }
 
-export function KpiRow({ data, A, compare }: { data: WorkflowAnalytics; A: Analysis; compare: boolean }) {
+export function KpiRow({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
   const k = kpiFigures(A);
   const labels = sliceLabels(A);
   const inSlice = (s: number, e: number) => filmsIn(A.cur, s, e);
-  const d = (cur: number | null, prev: number | null, good: "up" | "down" | "none", pp = false) =>
-    (compare ? delta(A, cur, prev, good, pp) : undefined);
+  const d = (cur: number | null, prev: number | null, good: "up" | "down" | "none", pp = false) => delta(A, cur, prev, good, pp);
   const spark = (fn: (s: number, e: number) => number | null, fmt: (v: number) => string) => ({ vals: sliceValues(A, fn), labels, fmt });
   const leadAvg = avg(k.lead), restoreAvg = avg(k.restore);
   const fails = A.failures.filter(isFail);

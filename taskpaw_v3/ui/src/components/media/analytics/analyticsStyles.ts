@@ -14,8 +14,9 @@ export const ANALYTICS_CSS = `
 .mw .an .chip .icon{width:12px;height:12px}
 .mw .an .chip.tag{padding:0 6px;font-size:10px;line-height:1.7}
 
-/* filter bar: one row above everything it scopes */
-.mw .an .filterbar{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:#0e1727f0;margin-bottom:16px;position:sticky;top:8px;z-index:5}
+/* filter bar: one row above everything it scopes; sticks below the app's sticky dense AppBar (48 px),
+   at 64 px as the 设置 nav does (views/Settings.tsx) */
+.mw .an .filterbar{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:#0e1727f0;margin-bottom:16px;position:sticky;top:64px;z-index:5}
 .mw .an .fgroup{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
 .mw .an .fgroup .seg-opt{flex:0 0 auto;padding:6px 12px}
 .mw .an .switch-l{display:inline-flex;gap:10px;align-items:center;font-size:12px;color:var(--text)}

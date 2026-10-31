@@ -123,7 +123,7 @@ export function AnalyticsPage() {
           </Notice>
         )}
         <div className={`an-sections${isPlaceholderData ? " busy" : ""}`}>
-          <KpiRow data={data} A={A} compare={compare} />
+          <KpiRow data={data} A={A} />
           <ProductionSection A={A} res={res} compare={compare} />
         </div>
         <div className="sr-only" aria-live="polite">

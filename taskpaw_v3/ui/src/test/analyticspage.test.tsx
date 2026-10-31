@@ -6,6 +6,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api, HttpError, type WorkflowAnalytics } from "../api";
 import { AnalyticsPage, ANALYTICS_REFETCH_MS } from "../components/media/analytics/AnalyticsPage";
+import { ANALYTICS_CSS } from "../components/media/analytics/analyticsStyles";
+import { MEDIA_CSS } from "../components/media/mediaStyles";
 import SAMPLE from "./fixtures/analytics-sample.json";
 
 const FIXTURE = SAMPLE as WorkflowAnalytics;
@@ -72,8 +74,16 @@ describe("数据分析 page", () => {
     expect(gpu).toHaveTextContent("可领取 3 台");
     expect(gpu).toHaveTextContent("Birch 离线 5 小时");
     expect(gpu).toHaveTextContent("Cedar 停领 3 小时");
-    // no compare: no deltas
-    expect(screen.queryByText("较上一周期")).toBeNull();
+    // deltas are always shown, as in the approved preview; 对比上一周期 only adds chart overlays
+    expect(screen.getByRole("switch", { name: "对比上一周期" })).toHaveAttribute("aria-checked", "false");
+    const prevFilms = FIXTURE.films.filter((f) => { const t = Date.parse(f.archived_at); return t >= WEEK_START - 7 * 86_400_000 && t < WEEK_START; }).length;
+    const pct = Math.round(((films.length - prevFilms) / prevFilms) * 100);
+    expect(within(tile("完成影片")).getByText(`${pct > 0 ? "+" : "−"}${Math.abs(pct)}%`)).toBeInTheDocument();
+    for (const label of ["完成影片", "平均全程时长", "平均修复时长", "总用电", "失败率"]) {
+      expect(tile(label).querySelector(".delta")).not.toBeNull();
+    }
+    expect(production().querySelector(".prev-line")).toBeNull();
+    expect(within(production()).queryByText("上一周期")).toBeNull();
   });
 
   it("对比上一周期 adds deltas and the previous-period line; 全部 disables it and asks for all history", async () => {
@@ -85,6 +95,7 @@ describe("数据分析 page", () => {
     expect(production().querySelector(".prev-line")).not.toBeNull();
     range("全部");
     await waitFor(() => expect(spy).toHaveBeenLastCalledWith(undefined));
+    await waitFor(() => expect(within(tile("完成影片")).getByText("全部时段没有上一周期")).toBeInTheDocument());
     const sw = screen.getByRole("switch", { name: "对比上一周期" });
     expect(sw).toBeDisabled();
     expect(sw).toHaveAttribute("aria-checked", "false");
@@ -98,6 +109,7 @@ describe("数据分析 page", () => {
     range("30 天");
     await waitFor(() => expect(spy).toHaveBeenLastCalledWith("2026-09-01T16:00:00.000Z"));
     expect(await screen.findByText("所选时段早于数据记录起点（10-10），只统计 21 天。图中灰色区域没有记录。")).toBeInTheDocument();
+    expect(within(tile("完成影片")).getByText("上一周期没有记录")).toBeInTheDocument(); // with compare still off
     expect(within(production()).getByText("无记录")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "对比上一周期" }));
     expect(within(production()).getByText("上一周期没有完整记录，暂时无法对比。")).toBeInTheDocument();
@@ -228,5 +240,16 @@ describe("OD1 guard: no progress against a total, no remaining count, no forecas
     const select = screen.getByRole("combobox", { name: "机器" });
     for (const value of ["w-ctrl-0001", "w-gpu-ember"]) { fireEvent.change(select, { target: { value } }); assertClean(); }
     expect(screen.getAllByText(/共 \d+ 部/).length).toBeGreaterThan(0); // totals of what happened stay allowed
+  });
+});
+
+describe("sticky filter bar (approved preview)", () => {
+  it("sticks below the app's sticky app bar, and .mw-root clips without becoming a scroll container", () => {
+    expect(ANALYTICS_CSS).toMatch(/\.mw \.an \.filterbar\{[^}]*position:sticky;top:64px/);
+    expect(ANALYTICS_CSS).toMatch(/@media\(max-width:900px\)\{\.mw \.an \.filterbar\{position:static\}/);
+    // overflow:hidden makes .mw-root the sticky scroll container and the bar never sticks; clip does not
+    const root = MEDIA_CSS.match(/\.mw-root\{[^}]*\}/)![0];
+    expect(root).toMatch(/overflow:clip/);
+    expect(root.lastIndexOf("overflow:clip")).toBeGreaterThan(root.lastIndexOf("overflow:hidden"));
   });
 });
