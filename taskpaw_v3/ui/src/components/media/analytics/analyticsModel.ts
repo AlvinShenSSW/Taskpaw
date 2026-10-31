@@ -217,12 +217,31 @@ export const hours = (s: number | null) => (s == null ? null : s / 3600);
 export const restoreKwh = (f: AnalyticsFilm) => sum(f.restore_wh.map((e) => e[1])) / 1000;
 /** A film's estimated energy: 本机 filter = 本机's post-processing only, else restore + post-processing. */
 export const filmKwh = (f: AnalyticsFilm, ctrl: boolean) => (ctrl ? 0 : restoreKwh(f)) + (f.controller_wh ?? 0) / 1000;
+/** Whether a film carries any energy evidence (under the 本机 filter: 本机's post-processing reading). */
+export const hasEnergyReading = (f: AnalyticsFilm, ctrl: boolean) => f.controller_wh != null || (!ctrl && f.restore_wh.length > 0);
+/** Estimated energy of the films with a reading; films without one count as missing, never as 0 kWh.
+ *  `kwh` is null when no film has a reading. The KPI and C5's 用电 panel share this rule. */
+export function energyReading(films: AnalyticsFilm[], ctrl: boolean): { kwh: number | null; measured: number; missing: number } {
+  const read = films.filter((f) => hasEnergyReading(f, ctrl));
+  return { kwh: read.length ? sum(read.map((f) => filmKwh(f, ctrl))) : null, measured: read.length, missing: films.length - read.length };
+}
 
 /** D14: a machine is 「新加入」 iff it first booted after the first 10 % of the effective range. */
 export function isNewMachine(m: AnalyticsMachine, R: RangeDef, now: number): boolean {
   if (!m.first_seen) return false;
   const eff = R.effectiveStart;
   return Date.parse(m.first_seen) > eff + 0.1 * (now - eff);
+}
+
+/** Like presentAt, but null when no span of `ids` covers `t` (a recording gap, before the first span,
+ *  after the last recorded tick): unrecorded time is 无记录, never 0 online. */
+export function recordedPresence(spans: AnalyticsSpan[], ids: Set<string>, t: number): number | null {
+  const covered = spans.some((s) => {
+    if (!ids.has(s.machine)) return false;
+    const a = Date.parse(s.start), b = Date.parse(s.end);
+    return t >= a && (t < b || (s.open && t <= b));
+  });
+  return covered ? presentAt(spans, ids, t) : null;
 }
 
 /** How many of `ids` a device span shows online or 停领 at `t` (unrecorded time counts as neither). */
@@ -243,7 +262,10 @@ export interface KpiFigures {
   lead: number[]; prevLeadAvg: number | null; // hours
   restore: number[]; restore4k: number[]; restore1080: number[]; prevRestoreAvg: number | null;
   ctrlRestored: boolean; // 本机 restored a film in range (D11)
-  energy: number; prevEnergy: number | null; energyPerFilm: number | null; // kWh, estimated
+  // kWh, estimated, over films with a reading only (energyReading); prevEnergy is null unless both
+  // periods are fully measured, so a missing reading never reads as a reduction
+  energy: number; prevEnergy: number | null; energyPerFilm: number | null;
+  energyMeasured: number; energyMissing: number;
   fails: number; warns: number; failRate: number | null; prevFailRate: number | null;
 }
 /** Restore hours of `films`; under the 本机 filter only the films 本机 itself restored (D11). */
@@ -258,7 +280,9 @@ export function kpiFigures(A: Analysis): KpiFigures {
   const { cur, prev, ctrl } = A;
   const restoreH = (fs: AnalyticsFilm[]) => restoreHours(A, fs);
   const leadH = leadHours;
-  const kwh = (fs: AnalyticsFilm[]) => sum(fs.map((f) => filmKwh(f, ctrl)));
+  const en = energyReading(cur, ctrl);
+  const enPrev = prev ? energyReading(prev, ctrl) : null;
+  const comparable = en.missing === 0 && en.kwh !== null && enPrev !== null && enPrev.missing === 0 && enPrev.kwh !== null;
   const fails = A.failures.filter(isFail).length;
   const prevFails = A.failuresPrev ? A.failuresPrev.filter(isFail).length : null;
   return {
@@ -272,8 +296,9 @@ export function kpiFigures(A: Analysis): KpiFigures {
     restore1080: restoreH(cur.filter((f) => f.res === "1080p")),
     prevRestoreAvg: prev ? avg(restoreH(prev)) : null,
     ctrlRestored: A.controller !== null && cur.some((f) => f.worker === A.controller!.id),
-    energy: kwh(cur), prevEnergy: prev ? kwh(prev) : null,
-    energyPerFilm: cur.length ? kwh(cur) / cur.length : null,
+    energy: en.kwh ?? 0, prevEnergy: comparable ? enPrev.kwh : null,
+    energyPerFilm: en.kwh !== null ? en.kwh / en.measured : null,
+    energyMeasured: en.measured, energyMissing: en.missing,
     fails, warns: A.failures.length - fails,
     failRate: failureRate(fails, cur.length),
     prevFailRate: prev && prevFails !== null ? failureRate(prevFails, prev.length) : null,

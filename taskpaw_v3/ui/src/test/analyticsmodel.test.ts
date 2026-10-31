@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 import type { AnalyticsFailure, AnalyticsFilm, AnalyticsMachine, WorkflowAnalytics } from "../api";
 import {
-  bucketIndex, bucketTitle, bucketize, compute, delta, isNewMachine, kpiFigures, machineGroups, prevBucketIndex, presentAt,
+  bucketIndex, bucketTitle, bucketize, compute, delta, energyReading, isNewMachine, kpiFigures, machineGroups, prevBucketIndex, presentAt,
+  recordedPresence,
   querySince, rangeDef, sliceValues, stats, type Filters,
 } from "../components/media/analytics/analyticsModel";
 
@@ -303,5 +304,58 @@ describe("device presence", () => {
     expect(presentAt(spans, ids, local(2026, 10, 31, 12))).toBe(1);
     expect(presentAt(spans, ids, local(2026, 10, 31, 14, 19))).toBe(1);
     expect(presentAt(spans, ids, local(2026, 10, 29))).toBe(0);
+  });
+});
+
+describe("energy readings (C3-X2): a film without energy evidence is not 0 kWh", () => {
+  const cover = local(2026, 10, 10, 9);
+  const R = rangeDef("7d", NOW, cover);
+  const none = { restore_wh: [] as AnalyticsFilm["restore_wh"], controller_wh: null };
+  const measured = [
+    film(local(2026, 10, 27, 10), { restore_wh: [["gpu-a", 1000, 7200]], controller_wh: 100 }),
+    film(local(2026, 10, 28, 10), { restore_wh: [], controller_wh: 60 }), // post-processing only: still a reading
+  ];
+  const prevWeek = [film(local(2026, 10, 20, 10), { restore_wh: [["gpu-a", 900, 7200]], controller_wh: 100 })];
+
+  it("sums and averages measured films only and counts the missing ones", () => {
+    const fs = [...measured, film(local(2026, 10, 29, 10), none), film(local(2026, 10, 30, 10), none)];
+    const all = energyReading(fs, false), ctrl = energyReading(fs, true);
+    expect([all.measured, all.missing, ctrl.measured, ctrl.missing]).toEqual([2, 2, 2, 2]);
+    expect(all.kwh).toBeCloseTo((1000 + 100 + 60) / 1000, 9);
+    expect(ctrl.kwh).toBeCloseTo(0.16, 9);
+    expect(energyReading([film(local(2026, 10, 29, 10), none)], false)).toEqual({ kwh: null, measured: 0, missing: 1 });
+    expect(energyReading([], false)).toEqual({ kwh: null, measured: 0, missing: 0 });
+  });
+
+  it("the KPI averages over measured films and compares only fully measured periods", () => {
+    const d = (films: AnalyticsFilm[]) => data({ films, coverage: { archives: iso(cover), energy: null, cues: null, devices: null, outages: null } });
+    const partial = kpiFigures(compute(d([...measured, film(local(2026, 10, 29, 10), none), ...prevWeek]), R, F, NOW));
+    expect(partial.energy).toBeCloseTo(1.16, 6);
+    expect(partial.energyPerFilm).toBeCloseTo(0.58, 6);
+    expect([partial.energyMeasured, partial.energyMissing]).toEqual([2, 1]);
+    expect(partial.prevEnergy).toBeNull(); // current period is partly unmeasured: no delta
+    const full = kpiFigures(compute(d([...measured, ...prevWeek]), R, F, NOW));
+    expect(full.prevEnergy).toBeCloseTo(1.0, 6);
+    const prevGap = kpiFigures(compute(d([...measured, ...prevWeek, film(local(2026, 10, 21, 10), none)]), R, F, NOW));
+    expect(prevGap.prevEnergy).toBeNull();
+  });
+});
+
+describe("recorded presence (C3-X3): no record is null, never 0 online", () => {
+  const span = (machine: string, state: "online" | "paused" | "offline", s: number, e: number, open = false) =>
+    ({ machine, state, reason: "" as const, start: iso(s), end: iso(e), open });
+  const spans = [
+    span("a", "online", local(2026, 10, 30), local(2026, 10, 30, 15)),
+    span("a", "online", local(2026, 10, 30, 16, 30), local(2026, 10, 31, 13, 59), true),
+    span("b", "offline", local(2026, 10, 30), local(2026, 10, 30, 15)),
+  ];
+  const ids = new Set(["a", "b"]);
+  it("counts within recorded time, null in a gap, before the first span and after the last tick", () => {
+    expect(recordedPresence(spans, ids, local(2026, 10, 30, 12))).toBe(1);
+    expect(recordedPresence(spans, ids, local(2026, 10, 30, 15, 30))).toBeNull();
+    expect(recordedPresence(spans, ids, local(2026, 10, 29, 12))).toBeNull();
+    expect(recordedPresence(spans, ids, local(2026, 10, 31, 13, 59))).toBe(1);
+    expect(recordedPresence(spans, ids, local(2026, 10, 31, 14, 10))).toBeNull();
+    expect(recordedPresence([span("b", "offline", local(2026, 10, 30), local(2026, 10, 31))], ids, local(2026, 10, 30, 12))).toBe(0);
   });
 });

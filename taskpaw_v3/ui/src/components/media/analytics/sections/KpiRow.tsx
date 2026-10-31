@@ -8,8 +8,8 @@ import { Icon } from "../../parts";
 import { EstimateChip, KpiTile } from "../AnalyticsParts";
 import { fH, fKwh, HOUR, n1, fInt } from "../analyticsFormat";
 import {
-  amax, amin, avg, delta, failureRate, failureTime, filmKwh, filmsIn, isFail, isNewMachine, kpiFigures, leadHours, presentAt,
-  restoreHours, sliceLabels, sliceValues, sum, type Analysis,
+  amax, amin, avg, delta, energyReading, failureRate, failureTime, filmsIn, isFail, isNewMachine, kpiFigures, leadHours, recordedPresence,
+  restoreHours, sliceLabels, sliceValues, type Analysis,
 } from "../analyticsModel";
 
 const STATE_TEXT: Record<AnalyticsMachineState, string> = { online: "在线", paused: "停领", offline: "离线", unknown: "确认中", off: "未启用" };
@@ -38,9 +38,11 @@ export function KpiRow({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
         : <KpiTile label="平均修复时长" value={n1(restoreAvg)} unit="小时" delta={d(restoreAvg, k.prevRestoreAvg, "down")}
           note={`4K ${fH(avg(k.restore4k))} · 1080P ${fH(avg(k.restore1080))}`}
           spark={spark((s, e) => avg(restoreHours(A, inSlice(s, e))), fH)} />}
-      <KpiTile label="总用电" tag={<EstimateChip />} value={fKwh(k.energy)} unit="kWh" delta={d(k.energy, k.prevEnergy, "none")}
-        note={`每片平均 ${fKwh(k.energyPerFilm)} kWh`}
-        spark={spark((s, e) => sum(inSlice(s, e).map((f) => filmKwh(f, A.ctrl))), (v) => `${fKwh(v)} kWh`)} />
+      <KpiTile label="总用电" tag={<><EstimateChip />{k.energyMissing > 0 && k.energyMeasured > 0 && <span className="chip tag amber" title="部分影片没有用电记录，只合计有记录的影片">部分</span>}</>}
+        value={k.energyMeasured ? fKwh(k.energy) : "—"} unit={k.energyMeasured ? "kWh" : undefined}
+        delta={d(k.energyMeasured ? k.energy : null, k.prevEnergy, "none")}
+        note={[k.energyMeasured ? `每片平均 ${fKwh(k.energyPerFilm)} kWh` : null, k.energyMissing ? `${k.energyMissing} 部无用电记录` : null].filter(Boolean).join(" · ")}
+        spark={spark((s, e) => energyReading(inSlice(s, e), A.ctrl).kwh, (v) => `${fKwh(v)} kWh`)} />
       <KpiTile label="失败率" value={k.failRate === null ? "—" : n1(k.failRate)} unit={k.failRate === null ? undefined : "%"}
         delta={d(k.failRate, k.prevFailRate, "down", true)} note={`失败 ${k.fails} 次 · 警告 ${k.warns} 次`}
         spark={spark((s, e) => failureRate(fails.filter((f) => failureTime(f) >= s && failureTime(f) < e).length, inSlice(s, e).length),
@@ -69,7 +71,10 @@ function GpuTile({ data, A }: { data: WorkflowAnalytics; A: Analysis }) {
   // the spark counts machines a device span shows online or 停领, only where device history covers
   const devices = data.coverage.devices ? Date.parse(data.coverage.devices) : null;
   const ids = new Set(live.map((m) => m.id));
-  const vals = A.slices.map(([, e]) => (!data.devices.available || devices === null || e <= devices ? null : presentAt(data.devices.spans, ids, e - 1)));
+  // unrecorded instants are null (无记录), never 0; the latest point is the live snapshot (state_now),
+  // since the last recorded tick is always a little older than the page's clock
+  const vals = A.slices.map(([, e], i) => (i === A.slices.length - 1 ? present.length
+    : !data.devices.available || devices === null || e <= devices ? null : recordedPresence(data.devices.spans, ids, e - 1)));
   return (
     <KpiTile label="GPU 在线" value={live.length === 1 ? STATE_TEXT[live[0].state_now] : `${present.length} / ${live.length}`}
       delta={<FlatLine icon={CheckCircleOutlineIcon} text={`可领取 ${available.length} 台`} />} note={note}

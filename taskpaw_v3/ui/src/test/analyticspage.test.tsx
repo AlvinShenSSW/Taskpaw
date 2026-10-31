@@ -180,6 +180,37 @@ describe("数据分析 page", () => {
   });
 });
 
+describe("KPI honesty (Codex r1)", () => {
+  it("总用电 sums measured films only, marks 「部分」 with the missing count and does not compare (C3-X2)", async () => {
+    const at = ["2026-10-30T01:00:00Z", "2026-10-30T02:00:00Z"];
+    const unmeasured = at.map((t, i) => ({ ...FIXTURE.films[FIXTURE.films.length - 1], code: `ZZN-90${i}`, archived_at: t,
+      restore_wh: [] as WorkflowAnalytics["films"][number]["restore_wh"], controller_wh: null }));
+    const films = [...FIXTURE.films, ...unmeasured].sort((a, b) => a.archived_at.localeCompare(b.archived_at));
+    mount({ ...FIXTURE, films });
+    await screen.findByRole("group", { name: /^完成影片/ });
+    const measured = FIXTURE.films.filter((f) => in7d(f.archived_at));
+    const kwh = measured.reduce((a, f) => a + f.restore_wh.reduce((x, e) => x + e[1], 0) + (f.controller_wh ?? 0), 0) / 1000;
+    const energy = tile("总用电");
+    expect(energy).toHaveTextContent(`${kwh >= 10 ? (Math.round(kwh * 10) / 10).toFixed(1) : kwh.toFixed(2)}kWh`);
+    expect(within(energy).getByText("部分")).toBeInTheDocument();
+    expect(energy).toHaveTextContent("2 部无用电记录");
+    expect(energy).toHaveTextContent(`每片平均 ${(kwh / measured.length).toFixed(2)} kWh`);
+    expect(within(energy).getByText("上一周期无可比数据")).toBeInTheDocument();
+    expect(within(tile("完成影片")).queryByText("部分")).toBeNull();
+  });
+
+  it("the GPU spark's latest point is the live state, not a drop past the last recorded tick (C3-X3)", async () => {
+    mount();
+    await screen.findByRole("group", { name: /^完成影片/ });
+    const hits = tile("GPU 在线").querySelectorAll(".spark-hit");
+    expect(hits).toHaveLength(12);
+    fireEvent.pointerEnter(hits[11], { clientX: 5, clientY: 5 });
+    expect(screen.getByRole("tooltip")).toHaveTextContent("4 台在线");
+    fireEvent.pointerEnter(hits[0], { clientX: 5, clientY: 5 }); // before device history began
+    expect(screen.getByRole("tooltip")).toHaveTextContent("无记录");
+  });
+});
+
 describe("数据分析 states", () => {
   it("503: 媒体流水线未运行 with the backend reason", async () => {
     mount(new HttpError("工作流未启用", 503));
