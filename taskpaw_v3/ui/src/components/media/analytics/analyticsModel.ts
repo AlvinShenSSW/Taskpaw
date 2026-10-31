@@ -14,6 +14,16 @@ export const RANGES: ReadonlyArray<readonly [RangeKey, string]> = [
   ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"], ["90d", "90 天"], ["all", "全部"],
 ];
 export const RESOLUTIONS: ReadonlyArray<readonly [ResFilter, string]> = [["all", "全部"], ["4K", "4K"], ["1080p", "1080P"]];
+// Resolution series of every per-resolution chart: 4K = --c1 blue, 1080P = --c2 orange (OD7); films whose
+// input probes gave no resolution (§7 `res: null`) only show when there are some.
+export interface ResSeries { key: string; label: string; color: string; res: AnalyticsFilm["res"] }
+const RES_SERIES: ResSeries[] = [
+  { key: "4K", label: "4K", color: "var(--c1)", res: "4K" },
+  { key: "1080p", label: "1080P", color: "var(--c2)", res: "1080p" },
+  { key: "none", label: "未知分辨率", color: "var(--c-queue)", res: null },
+];
+export const shownResSeries = (res: ResFilter, films: AnalyticsFilm[]) =>
+  RES_SERIES.filter((s) => (res === "all" ? s.res !== null || films.some((f) => f.res === null) : s.res === res));
 const RANGE_NAME: Record<RangeKey, string> = { "24h": "过去 24 小时", "7d": "过去 7 天", "30d": "过去 30 天", "90d": "过去 90 天", all: "全部记录" };
 const UNIT: Record<BucketKind, string> = { h: "每小时", d: "每天", w: "每周", m: "每月" };
 
@@ -132,7 +142,9 @@ export interface Analysis {
   cover: number | null; // coverage.archives
   controller: AnalyticsMachine | null;
   ctrl: boolean; // the 本机 filter
+  machine: string; // the machine filter: ALL_MACHINES, a GPU worker id or the controller id
   cur: AnalyticsFilm[];
+  rangeFilms: AnalyticsFilm[]; // films in range of the resolution filter on every machine (energy attribution)
   prev: AnalyticsFilm[] | null; // null when the previous period is not covered
   prevOk: boolean;
   prevPartial: boolean; // the previous period starts before coverage.archives but overlaps it
@@ -173,6 +185,8 @@ export function compute(data: WorkflowAnalytics, R: RangeDef, filters: Filters, 
   const pool = data.films.filter((f) => resOk(f.res) && (all || ctrl || f.worker === filters.machine)
     && (cover === null || filmTime(f) >= cover));
   const cur = pool.filter((f) => within(filmTime(f), R.start, R.end));
+  const rangeFilms = all || ctrl ? cur : data.films.filter((f) => resOk(f.res) && within(filmTime(f), R.start, R.end)
+    && (cover === null || filmTime(f) >= cover));
   const prevOk = R.hasPrev && cover !== null && R.prevStart >= cover;
   const prevPartial = R.hasPrev && cover !== null && !prevOk && R.prevEnd > cover;
   const prev = prevOk ? pool.filter((f) => within(filmTime(f), R.prevStart, R.prevEnd)) : null;
@@ -189,8 +203,8 @@ export function compute(data: WorkflowAnalytics, R: RangeDef, filters: Filters, 
   const gpus = data.machines.filter((m) => m.kind === "gpu");
   const fleet = ctrl ? [] : all ? gpus.filter((m) => !m.retired) : gpus.filter((m) => m.id === filters.machine);
   return {
-    R, now, cover, controller, ctrl, cur, prev, prevOk, prevPartial, failures, failuresPrev, visStart, visEnd, slices, uncov,
-    coverDays: cover === null ? 0 : Math.ceil((now - cover) / DAY), fleet,
+    R, now, cover, controller, ctrl, machine: filters.machine, cur, rangeFilms, prev, prevOk, prevPartial, failures, failuresPrev,
+    visStart, visEnd, slices, uncov, coverDays: cover === null ? 0 : Math.ceil((now - cover) / DAY), fleet,
   };
 }
 
@@ -353,4 +367,234 @@ export function machineName(data: WorkflowAnalytics, id: string): string {
   if (id === ALL_MACHINES) return "全部 GPU 机器";
   const m = data.machines.find((x) => x.id === id);
   return !m ? id : m.kind === "controller" ? "本机" : m.name;
+}
+
+// ---- 各 GPU 机器 (§8.4 item 3; C4 AC1, AC2) ----
+/** What a machine's chip says: 已退休, else the live state, with 新加入 (D14) in place of 在线 / 确认中 / 未启用. */
+export type MachineStateKey = "online" | "paused" | "new" | "unknown" | "off" | "offline" | "retired";
+export const MACHINE_STATE_TEXT: Record<MachineStateKey, string> = {
+  online: "在线", paused: "停领", offline: "离线", new: "新加入", retired: "已退休", unknown: "确认中", off: "未启用",
+};
+/** What a 停领 is: the reason codes of §7 `state_reason` (§6.2). */
+export const PAUSE_REASON_TEXT: Record<AnalyticsMachine["state_reason"], string> = {
+  "": "停领", admission: "主控停领", worker: "工作机暂停领取", global: "主控暂停新领取", version: "版本不兼容",
+};
+export function machineStateKey(m: AnalyticsMachine, isNew: boolean): MachineStateKey {
+  if (m.retired) return "retired";
+  if (m.state_now === "offline" || m.state_now === "paused") return m.state_now;
+  return isNew ? "new" : m.state_now;
+}
+
+export interface MachineRow {
+  m: AnalyticsMachine;
+  isNew: boolean;
+  state: MachineStateKey;
+  films: AnalyticsFilm[]; // films this machine restored, archived in range
+  n4: number; n1: number; nNone: number; total: number;
+  a4: number | null; a1: number | null; min: number | null; max: number | null; // restore hours
+  power: number | null; // W: Σwh × 3600 ÷ Σseconds over its restore_wh entries (§7.1)
+  kwh: number; // its restore_wh entries, failed attempts on any film included
+  fails: number; // severity fail only
+  eff: number | null; // restore hours per hour of film
+  days: number; // online (+ 停领) days when device history covers the range, else calendar days present
+}
+
+/** Device history covers the range: recorded and available from before the range's effective start. */
+export function devicesCoverRange(data: WorkflowAnalytics, A: Analysis): boolean {
+  return data.devices.available && data.coverage.devices !== null && Date.parse(data.coverage.devices) <= A.visStart;
+}
+
+/** A machine's days in range for 各机型实测产能: online + 停领 span time when `covered`, else time since it joined. */
+export function machineDays(data: WorkflowAnalytics, A: Analysis, m: AnalyticsMachine, covered: boolean): number {
+  const s = A.visStart, e = A.visEnd;
+  if (!covered) return Math.max(0, e - Math.max(s, m.first_seen ? Date.parse(m.first_seen) : s)) / DAY;
+  let ms = 0;
+  for (const sp of data.devices.spans) {
+    if (sp.machine !== m.id || sp.state === "offline") continue;
+    const a = Math.max(s, Date.parse(sp.start)), b = Math.min(e, sp.open ? A.now : Date.parse(sp.end));
+    if (b > a) ms += b - a;
+  }
+  return ms / DAY;
+}
+
+/**
+ * The machine table's rows: the GPU fleet in scope, retired GPU machines with data in range, and 本机 only when
+ * it restored a film in range (D11). Under the 本机 filter that is 本机 alone, or nothing.
+ */
+export function machineRows(data: WorkflowAnalytics, A: Analysis): MachineRow[] {
+  const ctrlId = A.controller?.id;
+  const ctrlRestored = ctrlId !== undefined && A.cur.some((f) => f.worker === ctrlId);
+  let ms: AnalyticsMachine[];
+  if (A.ctrl) ms = ctrlRestored ? [A.controller!] : [];
+  else if (A.machine !== ALL_MACHINES) ms = A.fleet;
+  else {
+    // retired machines exactly as the machine select lists them (data in range), so a row click always filters
+    const listed = new Set(machineGroups(data, A.R, A.now).flatMap((g) => g.options.map((o) => o.id)));
+    const retired = data.machines.filter((m) => m.kind === "gpu" && m.retired && listed.has(m.id));
+    ms = [...A.fleet, ...retired, ...(ctrlRestored ? [A.controller!] : [])];
+  }
+  const covered = devicesCoverRange(data, A);
+  const restoreH = (fs: AnalyticsFilm[]) => nums(fs.map((f) => hours(f.restore_s)));
+  return ms.map((m) => {
+    const films = A.cur.filter((f) => f.worker === m.id);
+    const all = restoreH(films);
+    let wh = 0, secs = 0;
+    for (const f of A.rangeFilms) for (const [w, e, s] of f.restore_wh) if (w === m.id) { wh += e; secs += s; }
+    const timed = films.filter((f) => f.restore_s != null && f.duration_s);
+    const filmH = sum(timed.map((f) => f.duration_s! / 3600));
+    const isNew = isNewMachine(m, A.R, A.now);
+    return {
+      m, isNew, state: machineStateKey(m, isNew), films,
+      n4: films.filter((f) => f.res === "4K").length, n1: films.filter((f) => f.res === "1080p").length,
+      nNone: films.filter((f) => f.res === null).length, total: films.length,
+      a4: avg(restoreH(films.filter((f) => f.res === "4K"))), a1: avg(restoreH(films.filter((f) => f.res === "1080p"))),
+      min: amin(all), max: amax(all),
+      power: secs > 0 ? (wh * 3600) / secs : null, kwh: wh / 1000,
+      fails: A.failures.filter((f) => f.machine === m.id && isFail(f)).length,
+      eff: filmH > 0 ? sum(timed.map((f) => f.restore_s! / 3600)) / filmH : null,
+      days: machineDays(data, A, m, covered),
+    };
+  });
+}
+
+export interface ModelGroup { model: string; rows: MachineRow[] }
+/** Rows grouped by GPU model (the latest probe, D11); unprobed machines, then 本机's group, last. */
+export function modelGroups(rows: MachineRow[]): ModelGroup[] {
+  const by = new Map<string, MachineRow[]>();
+  for (const r of rows) { const k = r.m.model ?? UNPROBED; by.set(k, [...(by.get(k) ?? []), r]); }
+  const rank = ([k, rs]: [string, MachineRow[]]) => (rs.some((r) => r.m.kind === "controller") ? 2 : k === UNPROBED ? 1 : 0);
+  return [...by.entries()].sort((a, b) => rank(a) - rank(b) || a[0].localeCompare(b[0])).map(([model, rs]) => ({ model, rows: rs }));
+}
+/** The same-model average films per machine; 新加入 machines (D14) are left out; null below two machines. */
+export function modelAverage(g: ModelGroup): number | null {
+  const w = g.rows.filter((r) => !r.isNew);
+  return w.length > 1 ? avg(w.map((r) => r.total)) : null;
+}
+
+export type MachineSortKey = "name" | "st" | "total" | "a4" | "a1" | "min" | "power" | "kwh" | "fails" | "eff";
+export interface MachineSort { key: MachineSortKey | "model"; dir: 1 | -1 }
+const STATE_ORDER: Record<MachineStateKey, number> = { online: 0, paused: 1, new: 2, unknown: 3, off: 4, offline: 5, retired: 6 };
+/** Preview `sortRows`: "model" (the default) and "name" sort by name; empty values sort last either way. */
+export function sortMachineRows(rows: MachineRow[], sort: MachineSort): MachineRow[] {
+  const val = (r: MachineRow): string | number | null =>
+    sort.key === "model" || sort.key === "name" ? r.m.name : sort.key === "st" ? STATE_ORDER[r.state] : r[sort.key];
+  return [...rows].sort((a, b) => {
+    const x = val(a), y = val(b);
+    if (x == null || y == null) return x == null && y == null ? 0 : x == null ? 1 : -1;
+    const c = typeof x === "string" ? x.localeCompare(y as string) : x - (y as number);
+    return c * sort.dir || a.m.name.localeCompare(b.m.name);
+  });
+}
+
+export interface ModelThroughput {
+  model: string; count: number; newCount: number; days: number;
+  p4: number | null; p1: number | null; pt: number | null; // films per machine per (online) day
+  a4: number | null; a1: number | null; // restore hours
+}
+/** 各机型实测产能: every machine of a model, 新加入 included (D14), normalised by its days in range. */
+export function modelThroughput(groups: ModelGroup[]): ModelThroughput[] {
+  return groups.map((g) => {
+    const days = sum(g.rows.map((r) => r.days));
+    const per = (n: number) => (days > 0 ? n / days : null);
+    const films = g.rows.flatMap((r) => r.films);
+    const h = (res: AnalyticsFilm["res"]) => avg(nums(films.filter((f) => f.res === res).map((f) => hours(f.restore_s))));
+    return {
+      model: g.model, count: g.rows.length, newCount: g.rows.filter((r) => r.isNew).length, days,
+      p4: per(sum(g.rows.map((r) => r.n4))), p1: per(sum(g.rows.map((r) => r.n1))), pt: per(sum(g.rows.map((r) => r.total))),
+      a4: h("4K"), a1: h("1080p"),
+    };
+  });
+}
+
+// ---- 本机（主控）处理 (§8.4 item 4; C4 AC3) ----
+export interface StageFigure { n: number; avg: number | null; max: number | null } // minutes
+export interface ControllerFigures {
+  asr: StageFigure; translate: StageFigure; scrape: StageFigure; archive: StageFigure;
+  translated: number;
+  cues: number | null; // line total of translated films; null before any line count was recorded
+  cuesSince: number | null; // coverage.cues when it falls inside the range (「自 MM-DD 起统计行数」)
+  reusedZh: number; noSpeech: number; // films with ASR decision reused_zh / no_speech > 0 (§7.1)
+  targets: { performer: number; category: number; new_actor: number; manual: number; second: number };
+}
+const minutesOf = (vals: Array<number | null>) => nums(vals.map((s) => (s == null ? null : s / 60)));
+const stage = (mins: number[], n = mins.length): StageFigure => ({ n, avg: avg(mins), max: amax(mins) });
+
+export function controllerFigures(data: WorkflowAnalytics, A: Analysis): ControllerFigures {
+  const c = A.cur, tr = c.filter((f) => f.translated);
+  const cuesCover = data.coverage.cues ? Date.parse(data.coverage.cues) : null;
+  const count = (k: AnalyticsFilm["target"]) => c.filter((f) => f.target === k).length;
+  return {
+    asr: stage(minutesOf(c.map((f) => f.asr_s))),
+    translate: stage(minutesOf(tr.map((f) => f.translate_s)), tr.length),
+    scrape: stage(minutesOf(c.map((f) => f.scrape_s))),
+    archive: stage(minutesOf(c.map((f) => f.archive_s)), c.length), // every film here was archived
+    translated: tr.length,
+    cues: cuesCover === null ? null : sum(tr.map((f) => f.cues ?? 0)),
+    cuesSince: cuesCover !== null && cuesCover > A.visStart ? cuesCover : null,
+    reusedZh: c.filter((f) => (f.subtitles.reused_zh ?? 0) > 0).length,
+    noSpeech: c.filter((f) => (f.subtitles.no_speech ?? 0) > 0).length,
+    targets: {
+      performer: count("performer"), category: count("category"), new_actor: count("new_actor"), manual: count("manual"),
+      second: c.filter((f) => f.second).length,
+    },
+  };
+}
+
+export interface OutageItem { start: number; s: number; e: number; ms: number; open: boolean; paused: boolean }
+export interface OutageFigures {
+  items: OutageItem[]; // overlapping the range; s/e clipped to it, ms the whole outage (an open one up to now)
+  totalMs: number; longestMs: number;
+  since: number | null; // coverage.outages when the range starts before it (「翻译服务中断记录从 MM-DD 起」)
+  uncovUntil: number | null; // the grey band runs from the range start to here; the range end without any record
+}
+/** 翻译服务中断 (D7): the task-log outages, covered from coverage.outages (the oldest day scanned). */
+export function outageFigures(data: WorkflowAnalytics, A: Analysis): OutageFigures {
+  const R = A.R, cover = data.coverage.outages ? Date.parse(data.coverage.outages) : null;
+  const items: OutageItem[] = [];
+  if (cover !== null) {
+    for (const o of data.outages) {
+      const start = Date.parse(o.start), end = o.end ? Date.parse(o.end) : A.now;
+      if (end <= R.start || start >= Math.min(R.end, A.now)) continue;
+      items.push({ start, s: Math.max(start, R.start), e: Math.min(end, R.end), ms: end - start, open: o.end === null, paused: o.paused });
+    }
+  }
+  const late = cover !== null && cover > R.start;
+  return {
+    items, totalMs: sum(items.map((i) => i.ms)), longestMs: amax(items.map((i) => i.ms)) ?? 0,
+    since: late ? cover : null, uncovUntil: cover === null ? R.end : late ? cover : null,
+  };
+}
+
+// ---- 耗时分布 (§8.4 item 5; C4 AC4) ----
+export interface DurationRow { key: string; label: string; st: Stats | null }
+export interface ShareStage { key: "queue" | "restore" | "asr" | "translate" | "scrape" | "archive"; label: string; hours: number }
+export interface DurationFigures { hours: DurationRow[]; minutes: DurationRow[]; share: ShareStage[] }
+/**
+ * Stage durations of the films in range. A stage a film did not have (null) is left out, never 0 (§7.1);
+ * restore follows the 本机 rule of `restoreHours`. The share is each stage's average in hours.
+ */
+export function durationFigures(A: Analysis): DurationFigures {
+  const c = A.cur, tr = c.filter((f) => f.translated);
+  const queue = nums(c.map((f) => hours(f.queue_s))), lead = leadHours(c);
+  const r4 = restoreHours(A, c.filter((f) => f.res === "4K")), r1 = restoreHours(A, c.filter((f) => f.res === "1080p"));
+  const hoursRows: DurationRow[] = [{ key: "queue", label: "排队等待", st: stats(queue) }];
+  if (r4.length) hoursRows.push({ key: "restore4k", label: "修复 4K", st: stats(r4) });
+  if (r1.length) hoursRows.push({ key: "restore1080", label: "修复 1080P", st: stats(r1) });
+  hoursRows.push({ key: "lead", label: "全程", st: stats(lead) });
+  const asr = minutesOf(c.map((f) => f.asr_s)), trans = minutesOf(tr.map((f) => f.translate_s));
+  const scrape = minutesOf(c.map((f) => f.scrape_s)), archive = minutesOf(c.map((f) => f.archive_s));
+  const h = (mins: number[]) => (avg(mins) ?? 0) / 60;
+  return {
+    hours: hoursRows,
+    minutes: [
+      { key: "asr", label: "ASR", st: stats(asr) }, { key: "translate", label: "翻译", st: stats(trans) },
+      { key: "scrape", label: "刮削", st: stats(scrape) }, { key: "archive", label: "归档", st: stats(archive) },
+    ],
+    share: [
+      { key: "queue", label: "排队等待", hours: avg(queue) ?? 0 },
+      { key: "restore", label: "修复（LTX）", hours: avg(restoreHours(A, c)) ?? 0 },
+      { key: "asr", label: "ASR", hours: h(asr) }, { key: "translate", label: "翻译", hours: h(trans) },
+      { key: "scrape", label: "刮削", hours: h(scrape) }, { key: "archive", label: "归档", hours: h(archive) },
+    ],
+  };
 }

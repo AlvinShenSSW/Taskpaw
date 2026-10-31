@@ -23,6 +23,9 @@ export const fH = (h: number | null | undefined) => (!finite(h) ? "—" : h < 1 
 /** Minutes: 「40 秒」 / 「4.5 分」 / 「12 分」. */
 export const fMin = (m: number | null | undefined) =>
   (!finite(m) ? "—" : m < 1 ? `${Math.round(m * 60)} 秒` : m < 10 ? `${n1(m)} 分` : `${Math.round(m)} 分`);
+/** Hours shown in the unit that suits them: 「40 秒」 / 「12 分」 / 「3.2 小时」. */
+export const fAutoH = (h: number | null | undefined) =>
+  (!finite(h) ? "—" : h < 1 / 60 ? `${Math.round(h * 3600)} 秒` : h < 1 ? fMin(h * 60) : fH(h));
 export const fSpan = (ms: number) => {
   const m = Math.round(ms / MIN);
   if (m < 60) return `${m} 分钟`;

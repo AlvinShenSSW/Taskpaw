@@ -93,3 +93,15 @@ export const linePath = (pts: Array<[number, number] | null>) => {
   }
   return d;
 };
+/** A horizontal bar with rounded right corners. */
+export const barPath = (x: number, y: number, w: number, h: number) => {
+  const r = Math.min(4, h / 2, w);
+  return `M${x},${y}H${x + w - r}A${r},${r} 0 0 1 ${x + w},${y + r}V${y + h - r}A${r},${r} 0 0 1 ${x + w - r},${y + h}H${x}Z`;
+};
+/** Time-axis labels at least `minGap` px apart, left to right (preview `timeTicks`). */
+export function thinTicks<T extends { px: number }>(ticks: T[], minGap = 58): T[] {
+  const out: T[] = [];
+  let last = -Infinity;
+  for (const t of ticks) if (t.px - last >= minGap) { out.push(t); last = t.px; }
+  return out;
+}

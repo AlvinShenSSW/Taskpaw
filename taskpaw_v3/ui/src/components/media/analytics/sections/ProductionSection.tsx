@@ -1,21 +1,12 @@
 // 产量趋势 (EPIC 2026-10-31 §8.4 item 2): films archived per bucket, stacked by resolution, with the
 // previous-period line (对比上一周期), the max label, the uncovered band, a tooltip and a table view.
-import type { AnalyticsFilm } from "../../../../api";
 import { AnalyticsPanel, DataTable, Legend } from "../AnalyticsParts";
-import { bucketize, bucketShort, bucketTitle, type Analysis, type ResFilter } from "../analyticsModel";
+import { bucketize, bucketShort, bucketTitle, shownResSeries, type Analysis, type ResFilter } from "../analyticsModel";
 import { ColumnChart, type ColumnSeries, type TipContent } from "../charts";
-
-const RES_SERIES: Array<{ key: string; label: string; color: string; res: AnalyticsFilm["res"] }> = [
-  { key: "4K", label: "4K", color: "var(--c1)", res: "4K" },
-  { key: "1080p", label: "1080P", color: "var(--c2)", res: "1080p" },
-  // films whose input probes gave no resolution (§7 `res: null`); only shown when there are some
-  { key: "none", label: "未知分辨率", color: "var(--c-queue)", res: null },
-];
 
 export function ProductionSection({ A, res, compare }: { A: Analysis; res: ResFilter; compare: boolean }) {
   const R = A.R;
-  const series: ColumnSeries[] = RES_SERIES
-    .filter((s) => (res === "all" ? s.res !== null || A.cur.some((f) => f.res === null) : s.res === res))
+  const series: ColumnSeries[] = shownResSeries(res, A.cur)
     .map((s) => ({ key: s.key, label: s.label, color: s.color, vals: bucketize(A, A.cur.filter((f) => f.res === s.res)) }));
   const prev = compare && A.prevOk && A.prev ? bucketize(A, A.prev, undefined, true) : null;
   const total = (i: number) => series.reduce((a, s) => a + s.vals[i], 0);

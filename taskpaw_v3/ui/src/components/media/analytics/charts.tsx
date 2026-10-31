@@ -1,12 +1,15 @@
 // Hand-rolled SVG chart primitives of the 数据分析 page (EPIC 2026-10-31 §8.2, OD5: no chart library),
 // ported from the approved preview. Every chart: role="img" + aria-label, one focusable item in the tab
 // order with arrow / Home / End roving, and one shared tooltip that follows the pointer and the focus
-// (Escape hides it). C4/C5 add HBarChart, RangeChart, ShareBar, StripChart and LaneChart beside these,
-// reusing chartKit (useChartWidth, useRoving, tipHandlers, niceTicks, the path helpers).
+// (Escape hides it). C5 adds LaneChart beside these, reusing chartKit (useChartWidth, useRoving,
+// tipHandlers, niceTicks, the path helpers).
+import type { SvgIconComponent } from "@mui/icons-material";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { tickFmt } from "./analyticsFormat";
+import type { Stats } from "./analyticsModel";
 import {
-  colPath, linePath, niceTicks, tipHandlers, TipContext, useChartTip, useChartWidth, useRoving, type ChartTip, type TipContent,
+  barPath, colPath, linePath, niceTicks, thinTicks, tipHandlers, TipContext, useChartTip, useChartWidth, useRoving, type ChartTip,
+  type TipContent,
 } from "./chartKit";
 
 export type { TipContent, TipRow } from "./chartKit";
@@ -169,5 +172,217 @@ export function Sparkline({ vals, labels, fmt, height = 34 }: SparklineProps) {
         </svg>
       )}
     </div>
+  );
+}
+
+// ---- HBarChart: labelled horizontal bars, optional stacking, value text and a leading icon ----
+export interface HBarSeg { v: number; color: string }
+export interface HBarRow {
+  key: string;
+  label: string;
+  segs: HBarSeg[];
+  value?: string | null; // text after the bar
+  tip?: () => TipContent;
+  icon?: SvgIconComponent; // e.g. the fail / warn icon, always beside the text label (never colour alone)
+  iconColor?: string;
+}
+export interface HBarChartProps {
+  rows: HBarRow[];
+  label: string;
+  max?: number; // the scale's top (100 for shares); the largest row total by default
+  labelWidth?: number;
+  valueWidth?: number;
+  rowHeight?: number;
+  thickness?: number;
+}
+const hbarHeight = (rows: number, rowHeight = 30) => rows * rowHeight + 8;
+export function HBarChart(props: HBarChartProps) {
+  const [ref, width] = useChartWidth();
+  const height = hbarHeight(props.rows.length, props.rowHeight);
+  return <div className="an-chart" ref={ref} style={{ minHeight: height }}>{width >= 10 && <HBarSvg {...props} W={width} H={height} />}</div>;
+}
+
+function HBarSvg({ rows, label, max, labelWidth = 110, valueWidth = 64, rowHeight = 30, thickness = 14, W, H }: HBarChartProps & { W: number; H: number }) {
+  const tipApi = useChartTip();
+  const rove = useRoving(rows.length);
+  const lw = Math.min(labelWidth, Math.round(W * 0.42)), pw = Math.max(30, W - lw - valueWidth), top = 4;
+  const total = (r: HBarRow) => r.segs.reduce((a, s) => a + s.v, 0);
+  const mx = max ?? Math.max(1e-9, ...rows.map(total));
+  const th = Math.min(thickness, rowHeight - 10);
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={label}>
+      {rows.map((r, ri) => {
+        const cy = top + ri * rowHeight + rowHeight / 2;
+        const segs = r.segs.filter((s) => s.v > 0);
+        const RowIcon = r.icon;
+        let acc = 0;
+        return (
+          <g key={r.key} {...rove(ri)} {...(r.tip ? tipHandlers(tipApi, r.tip) : {})}>
+            <rect x={0} y={cy - rowHeight / 2} width={W} height={rowHeight} className="hit" />
+            {RowIcon && <RowIcon x={0} y={cy - 7} width={14} height={14} style={{ width: 14, height: 14, color: r.iconColor ?? "currentColor" }} aria-hidden />}
+            <text x={RowIcon ? 20 : 0} y={cy + 4} className="rlabel">{r.label}</text>
+            {segs.map((s, k) => {
+              let x = lw + (acc / mx) * pw, w = (s.v / mx) * pw;
+              acc += s.v;
+              if (k > 0) { x += 2; w -= 2; }
+              w = Math.max(1, w);
+              return k === segs.length - 1
+                ? <path key={k} d={barPath(x, cy - th / 2, w, th)} className="mk" style={{ fill: s.color }} />
+                : <rect key={k} x={x} y={cy - th / 2} width={w} height={th} className="mk" style={{ fill: s.color }} />;
+            })}
+            {r.value != null && <text x={lw + (acc / mx) * pw + 6} y={cy + 4} className="dlabel">{r.value}</text>}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---- RangeChart: per row the min–max hairline, the p25–p75 band and the average dot, on one shared axis ----
+export interface RangeRow { key: string; label: string; color: string; st: Stats | null }
+export interface RangeChartProps { rows: RangeRow[]; fmt: (v: number) => string; label: string }
+const rangeHeight = (rows: number) => 6 + rows * 42 + 22;
+export function RangeChart(props: RangeChartProps) {
+  const [ref, width] = useChartWidth();
+  const height = rangeHeight(props.rows.length);
+  return <div className="an-chart" ref={ref} style={{ minHeight: height }}>{width >= 10 && <RangeSvg {...props} W={width} H={height} />}</div>;
+}
+
+function RangeSvg({ rows, fmt, label, W, H }: RangeChartProps & { W: number; H: number }) {
+  const tipApi = useChartTip();
+  const rove = useRoving(rows.length);
+  const narrow = W < 480, lw = narrow ? 70 : 92, vw = narrow ? 92 : 118, rowH = 42, top = 6;
+  const pw = Math.max(40, W - lw - vw - 8);
+  const mx = Math.max(1e-9, ...rows.map((r) => (r.st ? r.st.max : 0)));
+  const ticks = niceTicks(mx, narrow ? 3 : 4), tv = ticks[ticks.length - 1];
+  const x = (v: number) => lw + (v / tv) * pw, yb = top + rows.length * rowH;
+  const tip = (r: RangeRow): TipContent => {
+    const st = r.st;
+    return {
+      title: `${r.label}${st ? ` · ${st.n} 部` : ""}`,
+      rows: st
+        ? [
+          { color: r.color, value: fmt(st.avg), label: "平均" }, { value: fmt(st.p50), label: "中位数" },
+          { value: `${fmt(st.p25)} – ${fmt(st.p75)}`, label: "中间一半（p25–p75）" }, { value: fmt(st.min), label: "最短" },
+          { value: fmt(st.max), label: "最长" },
+        ]
+        : [{ value: "—", label: "这个时段没有数据" }],
+    };
+  };
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={label}>
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={x(t)} x2={x(t)} y1={top} y2={yb} className={t === 0 ? "axis" : "grid"} />
+          <text x={x(t)} y={H - 6} textAnchor="middle" className="tick">{tickFmt(t)}</text>
+        </g>
+      ))}
+      {rows.map((r, ri) => {
+        const cy = top + ri * rowH + rowH / 2, st = r.st;
+        return (
+          <g key={r.key} {...rove(ri)} {...tipHandlers(tipApi, () => tip(r))}>
+            <rect x={0} y={cy - rowH / 2} width={W} height={rowH} className="hit" />
+            <text x={0} y={cy + 4} className="rlabel">{r.label}</text>
+            {st ? (
+              <>
+                <line x1={x(st.min)} x2={x(st.max)} y1={cy} y2={cy} className="mk range-line" style={{ stroke: r.color }} />
+                <rect x={x(st.p25)} y={cy - 4} width={Math.max(2, x(st.p75) - x(st.p25))} height={8} rx={2} className="mk" style={{ fill: r.color }} />
+                <circle cx={x(st.avg)} cy={cy} r={4.5} className="mk range-dot" style={{ stroke: r.color }} />
+                <text x={W - vw + 6} y={cy - 2}>
+                  <tspan className="vt1">平均 {fmt(st.avg)}</tspan>
+                  <tspan x={W - vw + 6} dy={14} className="vt2">最长 {fmt(st.max)}</tspan>
+                </text>
+              </>
+            ) : <text x={lw} y={cy + 4} className="tick">没有数据</text>}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---- ShareBar: one 100 % bar split by share; stages without time are left out ----
+export interface ShareSeg { key: string; label: string; v: number; color: string; tip?: () => TipContent }
+export function ShareBar({ segs, label }: { segs: ShareSeg[]; label: string }) {
+  const [ref, width] = useChartWidth();
+  const shown = segs.filter((s) => s.v > 0);
+  return (
+    <div className="an-chart" ref={ref} style={{ minHeight: 34 }}>
+      {!shown.length ? <p className="small muted">这个时段没有数据</p> : width >= 10 && <ShareSvg segs={shown} label={label} W={width} />}
+    </div>
+  );
+}
+
+function ShareSvg({ segs, label, W }: { segs: ShareSeg[]; label: string; W: number }) {
+  const tipApi = useChartTip();
+  const rove = useRoving(segs.length);
+  const H = 34, bh = 24, y0 = 5, tot = segs.reduce((a, s) => a + s.v, 0);
+  const avail = W - 2 * (segs.length - 1);
+  const ws = segs.map((s) => Math.max(3, (s.v / tot) * avail));
+  const big = ws.indexOf(Math.max(...ws));
+  ws[big] -= ws.reduce((a, w) => a + w, 0) - avail; // the minimum widths come out of the largest share
+  let x = 0;
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={label}>
+      {segs.map((s, k) => {
+        const x0 = x;
+        x += ws[k] + 2;
+        return (
+          <g key={s.key} {...rove(k)} {...(s.tip ? tipHandlers(tipApi, s.tip) : {})}>
+            <rect x={x0} y={0} width={ws[k] + 2} height={H} className="hit" />
+            {k === segs.length - 1
+              ? <path d={barPath(x0, y0, ws[k], bh)} className="mk" style={{ fill: s.color }} />
+              : <rect x={x0} y={y0} width={ws[k]} height={bh} className="mk" style={{ fill: s.color }} />}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---- StripChart: events on a time axis over a track, with the uncovered band before the first record ----
+export interface StripItem { key: string; s: number; e: number; tip?: () => TipContent }
+export interface StripChartProps {
+  start: number;
+  end: number; // the time domain (epoch ms)
+  items: StripItem[];
+  ticks: Array<{ t: number; label: string }>; // candidate labels; thinned to ≥ 58 px apart
+  label: string;
+  uncovUntil?: number | null; // grey band from `start` to here
+  trackFrom?: number; // the recorded track; the whole domain by default
+  trackTo?: number;
+}
+const STRIP_HEIGHT = 56;
+export function StripChart(props: StripChartProps) {
+  const [ref, width] = useChartWidth();
+  return <div className="an-chart" ref={ref} style={{ minHeight: STRIP_HEIGHT }}>{width >= 10 && <StripSvg {...props} W={width} />}</div>;
+}
+
+function StripSvg({ start, end, items, ticks, label, uncovUntil, trackFrom = start, trackTo = end, W }: StripChartProps & { W: number }) {
+  const tipApi = useChartTip();
+  const rove = useRoving(items.length);
+  const H = STRIP_HEIGHT, pw = W - 4, y0 = 10, bh = 14;
+  const x = (t: number) => ((t - start) / (end - start || 1)) * pw;
+  const shown = thinTicks(ticks.map((t) => ({ ...t, px: x(t.t) })));
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={label}>
+      {uncovUntil != null && uncovUntil > start && <rect x={0} y={y0 - 4} width={x(Math.min(uncovUntil, end))} height={bh + 8} className="uncov" />}
+      <rect x={x(trackFrom)} y={y0} width={Math.max(0, x(trackTo) - x(trackFrom))} height={bh} rx={2} className="strip-track" />
+      {shown.map((t) => (
+        <g key={t.t}>
+          <line x1={t.px} x2={t.px} y1={y0 + bh + 2} y2={y0 + bh + 7} className="axis" />
+          <text x={clamp(t.px, 16, W - 18)} y={H - 6} textAnchor="middle" className="tick">{t.label}</text>
+        </g>
+      ))}
+      {items.map((it, i) => {
+        const xa = x(it.s), w = Math.max(3, x(it.e) - xa), hw = Math.max(16, w);
+        return (
+          <g key={it.key} {...rove(i)} {...(it.tip ? tipHandlers(tipApi, it.tip) : {})}>
+            <rect x={xa + w / 2 - hw / 2} y={0} width={hw} height={y0 + bh + 8} className="hit" />
+            <rect x={xa} y={y0} width={w} height={bh} rx={1} className="mk strip-mk" />
+          </g>
+        );
+      })}
+    </svg>
   );
 }

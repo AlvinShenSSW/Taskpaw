@@ -8,7 +8,7 @@ export const ANALYTICS_CSS = `
 .mw .an{--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#9085e9;
 --c-queue:#5b6b82;--c-total:#8b9bb3;--c-prev:#6b7d96;--c-spark:#5f7190;
 --st-green:${T.green};--st-amber:${T.amber};--st-red:${T.red};--lane-on:#22c55e8c;
---grid:#1f2d45;--axis:#33465f;--uncov:#ffffff09;--tt-bg:#0A1222}
+--grid:#1f2d45;--axis:#33465f;--uncov:#ffffff09;--tt-bg:#0A1222;--track:#1b2a40}
 .mw .an .tiny{font-size:11px}
 .mw .an .refresh-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);flex-wrap:wrap}
 .mw .an .chip .icon{width:12px;height:12px}
@@ -72,6 +72,58 @@ export const ANALYTICS_CSS = `
 .mw .an .lgd-k{display:inline-block;flex:none}
 .mw .an .lgd-k.rect{width:10px;height:10px;border-radius:2px}
 .mw .an .lgd-k.line{width:14px;height:2px;border-radius:1px}
+.mw .an .lgd-k.tick{width:2px;height:12px;border-radius:1px}
+.mw .an .chart-svg .rlabel{fill:var(--text);font-size:12px}
+.mw .an .chart-svg .vt1{fill:var(--text);font-size:11px}
+.mw .an .chart-svg .vt2{fill:var(--muted);font-size:10.5px}
+.mw .an .chart-svg .range-line{stroke-width:1;opacity:.85}
+.mw .an .chart-svg .range-dot{fill:var(--surface);stroke-width:2}
+.mw .an .chart-svg .strip-track{fill:var(--track)}
+.mw .an .chart-svg .strip-mk{fill:var(--st-amber)}
+
+/* section layout (各 GPU 机器, 本机（主控）处理, 耗时分布) */
+.mw .an .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px 28px}
+.mw .an .block{min-width:0}
+.mw .an .block>h3{font-size:13px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mw .an .block>h3 .icon{width:15px;height:15px}
+.mw .an .an-ic{display:inline-flex}
+.mw .an .bdesc{font-size:11px;color:var(--muted);margin-bottom:10px}
+.mw .an .an-after{margin-top:6px}
+.mw .an .multiples{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.mw .an .mini{border:1px solid #22324a;border-radius:9px;padding:10px 12px 6px;background:#0c1626;min-width:0}
+.mw .an .mini-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px;margin-bottom:4px}
+.mw .an .mini-h strong{font-weight:600}
+.mw .an .ministats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.mw .an .mstat{border:1px solid #22324a;border-radius:9px;padding:12px 14px;background:#0c1626;min-width:0}
+.mw .an .mstat .label{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mw .an .mstat strong{display:block;font:600 22px/1.35 var(--sans)}
+.mw .an .mstat strong em{font:400 12px var(--sans);color:var(--muted);margin-left:4px;font-style:normal}
+.mw .an .mstat .note{font-size:11px;color:var(--muted)}
+.mw .an .mstat .chips{margin-top:6px}
+.mw .an .share-lg{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px 18px;margin-top:12px;font-size:12px;color:var(--text)}
+.mw .an .share-lg .lgd-i b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.mw .an .share-lg .lgd-i span.m{color:var(--muted)}
+
+/* the machine table: model group rows, sortable headers, the 4K/1080P bar with the same-model tick */
+.mw .an table.grid tr.grp th{background:#0c1626;color:var(--text);font-size:11px;padding:8px 12px;border-bottom:1px solid var(--line)}
+.mw .an table.grid tr.grp th span{color:var(--muted);font-weight:400;margin-left:8px}
+.mw .an table.grid tr.sel td{background:#22c55e0a}
+.mw .an .th-btn{background:none;border:0;color:inherit;font:inherit;display:inline-flex;align-items:center;gap:4px;padding:2px 0;min-height:30px;letter-spacing:inherit;transition:color .15s}
+.mw .an .th-btn:hover{color:var(--text)}
+.mw .an .th-btn .icon{width:14px;height:14px;opacity:.5}
+.mw .an th[aria-sort] .th-btn{color:var(--text)}
+.mw .an th[aria-sort] .th-btn .icon{opacity:1}
+.mw .an .mname strong{display:block;font-weight:600}
+.mw .an .mname span{font-size:11px;color:var(--muted)}
+.mw .an .sbar-cell{display:flex;align-items:center;gap:8px;min-width:190px}
+.mw .an .sbar-track{position:relative;flex:1;height:14px;display:flex;align-items:center}
+.mw .an .sbar{display:flex;gap:2px;height:12px}
+.mw .an .sbar span{display:block;height:100%;min-width:2px;transition:filter .15s}
+.mw .an .sbar span:hover{filter:brightness(1.25)}
+.mw .an .sbar span:last-child{border-radius:0 4px 4px 0}
+.mw .an .avg-mk{position:absolute;top:-2px;width:2px;height:18px;margin-left:-1px;background:var(--text);border-radius:1px;opacity:.85}
+.mw .an .sbar-cell b{font-weight:600;font-variant-numeric:tabular-nums;min-width:22px;text-align:right}
+.mw .an .state-note{display:block;font-size:10.5px;color:var(--muted);margin-top:3px;white-space:nowrap}
 
 /* the shared tooltip */
 .mw .an .an-tt{position:fixed;z-index:50;pointer-events:none;background:var(--tt-bg);border:1px solid #3b4d66;border-radius:8px;padding:8px 11px;font-size:12px;box-shadow:0 10px 30px #000a;min-width:130px;max-width:280px;left:0;top:0}
@@ -89,6 +141,7 @@ export const ANALYTICS_CSS = `
 .mw .an table.grid th.num,.mw .an table.grid td.num{text-align:right;font-variant-numeric:tabular-nums}
 
 @media(max-width:1250px){.mw .an .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:1080px){.mw .an .grid2{grid-template-columns:1fr}.mw .an .ministats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:900px){.mw .an .filterbar{position:static}}
-@media(max-width:640px){.mw .an .kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mw .an .kpi{padding:12px 12px 8px}.mw .an .kv{font-size:24px}.mw .an .filterbar{gap:10px}}
+@media(max-width:640px){.mw .an .kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mw .an .kpi{padding:12px 12px 8px}.mw .an .kv{font-size:24px}.mw .an .filterbar{gap:10px}.mw .an .ministats{gap:10px}}
 `;

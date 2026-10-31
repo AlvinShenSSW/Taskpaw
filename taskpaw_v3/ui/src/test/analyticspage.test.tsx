@@ -264,7 +264,7 @@ describe("数据分析 states", () => {
 
   it("no archive yet: 「还没有归档完成的影片」 and no data start", async () => {
     mount({ ...FIXTURE, coverage: { ...FIXTURE.coverage, archives: null }, films: [], failures: [] });
-    expect(await screen.findByText("还没有归档完成的影片")).toBeInTheDocument();
+    expect((await screen.findAllByText("还没有归档完成的影片")).length).toBeGreaterThan(0); // one per panel (§8.6)
     expect(tile("完成影片")).toHaveTextContent("0部");
     expect(screen.queryByText(/数据自/)).toBeNull();
   });
@@ -305,7 +305,7 @@ describe("OD1 guard: no progress against a total, no remaining count, no forecas
     const select = screen.getByRole("combobox", { name: "机器" });
     for (const value of ["w-ctrl-0001", "w-gpu-ember"]) { fireEvent.change(select, { target: { value } }); assertClean(); }
     expect(screen.getAllByText(/共 \d+ 部/).length).toBeGreaterThan(0); // totals of what happened stay allowed
-  });
+  }, 20_000); // walks every range × view × panel (about 1.3 s alone; slower under the full parallel suite)
 });
 
 describe("sticky filter bar (approved preview)", () => {
