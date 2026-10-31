@@ -915,3 +915,77 @@ def test_stop_gives_the_event_observer_a_floor_when_the_deadline_is_spent(tmp_pa
     host.stop(timeout=0)
     assert timeouts and timeouts[0] >= 1.0
     assert host.state == "stopped"
+
+
+# ── device history (EPIC #387 C1) ────────────────────────────────────────
+@pytest.mark.parametrize("remote", [False, True], ids=["local", "remote"])
+def test_the_controller_records_device_history_and_stops_it_first(tmp_path, remote):
+    data = tmp_path / "data"
+    host = LocalWorkflowHost(
+        WorkflowSettings(enabled=True, remote_workers=remote), data
+    )
+    host.start()
+    try:
+        _wait(lambda: host.state != "starting")
+        assert host.state == "running", host.reason
+        history = host.device_history
+        assert history is not None and history.available
+        assert history.path == data / "analytics.db"
+        # started after the runtime, the dispatcher and (remote) FleetLive
+        assert history._rt is host.runtime and history._dispatcher is host.dispatcher
+        assert history._fleet is host.fleet and (host.fleet is not None) == remote
+        _wait(lambda: history.spans(None))
+        (span,) = history.spans(None)
+        controller = host.runtime.identity.worker_id
+        assert (span.worker_id, span.state, span.open) == (controller, "online", True)
+        thread = history._thread
+        assert thread is not None and thread.is_alive()
+        seen: list[tuple[bool, bool]] = []
+        rt_close = host.runtime.close
+
+        def close() -> None:  # the recorder is joined and closed before this
+            seen.append((thread.is_alive(), history.available))
+            rt_close()
+
+        host.runtime.close = close  # type: ignore[method-assign]
+    finally:
+        host.stop(timeout=10)
+    assert host.state == "stopped"
+    assert seen == [(False, False)]
+
+
+def test_a_worker_install_never_records_device_history(tmp_path):
+    data = tmp_path / "data"
+    host = LocalWorkflowHost(WorkflowSettings(enabled=True, role="worker"), data)
+    host.start()
+    try:
+        _wait(lambda: host.state != "starting")
+        assert host.device_history is None
+    finally:
+        host.stop(timeout=10)
+    assert not (data / "analytics.db").exists()
+
+
+def test_a_refused_analytics_db_leaves_the_workflow_running(tmp_path):
+    import sqlite3
+
+    from taskpaw_v3.workflow.device_history import REFUSED_FOREIGN
+
+    data = tmp_path / "data"
+    data.mkdir()
+    conn = sqlite3.connect(data / "analytics.db")
+    conn.executescript("PRAGMA application_id=7; CREATE TABLE other (x INTEGER);")
+    conn.close()
+    before = (data / "analytics.db").read_bytes()
+    host = LocalWorkflowHost(WorkflowSettings(enabled=True), data)
+    host.start()
+    try:
+        _wait(lambda: host.state != "starting")
+        assert host.state == "running", host.reason
+        history = host.device_history
+        assert history is not None and not history.available
+        assert history.reason == REFUSED_FOREIGN and history._thread is None
+    finally:
+        host.stop(timeout=10)  # the recorder is off: its stop is a no-op
+    assert host.state == "stopped"
+    assert (data / "analytics.db").read_bytes() == before

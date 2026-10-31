@@ -48,7 +48,9 @@ export const MEDIA_CSS = `
 .mw .skip-link:focus{top:12px}
 
 /* shell */
-.mw-root{position:relative;background:radial-gradient(1000px 650px at 80% -200px,#38bdf80b,transparent),var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;min-width:0}
+/* overflow:clip (hidden as the fallback) clips the rounded corners without making .mw-root a scroll
+   container, so 数据分析's sticky filter bar sticks to the window (analytics C3) */
+.mw-root{position:relative;background:radial-gradient(1000px 650px at 80% -200px,#38bdf80b,transparent),var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;overflow:clip;min-width:0}
 .mw .scope-banner{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 25px;background:#22c55e06;border-bottom:1px solid #223c33;font-size:11px;color:#b5cdbf;flex-wrap:wrap}
 .mw .scope-banner .btn{min-height:36px;font-size:10px;padding:5px 9px}
 .mw .scope-left{display:flex;align-items:center;gap:10px;min-width:0}

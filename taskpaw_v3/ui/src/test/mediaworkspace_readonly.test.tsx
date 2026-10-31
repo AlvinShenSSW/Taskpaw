@@ -129,11 +129,12 @@ describe("#286 Hub media read-only workspace", () => {
     expect(screen.queryByText("检查中")).toBeNull();
     expect(screen.queryByRole("button", { name: "可核对入库" })).toBeNull();
     noControls();
-    for (const label of ["异常", "设备", "本机", "片库与规则", "Mac 信息桥", "设置"]) {
+    for (const label of ["异常", "设备", "本机", "片库与规则", "数据分析", "Mac 信息桥", "设置"]) {
       await go(label); noControls();
       if (label === "本机") expect(screen.getByText("WINDOWS-GPU")).toBeInTheDocument();
-      // #361: the library lives on the controller; the Hub reads none of its routes
-      if (label === "片库与规则" || label === "设置") expect(screen.getByText(/请在主控电脑上查看和修改/)).toBeInTheDocument();
+      // #361 / analytics D10: the library and 数据分析 live on the controller; the Hub reads none of their routes
+      if (label === "片库与规则" || label === "数据分析" || label === "设置") expect(screen.getByText(/请在主控电脑上查看和修改/)).toBeInTheDocument();
+      if (label === "数据分析") expect(screen.getByText("只读监控不显示数据分析；请在主控电脑上查看和修改。")).toBeInTheDocument();
     }
     onlyHubGets();
   });

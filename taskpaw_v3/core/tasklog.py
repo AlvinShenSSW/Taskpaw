@@ -17,7 +17,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Collection, Iterator, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger("taskpaw.tasklog")
@@ -105,6 +105,36 @@ def _sanitize(value: Any) -> Any:
     return None
 
 
+def _parsed(line: str, day: str) -> dict[str, Any] | None:
+    """One stored line of `day` as a sanitized row; None when malformed."""
+    try:
+        row = json.loads(line)
+        if (
+            isinstance(row, dict)
+            and _id_key(row.get("id", ""))[0] == day
+            and all(isinstance(row.get(k), str) for k in ("kind", "task", "task_type"))
+            and row.get("severity") in ("info", "warn", "error")
+            and (row.get("data") is None or isinstance(row["data"], dict))
+            and all(
+                row.get(k) is None or isinstance(row[k], str) for k in ("film", "proc")
+            )
+            and (row.get("pid") is None or type(row["pid"]) is int)
+        ):
+            return _sanitize(row)
+    except (ValueError, TypeError, RecursionError):
+        return None  # a torn or foreign line is skipped, as every reader does
+    return None
+
+
+class KindRows(NamedTuple):
+    """`TaskLog.kind_rows`: one day's rows of some kinds (EPIC #387 C2)."""
+
+    rows: list[dict[str, Any]]  # from the day file, after the offset
+    offset: int  # where the next read of the file starts
+    memory: list[dict[str, Any]]  # the day's matching rows still in memory
+    found: bool  # the day file exists
+
+
 class TaskLog:
     def __init__(
         self,
@@ -158,34 +188,63 @@ class TaskLog:
                 "r", encoding="utf-8", errors="replace"
             ) as stream:
                 for line in stream:
-                    try:
-                        row = json.loads(line)
-                        if (
-                            isinstance(row, dict)
-                            and _id_key(row.get("id", ""))[0] == day
-                            and all(
-                                isinstance(row.get(k), str)
-                                for k in ("kind", "task", "task_type")
-                            )
-                            and row.get("severity") in ("info", "warn", "error")
-                            and (
-                                row.get("data") is None or isinstance(row["data"], dict)
-                            )
-                            and all(
-                                row.get(k) is None or isinstance(row[k], str)
-                                for k in ("film", "proc")
-                            )
-                            and (row.get("pid") is None or type(row["pid"]) is int)
-                        ):
-                            yield _sanitize(row)
-                    except (ValueError, TypeError, RecursionError):
-                        continue
+                    row = _parsed(line, day)
+                    if row is not None:
+                        yield row
         except FileNotFoundError:
             return
         except OSError as exc:
             if strict:
                 raise
             log.warning("Task log read failed: %s", type(exc).__name__)
+
+    @property
+    def day(self) -> str:
+        """The local YYYYMMDD day new records are written under."""
+        return self._day
+
+    def kind_rows(self, day: str, kinds: Collection[str], offset: int = 0) -> KindRows:
+        """Rows of `kinds` in one day file from byte `offset` (EPIC #387 C2).
+
+        The file is append-only, so it is opened, read and closed again
+        outside the store lock (no handle outlives the call); a last line
+        without its newline may still be being written and is left for the
+        next read. The lock is taken only to copy that day's matching rows
+        from memory, which also hold rows already on disk: callers merge them
+        by `id`."""
+        if not _valid_day(day):
+            raise ValueError("invalid task log day")
+        rows: list[dict[str, Any]] = []
+        found = False
+        if self._folder is not None:
+            data = b""
+            try:
+                with (self._folder / f"tasklog-{day}.jsonl").open("rb") as stream:
+                    found = True
+                    stream.seek(offset)
+                    data = stream.read()
+            except FileNotFoundError:
+                data = b""  # no record that day (or pruned)
+            except OSError as exc:  # retried from the same offset next time
+                log.warning("Task log read failed: %s", type(exc).__name__)
+            end = data.rfind(b"\n") + 1
+            # only a line naming a wanted kind (as `_append` escapes it) can be
+            # one: the rest is skipped unparsed
+            tokens = [json.dumps(kind)[1:-1].encode("ascii") for kind in kinds]
+            for raw in data[:end].splitlines():
+                if not any(token in raw for token in tokens):
+                    continue
+                row = _parsed(raw.decode("utf-8", "replace"), day)
+                if row is not None and row["kind"] in kinds:
+                    rows.append(row)
+            offset += end
+        with self._lock:
+            held = [
+                r
+                for r in self._ring
+                if r.get("kind") in kinds and _id_key(r["id"])[0] == day
+            ]
+        return KindRows(rows, offset, _sanitize(held), found)
 
     def _load_day(self) -> None:
         self._n = 0

@@ -1,6 +1,7 @@
 """Scoped workflow views never expose credential or pairing digests."""
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -882,6 +883,247 @@ class ReadCommands(WorkflowCore):
                 (film_id,),
             )
             return int(row[0])
+
+    # ── 数据分析 (EPIC #387 C2): plain rows, one bounded query set per call ──
+    def analytics_receipts(
+        self, auth: AuthProof, after: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Up to `limit` accepted archive receipts with rowid above `after`,
+        oldest first, each with what its film fact needs: the film, the
+        archived final manifest's input revision and marks, that revision's
+        probes, main-video bytes and plan, and every attempt of its fact
+        stages as (stage, status, worker, start, end, last evidence entry as
+        JSON) in rowid order. Removed films are included: the archive
+        happened."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT r.rowid,r.accepted_at,json_extract(r.body_json,'$.target'),"
+                "r.operation_id,o.film_id,f.display_name,f.created_at,"
+                "fm.input_revision,json_extract(fm.body_json,'$.postprocess.actual_marks') "
+                "FROM receipts r JOIN operations o ON o.operation_id=r.operation_id "
+                "JOIN films f ON f.film_id=o.film_id "
+                "LEFT JOIN manifests fm ON fm.film_id=o.film_id AND fm.kind='final' "
+                "AND fm.manifest_hash=r.manifest_hash "
+                "WHERE r.kind='archive' AND r.rowid>? ORDER BY r.rowid LIMIT ?",
+                (after, limit),
+            ).fetchall()
+            if not rows:
+                return []
+            pairs = sorted({(row[4], row[7]) for row in rows if row[7] is not None})
+            want = (
+                "WITH want(film_id,revision) AS (VALUES "
+                + ",".join("(?,?)" for _ in pairs)
+                + ") "
+                if pairs
+                else "WITH want(film_id,revision) AS (SELECT NULL,NULL WHERE 0) "
+            )
+            args = tuple(value for pair in pairs for value in pair)
+            probes = {
+                (row[0], row[1]): row[2:]
+                for row in self._conn.execute(
+                    want + "SELECT im.film_id,im.revision,"
+                    "max(json_extract(p.value,'$.width')),"
+                    "max(json_extract(p.value,'$.height')),"
+                    "sum(json_extract(p.value,'$.duration_ms')) FROM want w "
+                    "JOIN manifests im ON im.film_id=w.film_id AND im.kind='input' "
+                    "AND im.revision=w.revision,"
+                    "json_each(im.body_json,'$.readiness.media_probes') p "
+                    "GROUP BY im.film_id,im.revision",
+                    args,
+                )
+            }
+            sizes = {
+                (row[0], row[1]): row[2]
+                for row in self._conn.execute(
+                    want + "SELECT i.film_id,i.revision,sum(i.size_bytes) FROM want w "
+                    "JOIN manifest_items i ON i.film_id=w.film_id AND i.kind='input' "
+                    "AND i.revision=w.revision AND i.role='main_video' "
+                    "GROUP BY i.film_id,i.revision",
+                    args,
+                )
+            }
+            plans = {
+                (row[0], row[1]): (row[2], bool(row[3]))
+                for row in self._conn.execute(
+                    want + "SELECT p.film_id,p.input_revision,p.confirmed_at,"
+                    "p.backfilled FROM want w JOIN film_plans p "
+                    "ON p.film_id=w.film_id AND p.input_revision=w.revision",
+                    args,
+                )
+            }
+            attempts: dict[tuple[str, int], list[tuple[Any, ...]]] = {}
+            for row in self._conn.execute(
+                want + "SELECT s.film_id,s.input_revision,s.stage,"
+                "x.status,x.worker_id,x.started_at,x.ended_at,"
+                f"{_LAST_EVIDENCE} FROM want w "
+                "JOIN stages s ON s.film_id=w.film_id AND s.input_revision=w.revision "
+                f"AND s.stage IN {_FACT_STAGES} "
+                "JOIN attempts x ON x.job_id=s.job_id ORDER BY x.rowid",
+                args,
+            ):
+                attempts.setdefault((row[0], row[1]), []).append(row[2:])
+        out = []
+        for row in rows:
+            key = (row[4], row[7])
+            width, height, duration = probes.get(key, (None, None, None))
+            out.append(
+                {
+                    "rowid": row[0],
+                    "accepted_at": row[1],
+                    "target": json.loads(row[2]) if row[2] else None,
+                    "operation_id": row[3],
+                    "film_id": row[4],
+                    "display_name": row[5],
+                    "created_at": row[6],
+                    "input_revision": row[7],
+                    "marks": json.loads(row[8]) if row[8] else [],
+                    "width": width,
+                    "height": height,
+                    "duration_ms": _duration(duration),
+                    "input_bytes": sizes.get(key),
+                    "plan": plans.get(key),
+                    "attempts": attempts.get(key, []),
+                }
+            )
+        return out
+
+    def analytics_attempts(
+        self, auth: AuthProof, after: int, span: int, recheck: Sequence[int] = ()
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Failed, running and unknown attempts of the fact stages among those
+        with rowid in (`after`, `after + span`] or in `recheck`; a failed one
+        with its job, number, worker, end, stage, film name and last evidence
+        entry. Returns them, the rowid read up to and whether that was the
+        last attempt. A failed attempt never changes again; the others are
+        rechecked by rowid. A range per locked read: `attempts` has no index
+        to find failures by, so a whole-table read would hold the store lock
+        too long (§9)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            top = self._conn.execute(
+                "SELECT coalesce(max(rowid),0) FROM attempts"
+            ).fetchone()[0]
+            reached = min(after + span, top)
+            select = (
+                "SELECT x.rowid,x.status,x.job_id,x.attempt_number,x.worker_id,"
+                "x.ended_at,s.stage,f.display_name,"
+                f"CASE WHEN x.status='failed' THEN {_LAST_EVIDENCE} END "
+                "FROM attempts x JOIN stages s ON s.job_id=x.job_id "
+                f"AND s.stage IN {_FACT_STAGES} JOIN films f ON f.film_id=s.film_id "
+                "WHERE x.status IN ('failed','running','unknown') AND "
+            )
+            rows = self._conn.execute(
+                select + "x.rowid>? AND x.rowid<=?", (after, reached)
+            ).fetchall()
+            for start in range(0, len(recheck), 500):
+                chunk = list(recheck[start : start + 500])
+                rows += self._conn.execute(
+                    select + f"x.rowid IN ({','.join('?' for _ in chunk)})", chunk
+                ).fetchall()
+        return (
+            [
+                {
+                    "rowid": row[0],
+                    "status": row[1],
+                    "job_id": row[2],
+                    "attempt_number": row[3],
+                    "worker_id": row[4],
+                    "ended_at": row[5],
+                    "stage": row[6],
+                    "display_name": row[7],
+                    "last": json.loads(row[8]) if row[8] else None,
+                }
+                for row in sorted(rows, key=lambda r: r[0])
+            ],
+            reached,
+            reached >= top,
+        )
+
+    def analytics_jobs(
+        self, auth: AuthProof, job_ids: Sequence[str]
+    ) -> tuple[dict[str, str], dict[str, list[tuple[int, str, str | None]]]]:
+        """Each job's stage status now and every attempt (number, status,
+        worker) of it, oldest first: what a failure's outcome reads. At most
+        500 jobs per call (one locked read)."""
+        if len(job_ids) > 500:
+            raise WorkflowError("invalid_request")
+        if not job_ids:
+            return {}, {}
+        marks = ",".join("?" for _ in job_ids)
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            stages = dict(
+                self._conn.execute(
+                    f"SELECT job_id,status FROM stages WHERE job_id IN ({marks})",
+                    tuple(job_ids),
+                ).fetchall()
+            )
+            jobs: dict[str, list[tuple[int, str, str | None]]] = {}
+            for job_id, number, status, worker_id in self._conn.execute(
+                "SELECT job_id,attempt_number,status,worker_id FROM attempts "
+                f"WHERE job_id IN ({marks}) ORDER BY job_id,attempt_number",
+                tuple(job_ids),
+            ):
+                jobs.setdefault(job_id, []).append((number, status, worker_id))
+        return stages, jobs
+
+    def analytics_workers(
+        self, auth: AuthProof
+    ) -> dict[str, tuple[str | None, str | None, int | None]]:
+        """worker id → (earliest boot observed, latest probed GPU model and
+        VRAM MiB) of every worker, retired ones included."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT w.worker_id,"
+                "(SELECT min(b.observed_at) FROM worker_boots b "
+                "WHERE b.worker_id=w.worker_id),p.model,p.vram FROM workers w "
+                "LEFT JOIN (SELECT c.worker_id,"
+                "json_extract(c.body_json,'$.gpu_model') AS model,"
+                "json_extract(c.body_json,'$.vram_mib') AS vram,"
+                "row_number() OVER (PARTITION BY c.worker_id ORDER BY c.revision DESC) AS n "
+                "FROM capabilities c WHERE c.kind='probed') p "
+                "ON p.worker_id=w.worker_id AND p.n=1"
+            ).fetchall()
+        return {row[0]: (row[1], row[2], row[3]) for row in rows}
+
+    def analytics_inbox(self, auth: AuthProof) -> tuple[int, int]:
+        """(bytes, films) of the live films' current inputs whose
+        `cleanup_input` stage has not succeeded: what intake still holds in
+        the INBOX."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            row = self._conn.execute(
+                "SELECT coalesce(sum(i.size_bytes),0),count(DISTINCT f.film_id) "
+                "FROM films f JOIN manifest_items i ON i.film_id=f.film_id "
+                "AND i.kind='input' AND i.revision=f.current_input_revision "
+                f"WHERE {LIVE} AND NOT EXISTS (SELECT 1 FROM stages c "
+                "WHERE c.film_id=f.film_id AND c.input_revision=f.current_input_revision "
+                "AND c.stage='cleanup_input' AND c.status='succeeded')"
+            ).fetchone()
+        return int(row[0]), int(row[1])
+
+
+# EPIC #387 C2: the stages a film fact and the failure list read, and an
+# attempt's last evidence entry (what `_energy` / `_attempt_note` read) without
+# returning the whole evidence list
+_FACT_STAGES = "('restore','asr','translate','return','scrape','archive')"
+_LAST_EVIDENCE = (
+    "CASE WHEN json_array_length(x.body_json,'$.evidence')>0 THEN "
+    "json_extract(x.body_json,'$.evidence['||"
+    "(json_array_length(x.body_json,'$.evidence')-1)||']') END"
+)
 
 
 def _attempt_times(body: str | None) -> dict[str, Any]:

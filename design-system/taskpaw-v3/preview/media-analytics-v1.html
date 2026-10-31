@@ -1,0 +1,1020 @@
+<title>媒体数据分析</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: the 媒体处理中心 shell (scope banner, 205px rail, content) inside a thin demo bar.
+   Single dark theme on purpose: TaskPaw V3 is dark-only; shell values copied from mediaStyles.ts.
+   Charts are hand-rolled inline SVG (no library); every color is a token below. */
+:root{
+  --page:#070C17;--bg:#0B1120;--surface:#111A2E;--low:#0D1626;--line:#263650;--text:#F8FAFC;--muted:#A8B5C7;--soft:#C9D6E7;
+  --green:#22C55E;--green-light:#97E8B4;--blue:#75D2FA;--amber:#FBC76A;--red:#FDA4AF;--on-green:#06210F;
+  --demo:#C4B5FD;--demo-bg:#8B5CF614;--demo-line:#8B5CF640;
+  /* chart palette, validated on #111A2E - fixed order, never cycled */
+  --c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#9085e9;
+  --c-queue:#5b6b82;--c-total:#8b9bb3;--c-prev:#6b7d96;--c-spark:#5f7190;
+  --st-green:#22C55E;--st-amber:#FBC76A;--st-red:#FDA4AF;--lane-on:#22c55e8c;
+  --grid:#1f2d45;--axis:#33465f;--uncov:#ffffff09;--tt-bg:#0A1222;--track:#1b2a40;--meter-track:#1d3352;
+  --sans:"Fira Sans",system-ui,"Microsoft YaHei","PingFang SC",sans-serif;
+  --mono:"Fira Code",Consolas,"Microsoft YaHei",monospace;
+  color-scheme:dark;
+}
+body{background:var(--page);color:var(--text);font:14px/1.6 var(--sans);margin:0;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 40px}
+*,*::before,*::after{box-sizing:border-box}
+button,input,select{font:inherit}
+button{cursor:pointer;color:inherit}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+h1,h2,h3,h4,p{margin:0}
+h1,h2,h3{text-wrap:balance}
+h2{font-size:17px;font-weight:600}h3{font-size:13px;font-weight:600}
+.muted{color:var(--muted)}.small{font-size:12px}.tiny{font-size:11px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.icon{width:19px;height:19px;flex:none;vertical-align:middle}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+
+/* demo bar (not part of the product) */
+.demo-bar{max-width:1600px;margin:0 auto 12px;display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:10px 14px;border:1px dashed var(--demo-line);border-radius:10px;background:var(--demo-bg);color:var(--demo);font-size:12px}
+.demo-bar strong{font-weight:600;letter-spacing:.3px}
+.demo-bar .seg{background:transparent;border-color:var(--demo-line)}
+.demo-bar .seg-opt{min-height:34px;color:#cbbff5}
+.demo-bar .seg-opt[aria-checked=true]{background:#8b5cf622;border-color:#8b5cf677;color:#ece6ff}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--demo);display:inline-block;flex:none}
+
+/* shell */
+.mw-root{max-width:1600px;margin:0 auto;position:relative;background:radial-gradient(1000px 650px at 80% -200px,#38bdf80b,transparent),var(--bg);border:1px solid var(--line);border-radius:12px;overflow:clip}
+.scope-banner{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 25px;background:#22c55e06;border-bottom:1px solid #223c33;font-size:11px;color:#b5cdbf;flex-wrap:wrap}
+.health{display:flex;gap:6px;flex-wrap:wrap}
+.workspace-shell{display:grid;grid-template-columns:205px minmax(0,1fr);min-height:760px}
+.workspace-rail{padding:22px 13px;background:#0e1727;border-right:1px solid var(--line)}
+.workspace-heading{padding:0 13px 18px;margin-bottom:11px;border-bottom:1px solid var(--line)}
+.workspace-heading strong{display:block;font-size:14px}
+.nav-group{display:flex;flex-direction:column;gap:5px}
+.nav-item{min-height:46px;display:flex;align-items:center;gap:12px;color:var(--muted);padding:10px 13px;border:1px solid transparent;border-radius:8px;font-size:13px;background:transparent;text-align:left;width:100%;transition:background .16s,color .16s;position:relative}
+.nav-item:hover{background:#ffffff05;color:var(--text)}
+.nav-item[aria-current=page]{background:#22c55e10;border-color:#22c55e36;color:#9be7b5}
+.nav-count{margin-left:auto;min-width:22px;text-align:center;background:#263650;border-radius:5px;font:11px/20px var(--mono);color:#cedbea;padding:0 4px}
+.nav-item .dot{position:absolute;left:4px;top:50%;margin-top:-3.5px}
+.content{padding:27px;width:100%;min-width:0}
+.mobile-nav{display:none}
+
+.page-title{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.page-title h1{font-size:20px;line-height:1.4;font-weight:600}
+.page-title-main{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;min-width:0}
+.page-sub{font-size:12px;color:var(--muted)}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{min-height:44px;padding:9px 14px;display:inline-flex;justify-content:center;align-items:center;gap:8px;border:1px solid #344861;border-radius:8px;background:#17243a;color:#e1eaf5;font-size:12px;font-weight:500;line-height:1.5;transition:background .16s,border-color .16s;white-space:nowrap}
+.btn:hover{background:#20324b;border-color:#4c6584}
+.btn.small{font-size:11px;padding:6px 10px;min-height:36px}
+.link-btn{min-height:32px;padding:4px 2px;border:0;background:none;display:inline-flex;align-items:center;gap:6px;color:var(--blue);font-size:12px;transition:color .16s}
+.link-btn:hover{color:#a8e4fc}
+
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid #344861;border-radius:5px;background:#1b2940;color:#c8d7e9;font-size:11px;line-height:1.6;white-space:nowrap;font-weight:400}
+.chip.green{background:#22c55e0e;border-color:#22c55e42;color:var(--green-light)}
+.chip.blue{background:#38bdf80c;border-color:#38bdf83d;color:var(--blue)}
+.chip.amber{background:#f59e0b0d;border-color:#f59e0b42;color:var(--amber)}
+.chip.red{background:#fb71850d;border-color:#fb718548;color:var(--red)}
+.chip .icon{width:12px;height:12px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+
+.panel{border:1px solid var(--line);border-radius:12px;background:linear-gradient(170deg,var(--surface),var(--low));min-width:0;overflow:hidden}
+.panel-head{padding:16px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.panel-head h2{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.panel-head p{font-size:11px;color:var(--muted);margin-top:3px}
+.ph-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.panel-body{padding:20px}
+.notice{padding:12px 15px;border:1px solid #3d536d;background:#1a2b414d;border-radius:8px;color:#c0d4e9;font-size:12px;display:flex;gap:10px;align-items:flex-start}
+.notice .icon{margin-top:1px;width:17px;height:17px}
+.notice.amber{color:#f9d492;border-color:#6a5229;background:#60451c20}
+.notice.red{color:#fec0c9;border-color:#6e3544;background:#59233120}
+.untouched{padding:40px 24px;text-align:center;color:var(--muted);border:1px dashed #33455d;border-radius:12px;display:flex;flex-direction:column;gap:6px;align-items:center}
+
+select{background:#0d1728;border:1px solid #3b4d66;border-radius:8px;min-height:40px;color:#e0e9f5;padding:7px 12px;max-width:100%;font-size:13px}
+.seg{display:flex;flex-wrap:wrap;gap:4px;padding:3px;border:1px solid #33455d;border-radius:9px;background:#0d1728}
+.seg-opt{flex:1 1 auto;min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);font-size:12px;line-height:1.4;transition:background .16s,color .16s;white-space:nowrap}
+.seg-opt:hover{background:#ffffff08;color:var(--text)}
+.seg-opt[aria-checked=true]{border-color:#48805d;background:#22c55e14;color:#a0e8b9;font-weight:500}
+.seg-opt .icon{width:14px;height:14px}
+.vt .seg-opt{min-height:34px;padding:4px 10px;font-size:11px}
+.toggle{position:relative;width:44px;height:26px;flex:none;border-radius:13px;border:1px solid #3b4d66;background:#0d1728;transition:background .16s,border-color .16s;padding:0}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#8fa2b9;transition:transform .16s,background .16s}
+.toggle[aria-checked=true]{background:#22c55e30;border-color:#3c8a59}
+.toggle[aria-checked=true]::after{transform:translateX(18px);background:var(--green-light)}
+
+/* filter row: one row above everything it scopes */
+.filterbar{display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:#0e1727f0;margin-bottom:16px;position:sticky;top:8px;z-index:5;backdrop-filter:blur(6px)}
+.fgroup{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.fgroup .seg-opt{min-height:36px;padding:4px 11px}
+.switch-l{display:inline-flex;gap:10px;align-items:center;font-size:12px;color:var(--soft)}
+.refresh-meta{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+
+/* KPI tiles */
+#sections{display:flex;flex-direction:column;gap:18px;transition:opacity .18s ease}
+#sections.busy{opacity:.45}
+.kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px}
+.kpi{padding:14px 16px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.kpi .label{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.kv{display:block;font:600 28px/1.3 var(--sans);letter-spacing:-.3px;color:var(--text)}
+.kv em{font:400 12px var(--sans);color:var(--muted);margin-left:5px;font-style:normal;letter-spacing:0}
+.kpi .note{font-size:11px;color:var(--muted)}
+.delta{display:flex;align-items:center;gap:4px;font-size:11px;flex-wrap:wrap}
+.delta .icon{width:13px;height:13px}
+.delta.good{color:var(--green-light)}.delta.bad{color:var(--red)}.delta.flat{color:var(--muted)}
+.delta .vs{color:var(--muted)}
+.chip.tag{padding:0 6px;font-size:10px;line-height:1.7}
+.spark-box{margin-top:6px}
+
+/* charts */
+.chart{position:relative;width:100%;min-width:0}
+.chart-svg{display:block;width:100%;height:auto;overflow:visible}
+.chart-svg text{font-family:var(--sans);font-size:11px;fill:var(--muted)}
+.chart-svg .tick{font-variant-numeric:tabular-nums}
+.chart-svg .grid{stroke:var(--grid);stroke-width:1;shape-rendering:crispEdges}
+.chart-svg .axis{stroke:var(--axis);stroke-width:1;shape-rendering:crispEdges}
+.chart-svg .hit{fill:transparent;stroke:none;transition:fill .15s}
+.chart-svg [data-rove]{cursor:pointer;outline:none}
+.chart-svg [data-rove]:hover .hit{fill:#ffffff07}
+.chart-svg [data-rove]:focus-visible .hit{stroke:var(--blue);stroke-width:2}
+.chart-svg .mk{transition:filter .15s}
+.chart-svg [data-rove]:hover .mk,.chart-svg [data-rove]:focus-visible .mk{filter:brightness(1.25)}
+.chart-svg .dlabel{fill:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.chart-svg .rlabel{fill:var(--soft);font-size:12px}
+.chart-svg .vt1{fill:var(--text);font-size:11px}
+.chart-svg .vt2{fill:var(--muted);font-size:10.5px}
+.chart-svg .uncov{fill:var(--uncov)}
+.chart-svg .uncov-t{fill:#8496ae}
+.chart-svg .prev-line{fill:none;stroke:var(--c-prev);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;pointer-events:none}
+.chart-svg .spark-line{fill:none;stroke:var(--c-spark);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart-svg .spark-hit{fill:transparent;cursor:default}
+.lgd{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--soft);margin-bottom:10px;align-items:center}
+.lgd-i{display:inline-flex;align-items:center;gap:7px}
+.lgd-k{display:inline-block;flex:none}
+.lgd-k.rect{width:10px;height:10px;border-radius:2px}
+.lgd-k.line{width:14px;height:2px;border-radius:1px}
+.lgd-k.tickmk{width:2px;height:12px;background:var(--text)!important}
+.lgd-i .icon{width:14px;height:14px}
+.tt{position:fixed;z-index:50;pointer-events:none;background:var(--tt-bg);border:1px solid #3b506c;border-radius:8px;padding:8px 11px;font-size:12px;box-shadow:0 10px 30px #000a;min-width:130px;max-width:280px;left:0;top:0}
+.tt[hidden]{display:none}
+.tt-title{color:var(--muted);font-size:11px;margin-bottom:4px}
+.tt-row{display:flex;align-items:center;gap:8px;line-height:1.75}
+.tt-row b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tt-row span:last-child{color:var(--soft)}
+.tt-key{width:12px;height:2px;border-radius:1px;flex:none}
+.tt-key.none{background:transparent}
+.tt-note{color:var(--muted);font-size:11px;margin-top:4px;border-top:1px solid #26365099;padding-top:4px}
+
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px 28px}
+.egrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:22px 28px}
+.block{min-width:0}
+.block>h3{margin-bottom:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.block>h3 .icon{width:15px;height:15px}
+.bdesc{font-size:11px;color:var(--muted);margin-bottom:10px}
+.divider{border-top:1px solid var(--line);margin:22px 0}
+.multiples{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.mini{border:1px solid #22324a;border-radius:9px;padding:10px 12px 6px;background:#0c1626;min-width:0}
+.mini-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px;margin-bottom:4px}
+.mini-h strong{font-weight:600}
+.ministats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.mstat{border:1px solid #22324a;border-radius:9px;padding:12px 14px;background:#0c1626;min-width:0}
+.mstat .label{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mstat strong{display:block;font:600 22px/1.35 var(--sans)}
+.mstat strong em{font:400 12px var(--sans);color:var(--muted);margin-left:4px;font-style:normal}
+.mstat .note{font-size:11px;color:var(--muted)}
+.mstat .chips{margin-top:6px}
+.estats{display:grid;grid-template-columns:1fr;gap:10px;align-content:start}
+.summary-line{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--soft);flex-wrap:wrap;margin-bottom:8px}
+.summary-line .icon{width:15px;height:15px}
+.share-lg{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px 18px;margin-top:12px;font-size:12px;color:var(--soft)}
+.share-lg .lgd-i b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.share-lg .lgd-i span.m{color:var(--muted)}
+
+/* INBOX meter */
+.inbox{display:grid;grid-template-columns:minmax(0,1.3fr) repeat(3,minmax(0,1fr));gap:12px 20px;align-items:start;padding:14px 16px;border:1px solid #22324a;border-radius:10px;background:#0c1626}
+.inbox h3{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.meter{height:10px;border-radius:5px;background:var(--meter-track);overflow:hidden;margin:10px 0 6px;display:flex}
+.meter span{display:block;height:100%;border-radius:0 5px 5px 0}
+.inbox .fig{font:600 18px/1.4 var(--sans)}
+.inbox .fig em{font:400 11px var(--sans);color:var(--muted);font-style:normal;margin-left:4px}
+.inbox .sub{font-size:11px;color:var(--muted)}
+.inbox .hint{grid-column:1/-1;font-size:12px;color:var(--soft);display:flex;gap:8px;align-items:center;border-top:1px solid #22324a;padding-top:10px}
+.inbox .hint .icon{width:15px;height:15px;color:var(--blue)}
+
+/* tables */
+.table-wrap{overflow-x:auto}
+table.grid{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}
+table.grid.fit{min-width:0}
+table.grid th{font-weight:500;color:var(--muted);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.3px;white-space:nowrap}
+table.grid td{padding:10px 12px;border-bottom:1px solid #26365080;vertical-align:middle}
+table.grid th.num,table.grid td.num{text-align:right;font-variant-numeric:tabular-nums}
+table.grid tbody tr{transition:background .14s}
+table.grid tbody tr.pick{cursor:pointer}
+table.grid tbody tr.pick:hover{background:#ffffff05}
+table.grid tbody tr:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+table.grid tr:last-child td{border-bottom:0}
+table.grid tr.sel td{background:#22c55e0a}
+table.grid tr.hl td{background:#fb71850b}
+table.grid tr.hl td:first-child{box-shadow:inset 3px 0 0 var(--st-red)}
+table.grid tr.grp th{background:#0c1626;color:var(--soft);font-size:11px;padding:8px 12px;border-bottom:1px solid var(--line)}
+table.grid tr.grp th span{color:var(--muted);font-weight:400;margin-left:8px}
+.th-btn{background:none;border:0;color:inherit;font:inherit;display:inline-flex;align-items:center;gap:4px;padding:2px 0;min-height:30px;letter-spacing:inherit;transition:color .15s}
+.th-btn:hover{color:var(--text)}
+.th-btn .icon{width:12px;height:12px;opacity:.5}
+th[aria-sort] .th-btn{color:var(--text)}
+th[aria-sort] .th-btn .icon{opacity:1}
+.mname strong{display:block;font-weight:600}
+.mname span{font-size:11px;color:var(--muted)}
+.sbar-cell{display:flex;align-items:center;gap:8px;min-width:190px}
+.sbar-track{position:relative;flex:1;height:14px;display:flex;align-items:center}
+.sbar{display:flex;gap:2px;height:12px}
+.sbar span{display:block;height:100%;min-width:2px;transition:filter .15s}
+.sbar span:hover{filter:brightness(1.25)}
+.sbar span:last-child{border-radius:0 4px 4px 0}
+.avg-mk{position:absolute;top:-2px;width:2px;height:18px;margin-left:-1px;background:var(--text);border-radius:1px;opacity:.85}
+.sbar-cell b{font-weight:600;font-variant-numeric:tabular-nums;min-width:22px;text-align:right}
+.state-note{display:block;font-size:10.5px;color:var(--muted);margin-top:3px;white-space:nowrap}
+
+@media(max-width:1250px){.kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.inbox{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1080px){.workspace-shell{grid-template-columns:180px minmax(0,1fr)}.grid2,.egrid{grid-template-columns:1fr}.ministats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:900px){.workspace-shell{display:block}.workspace-rail{display:none}.mobile-nav{display:flex;gap:6px;overflow-x:auto;padding:10px 14px;border-bottom:1px solid var(--line);background:#0e1727}.mobile-nav .nav-item{width:auto;min-height:40px;white-space:nowrap;padding:8px 12px}.mobile-nav .nav-item .dot{left:2px}.content{padding:22px}.filterbar{position:static}}
+@media(max-width:640px){.scope-banner{padding:9px 14px}.content{padding:18px 14px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.kpi{padding:12px 12px 8px}.kv{font-size:24px}.panel-head{padding:14px 16px}.panel-body{padding:16px 14px}.ministats{gap:10px}.inbox{grid-template-columns:1fr}.filterbar{gap:10px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+
+<div class="demo-bar" role="region" aria-label="演示说明">
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><strong>UI 预览 · 虚构数据</strong><span>影片编号、演员和所有数字均为虚构；筛选和场景会真实重新计算。</span><span style="display:inline-flex;align-items:center;gap:6px"><span class="dot"></span>新增页面</span></div>
+  <div class="seg" role="radiogroup" aria-label="演示场景" id="scenario-seg"></div>
+</div>
+
+<div class="mw-root" id="app"></div>
+<div class="tt" id="tt" role="tooltip" hidden></div>
+<div class="sr-only" id="live" aria-live="polite"></div>
+
+<script>
+(function(){
+'use strict';
+/* ===================== icons (Lucide-style, inline) ===================== */
+const P={
+grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+film:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/>',
+review:'<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+alert:'<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+monitor:'<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+laptop:'<rect x="4" y="4" width="16" height="11" rx="2"/><path d="M2 19h20"/>',
+folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+sliders:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+chart:'<path d="M3 3v18h18"/><path d="M8 17v-5M13 17V8M18 17v-8"/>',
+table:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 10v10"/>',
+check:'<path d="M20 6 9 17l-5-5"/>',
+ok:'<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5"/>',
+fail:'<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>',
+pause:'<circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/>',
+off:'<path d="M2 2l20 20"/><path d="M8.5 16.5a5 5 0 0 1 7 0M5 12.9a10 10 0 0 1 5.2-2.7M19 12.9a10 10 0 0 0-2.2-1.6M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8A15 15 0 0 0 11 5M12 20h.01"/>',
+plus:'<path d="M12 5v14M5 12h14"/>',
+refresh:'<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
+info:'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+zap:'<path d="M13 2 3 14h9l-1 8 10-12h-9z"/>',
+drive:'<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M5 13 7.5 4h9L19 13M6 17h.01M10 17h.01"/>',
+up:'<path d="M12 19V5M5 12l7-7 7 7"/>',
+down:'<path d="M12 5v14M19 12l-7 7-7-7"/>',
+flat:'<path d="M5 12h14"/>',
+sort:'<path d="m7 15 5 5 5-5M7 9l5-5 5 5"/>',
+sortA:'<path d="m7 14 5-5 5 5"/>',
+sortD:'<path d="m7 10 5 5 5-5"/>'};
+const I=(n,cls)=>`<svg class="icon${cls?' '+cls:''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]||''}</svg>`;
+
+/* ===================== time + format helpers ===================== */
+// All times are "JST wall clock" stored as UTC ms and formatted with getUTC*.
+const MIN=6e4,H=36e5,DAY=864e5;
+const NOW=Date.UTC(2026,9,31,15,0,0),TODAY=Date.UTC(2026,9,31);
+const GEN_START=Date.UTC(2026,6,28),DATA_START=Date.UTC(2026,7,2),COVER=Date.UTC(2026,9,24);
+const BUSH_OFF=Date.UTC(2026,9,31,8,6),SPIKE_START=Date.UTC(2026,9,31,10,12),SPIKE_STOP=Date.UTC(2026,9,31,13,41),NEW_JOIN=Date.UTC(2026,9,31,14,20);
+const pad=n=>String(n).padStart(2,'0');
+const dt=t=>new Date(t);
+const fMD=t=>pad(dt(t).getUTCMonth()+1)+'-'+pad(dt(t).getUTCDate());
+const fHM=t=>pad(dt(t).getUTCHours())+':'+pad(dt(t).getUTCMinutes());
+const fMDHM=t=>fMD(t)+' '+fHM(t);
+const fWk=t=>'周'+'日一二三四五六'[dt(t).getUTCDay()];
+const fYM=t=>dt(t).getUTCFullYear()+'-'+pad(dt(t).getUTCMonth()+1);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const sum=a=>a.reduce((x,y)=>x+y,0);
+const avg=a=>a.length?sum(a)/a.length:null;
+const amin=a=>a.length?Math.min(...a):null;
+const amax=a=>a.length?Math.max(...a):null;
+const quant=(a,q)=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),i=(s.length-1)*q,lo=Math.floor(i),hi=Math.ceil(i);return s[lo]+(s[hi]-s[lo])*(i-lo)};
+const n1=v=>v==null||!isFinite(v)?'—':(Math.round(v*10)/10).toFixed(1);
+const fInt=v=>v==null||!isFinite(v)?'—':Math.round(v).toLocaleString('zh-CN');
+const fH=h=>h==null?'—':h<1?Math.round(h*60)+' 分':n1(h)+' 小时';
+const fMin=m=>m==null?'—':m<1?Math.round(m*60)+' 秒':m<10?n1(m)+' 分':Math.round(m)+' 分';
+const fAutoH=h=>h==null?'—':h<1/60?Math.round(h*3600)+' 秒':h<1?fMin(h*60):fH(h);
+const fSpan=ms=>{const m=Math.round(ms/MIN);if(m<60)return m+' 分钟';const hh=Math.floor(m/60),r=m%60;if(hh<48)return hh+' 小时'+(r?' '+r+' 分':'');return n1(ms/DAY)+' 天'};
+const fKwh=v=>v==null||!isFinite(v)?'—':v>=100?Math.round(v).toLocaleString('zh-CN'):v>=10?n1(v):v.toFixed(2);
+const fPct=v=>v==null||!isFinite(v)?'—':(v<10?n1(v):Math.round(v))+'%';
+
+/* ===================== seeded PRNG ===================== */
+function mulberry32(a){return()=>{a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function rng(...k){let h=2166136261;for(const x of k){h=Math.imul(h^(x|0),16777619)>>>0;h=Math.imul(h^(h>>>13),0x5bd1e995)>>>0}return mulberry32(h)}
+
+/* ===================== fleet (data-driven, N machines) ===================== */
+const BASE_GPUS=[
+ {id:'snow',name:'Snowleopard',model:'RTX 5070 Ti 16GB',avg:3.9,w:300},
+ {id:'bush',name:'Bushpig',model:'RTX 5060 Ti 16GB',avg:6.2,w:200},
+ {id:'gor',name:'Gorilla',model:'RTX 5060 Ti 16GB',avg:8.8,w:200},
+ {id:'bsp',name:'Blacksilverpig',model:'RTX 5060 Ti 16GB',avg:7.0,w:175},
+ {id:'dbp',name:'DarkbluePig',model:'RTX 5060 Ti 16GB',avg:10.9,w:200}];
+const NEWPIG={id:'newp',name:'Newpig',model:'RTX 5060 Ti 16GB',avg:7.0,w:200,joined:NEW_JOIN};
+const CTRL={id:'ctrl',name:'本机',model:'RTX 5060 8GB',full:'本机 · BlackGoldPig'};
+const MODEL_ORDER=['RTX 5060 Ti 16GB','RTX 5070 Ti 16GB'];
+const fleetOf=sc=>sc==='expand'?BASE_GPUS.concat(NEWPIG):BASE_GPUS;
+const PFX=['KDX','MRA','TSV','PLN','HRB','YKO','DMQ','SRN','VEL','OBR','QIA','ZEN'];
+const ACTORS=[['Haru',9],['Mio',8],['Kaede',7],['Rin',6],['Hina',6],['Shiori',5],['Yuzu',4],['Natsu',4],['Sena',3],['Aoi',3],['Tsubasa',2],['Kotone',2],['Nagi',1],['Sora',1]];
+const ETYPES={
+ '4551':{label:'应用程序控制拦截',sev:'fail',hint:'WinError 4551 · 机器故障，自动停领并改派'},
+ ltx:{label:'LTX 失败',sev:'fail',hint:'修复进程异常退出，自动重试'},
+ ffprobe:{label:'缺少 ffprobe',sev:'fail',hint:'工作机缺少 ffprobe，需要补装'},
+ whitelist:{label:'刮削白名单',sev:'fail',hint:'刮削站点不在白名单内'},
+ trans:{label:'翻译服务中断',sev:'warn',hint:'deepseek-flash 无响应，自动恢复后继续'},
+ offline:{label:'设备离线',sev:'warn',hint:'工作机失联'},
+ cpu:{label:'主控 CPU 高占用',sev:'warn',hint:'提示类报警，较频繁'}};
+const RESULT={'已自动改派':['blue','refresh'],'已改派在途影片':['blue','refresh'],'已重试':['green','check'],'已自动恢复':['','check'],'已手动处理':['','check'],'需要处理':['amber','alert']};
+
+/* ===================== data generation (deterministic per scenario) ===================== */
+function gen(sc){
+ const bushOff=sc!=='normal',spike=sc==='spike',fleet=fleetOf(sc);
+ const films=[],events=[],iv={};fleet.concat(CTRL).forEach(m=>iv[m.id]=[]);
+ const hist=BASE_GPUS; // machines with history (Newpig joined today)
+ const pickM=(r,ex)=>{const pool=hist.filter(m=>!ex.includes(m.id)),tot=sum(pool.map(m=>1/m.avg));let x=r()*tot;for(const m of pool){x-=1/m.avg;if(x<=0)return m}return pool[pool.length-1]};
+ const aTot=sum(ACTORS.map(a=>a[1]));
+ const pickA=r=>{let x=r()*aTot;for(const a of ACTORS){x-=a[1];if(x<=0)return a[0]}return ACTORS[0][0]};
+ let i=0;
+ for(let day=GEN_START,di=0;day<NOW+4*DAY;day+=DAY,di++){
+  const rd=rng(11,di),wd=dt(day).getUTCDay();
+  const n=10+Math.floor(rd()*10)+(wd===0||wd===6?2:0)+(rd()<.5?1:0);
+  for(let j=0;j<n;j++,i++){
+   const r=rng(23,di,j),rr=rng(29,di,j);
+   const res=r()<.46?'4K':'1080P';
+   const durH=1.5+2.5*Math.pow(r(),1.35);
+   const tDone=day+(.012+.975*r())*DAY;
+   const noise=Math.exp((r()+r()+r()-1.5)*.42),tail=r()<.012?1.9:1;
+   const speech=r()>.04;
+   const asrMin=7*(durH/2.6)*(.8+.45*r());
+   const transSec=speech?55*(.7+.6*r()):0;
+   const lines=speech?Math.round(durH*60*(9+5*r())):0;
+   const scrapeMin=3*(.55+.9*r())+(r()<.05?5*r():0);
+   const sizeGB=clamp(durH*(res==='4K'?6.9:3.3)*(.65+.7*r()),2.3,42.3);
+   const archiveMin=clamp(3*(sizeGB/12.6)*(.8+.4*r()),.6,12);
+   const handH=.4+2.2*r();
+   let queueH=clamp(14.5*Math.pow(-Math.log(1-r()*.995),.85),.3,38);
+   if(tDone>NOW-8*H&&r()<.75)queueH=Math.min(tDone>NOW?62:38,queueH+16+(tDone>NOW?30:16)*r()); // the 10-30 batch drop is still queued
+   const postH=(asrMin+transSec/60+scrapeMin+archiveMin)/60;
+   const restoreEnd=tDone-(postH+handH*.5)*H;
+   let m=pickM(r,[]),moved=null;
+   if(bushOff&&m.id==='bush'&&restoreEnd>BUSH_OFF){moved='bush';m=pickM(rr,['bush'])}
+   if(spike&&m.id==='gor'&&restoreEnd>SPIKE_START){moved=moved||'gor';m=pickM(rr,['gor','bush'])}
+   const restoreH=clamp(m.avg/1.368*(res==='4K'?1.8:1)*(durH/2.6)*noise*tail,1.1,39);
+   const restoreStart=restoreEnd-restoreH*H;
+   queueH=Math.max(queueH,4.6-(handH+restoreH+postH));
+   const tIn=restoreStart-(queueH+handH*.5)*H;
+   const kwhR=restoreH*m.w*(.86+.12*r())/1000;
+   const kwhC=(asrMin*150+(scrapeMin+archiveMin)*60)/60/1000;
+   const target=r()<.74?'main':'cat',second=target==='main'&&r()<.12;
+   const actor=target==='main'?pickA(r):null,unc=r()<.38;
+   const code=PFX[(i*7+3)%PFX.length]+'-'+(100+(i*389)%900);
+   const f={i,code,res,durH,sizeGB,m:m.id,moved,queueH,restoreH,restoreStart,restoreEnd,asrMin,transSec,lines,scrapeMin,archiveMin,tIn,tDone,leadH:(tDone-tIn)/H,kwhR,kwhC,kwh:kwhR+kwhC,target,second,actor,unc,subs:lines>0,done:tDone<=NOW};
+   films.push(f);
+   if(r()<.03){ // one failed attempt before the successful one
+    const tr=r(),type=tr<.36?'4551':tr<.72?'ltx':tr<.86?'ffprobe':'whitelist';let ev;
+    if(type==='4551'){const t=restoreStart-(.3+3.5*r())*H,fm=pickM(rr,[m.id].concat(bushOff&&t>BUSH_OFF-6*H?['bush']:[]));ev={t,type,mid:fm.id,result:'已自动改派'};iv[fm.id].push({s:t,e:t+(.5+1.5*r())*H,st:'stop',note:'自动停领'})}
+    else if(type==='ltx')ev={t:restoreStart-(.2+1.8*r())*H,type,mid:m.id,result:'已重试'};
+    else if(type==='ffprobe')ev={t:restoreStart-(.2+1.8*r())*H,type,mid:m.id,result:'已手动处理'};
+    else ev={t:tDone-(.3+4*r())*H,type,mid:'ctrl',result:'已手动处理'};
+    ev.code=code;ev.res=res;
+    if(ev.t<=NOW){if(!f.done&&(type==='whitelist'||type==='ffprobe'))ev.result='需要处理';events.push(ev)}
+   }
+  }
+ }
+ for(let day=GEN_START,di=0;day<NOW;day+=DAY,di++){
+  const r=rng(41,di);
+  if(r()<.3){const t=day+r()*DAY,d=(4+41*r())*MIN;if(t<NOW)events.push({t,type:'trans',mid:'ctrl',dur:d,result:'已自动恢复',note:'中断 '+fSpan(d)})}
+  const nc=3+Math.floor(r()*6);
+  for(let k=0;k<nc;k++){const t=day+r()*DAY;if(t<NOW)events.push({t,type:'cpu',mid:'ctrl',result:'已自动恢复',note:'CPU '+(88+Math.floor(r()*11))+'%'})}
+  BASE_GPUS.forEach((m,mi)=>{const q=rng(53,mi,di);if(q()<.07){const s=day+q()*DAY,d=(10+80*q())*MIN;if(s<NOW&&!(bushOff&&m.id==='bush'&&s>BUSH_OFF-3*H)){iv[m.id].push({s,e:Math.min(s+d,NOW),st:'off',note:'重启 / 系统更新'});events.push({t:s,type:'offline',mid:m.id,result:'已自动恢复',note:'离线 '+fSpan(d)})}}});
+ }
+ if(bushOff){iv.bush.push({s:BUSH_OFF,e:NOW,st:'off',note:'送修中'});events.push({t:BUSH_OFF,type:'offline',mid:'bush',result:'已改派在途影片',note:'送修中'})}
+ if(spike){
+  const mv=films.filter(f=>f.moved==='gor').sort((a,b)=>a.restoreEnd-b.restoreEnd);
+  for(let k=0;k<9;k++){const t=SPIKE_START+k*(SPIKE_STOP-SPIKE_START-MIN)/8,f=mv[k];events.push({t,type:'4551',mid:'gor',code:f?f.code:'—',res:f?f.res:null,result:'已自动改派',spike:true,note:'WinError 4551'});if(k<8)iv.gor.push({s:t+2*MIN,e:t+20*MIN,st:'stop',note:'自动停领'})}
+  iv.gor.push({s:SPIKE_STOP,e:NOW,st:'stop',note:'连续拦截后自动停领，待检查'});
+ }
+ const inflight=films.filter(f=>f.tIn<NOW-4*H&&!f.done);
+ if(inflight[0])events.push({t:NOW-52*MIN,type:'whitelist',mid:'ctrl',code:inflight[0].code,res:inflight[0].res,result:'需要处理',note:'刮削站点不在白名单内'});
+ if(inflight[1])events.push({t:NOW-3*H-17*MIN,type:'ffprobe',mid:'bsp',code:inflight[1].code,res:inflight[1].res,result:'需要处理',note:'Blacksilverpig 缺少 ffprobe'});
+ Object.keys(iv).forEach(k=>{iv[k]=iv[k].filter(x=>x.s<NOW).map(x=>({...x,e:Math.min(x.e,NOW)})).sort((a,b)=>a.s-b.s)});
+ events.sort((a,b)=>b.t-a.t);
+ return {films,events,iv,fleet};
+}
+const DATA={};
+const data=()=>DATA[S.sc]||(DATA[S.sc]=gen(S.sc));
+function stateAt(d,mid,t){const m=d.fleet.find(x=>x.id===mid);if(m&&m.joined&&t<m.joined)return 'none';let st='on';for(const x of d.iv[mid]||[]){if(t>=x.s&&t<x.e){if(x.st==='off')return 'off';st='stop'}}return st}
+function uptime(d,mid,s,e){
+ const m=d.fleet.find(x=>x.id===mid);if(m&&m.joined)s=Math.max(s,m.joined);
+ if(e<=s)return null;
+ const segs=(d.iv[mid]||[]).map(x=>[Math.max(x.s,s),Math.min(x.e,e),x.st]).filter(x=>x[1]>x[0]);
+ const union=st=>{let tot=0,cs=0,ce=-1;segs.filter(x=>x[2]===st).forEach(([a,b])=>{if(a>ce){if(ce>cs)tot+=ce-cs;cs=a;ce=b}else ce=Math.max(ce,b)});if(ce>cs)tot+=ce-cs;return tot};
+ const off=union('off'),stop=union('stop');return {on:1-off/(e-s),off,stop,span:e-s};
+}
+
+/* ===================== state ===================== */
+const S={sc:'bush',page:'analytics',range:'7d',machine:'all',res:'all',compare:false,view:{},sort:{k:'model',d:1},hideCpu:true,refreshed:NOW+12e3};
+const SCEN=[['normal','正常'],['bush','Bushpig 送修'],['spike','有异常'],['cover','真实覆盖'],['expand','扩容后（6 台 GPU）']];
+const RANGES=[['24h','24 小时'],['7d','7 天'],['30d','30 天'],['90d','90 天'],['all','全部']];
+const RES=[{k:'4K',name:'4K',color:'var(--c1)'},{k:'1080P',name:'1080P',color:'var(--c2)'}];
+const resList=()=>RES.filter(r=>S.res==='all'||S.res===r.k);
+const STAGE={queue:['排队等待','var(--c-queue)'],restore:['修复（LTX）','var(--c1)'],asr:['ASR','var(--c3)'],trans:['翻译','var(--c4)'],scrape:['刮削','var(--c5)'],archive:['归档','var(--c6)'],total:['全程','var(--c-total)']};
+const coverOf=()=>S.sc==='cover'?COVER:DATA_START;
+
+/* ===================== ranges + buckets ===================== */
+function rangeDef(k){
+ const cover=coverOf();let edges=[],kind;
+ const push=(s,step,n)=>{for(let i=0;i<=n;i++)edges.push(s+i*step)};
+ if(k==='24h'){kind='h';push(NOW-24*H,H,24)}
+ else if(k==='7d'){kind='d';push(TODAY-6*DAY,DAY,7)}
+ else if(k==='30d'){kind='d';push(TODAY-29*DAY,DAY,30)}
+ else if(k==='90d'){kind='w';push(TODAY+DAY-91*DAY,7*DAY,13)}
+ else{ // 全部: from the first record; monthly buckets once the span exceeds 120 days
+  const span=NOW-cover;
+  if(span>120*DAY){kind='m';const d0=dt(cover);let y=d0.getUTCFullYear(),mo=d0.getUTCMonth();edges.push(Date.UTC(y,mo,1));while(edges[edges.length-1]<=NOW){mo++;if(mo>11){mo=0;y++}edges.push(Date.UTC(y,mo,1))}}
+  else if(span>45*DAY){kind='w';for(let t=cover;;t+=7*DAY){edges.push(t);if(t>NOW)break}}
+  else{kind='d';for(let t=cover;;t+=DAY){edges.push(t);if(t>NOW)break}}
+ }
+ const n=edges.length-1,start=edges[0],end=edges[n],len=end-start;
+ const bs=i=>edges[i],be=i=>edges[i+1];
+ const idx=t=>{if(t<start||t>=end)return -1;let lo=0,hi=n-1;while(lo<hi){const mid=(lo+hi+1)>>1;if(edges[mid]<=t)lo=mid;else hi=mid-1}return lo};
+ const fixed=k!=='all'||kind!=='m';
+ const short=i=>kind==='h'?fHM(bs(i)):kind==='m'?pad(dt(bs(i)).getUTCMonth()+1)+'月':fMD(bs(i));
+ const title=i=>{const s=bs(i),e=be(i);if(kind==='h')return fMD(s)+' '+fHM(s)+'–'+fHM(e);if(kind==='d')return fMD(s)+' '+fWk(s)+(s===TODAY?'（截至 15:00）':'');if(kind==='m')return fYM(s)+(e>NOW?'（截至今天）':'');return fMD(s)+' – '+fMD(e-DAY)+(e>NOW?'（截至今天）':'')};
+ const name={'24h':'过去 24 小时','7d':'过去 7 天','30d':'过去 30 天','90d':'过去 90 天',all:'全部记录'}[k];
+ const unit={h:'每小时',d:'每天',w:'每周',m:'每月'}[kind];
+ return {k,edges,n,start,end,len,bs,be,idx,pidx:t=>fixed?idx(t+len):-1,short,title,name,unit,kind,prevStart:start-len,prevEnd:start,hasPrev:k!=='all'};
+}
+
+/* ===================== filter + aggregate (one dataset, every section) ===================== */
+function compute(){
+ const d=data(),R=rangeDef(S.range),cover=coverOf(),mf=S.machine,ctrl=mf==='ctrl';
+ const resOk=x=>S.res==='all'||x===S.res;
+ const pool=d.films.filter(f=>f.done&&f.tDone>=cover&&resOk(f.res)&&(mf==='all'||ctrl||f.m===mf));
+ const within=(t,s,e)=>t>=s&&t<e;
+ const cur=pool.filter(f=>within(f.tDone,R.start,R.end));
+ const prevOk=R.hasPrev&&R.prevStart>=cover;
+ const prev=prevOk?pool.filter(f=>within(f.tDone,R.prevStart,R.prevEnd)):null;
+ const evPool=d.events.filter(e=>e.t>=cover&&(mf==='all'||(ctrl?e.mid==='ctrl':e.mid===mf))&&(!e.res||resOk(e.res)));
+ const ev=evPool.filter(e=>within(e.t,R.start,R.end));
+ const evPrev=prevOk?evPool.filter(e=>within(e.t,R.prevStart,R.prevEnd)):null;
+ const visStart=Math.max(R.start,cover),visEnd=Math.min(R.end,NOW),sw=(visEnd-R.start)/12;
+ const slices=Array.from({length:12},(_,i)=>[R.start+i*sw,R.start+(i+1)*sw]);
+ const fleet=d.fleet.filter(m=>mf==='all'||m.id===mf);
+ return {d,R,cover,ctrl,cur,prev,prevOk,ev,evPrev,visStart,visEnd,slices,fleet,resOk,
+  uncov:R.start<cover?(cover-R.start)/R.len:0,coverDays:Math.ceil((NOW-cover)/DAY),days:(visEnd-visStart)/DAY,
+  energyOf:f=>ctrl?f.kwhC:f.kwh};
+}
+const isFail=e=>ETYPES[e.type].sev==='fail';
+function bucketize(A,films,val,prev){const out=new Array(A.R.n).fill(0);films.forEach(f=>{const i=prev?A.R.pidx(f.tDone):A.R.idx(f.tDone);if(i>=0)out[i]+=val?val(f):1});return out}
+function sliceVals(A,fn){return A.slices.map(([s,e])=>e<=A.cover?null:fn(s,e))}
+const inS=(t,s,e)=>t>=s&&t<e;
+function stats(vals){return vals.length?{n:vals.length,min:amin(vals),p25:quant(vals,.25),p50:quant(vals,.5),p75:quant(vals,.75),max:amax(vals),avg:avg(vals)}:null}
+function machineRows(A){
+ if(A.ctrl)return [];
+ return A.fleet.map(m=>{
+  const fs=A.cur.filter(f=>f.m===m.id),f4=fs.filter(f=>f.res==='4K'),f1=fs.filter(f=>f.res==='1080P'),rh=fs.map(f=>f.restoreH),sumR=sum(rh),kwh=sum(fs.map(f=>f.kwhR));
+  const up=uptime(A.d,m.id,A.visStart,A.visEnd);
+  return {m,fs,n4:f4.length,n1:f1.length,total:fs.length,a4:avg(f4.map(f=>f.restoreH)),a1:avg(f1.map(f=>f.restoreH)),min:amin(rh),max:amax(rh),
+   power:sumR?kwh*1000/sumR:null,kwh,fails:A.ev.filter(e=>e.mid===m.id&&isFail(e)).length,eff:fs.length?sumR/sum(fs.map(f=>f.durH)):null,
+   st:stateAt(A.d,m.id,NOW-1),onDays:up?(up.span-up.off)/DAY:0};
+ });
+}
+function modelGroups(rows){const g={};rows.forEach(r=>{(g[r.m.model]=g[r.m.model]||[]).push(r)});return MODEL_ORDER.filter(k=>g[k]).map(k=>({model:k,rows:g[k]}))}
+function inboxNow(d){
+ const pending=d.films.filter(f=>f.tIn<=NOW&&f.tDone>NOW),pendGB=sum(pending.map(f=>f.sizeGB)),other=200,cap=1000;
+ const wk=d.films.filter(f=>f.done&&f.tDone>NOW-7*DAY),freed=sum(wk.map(f=>f.sizeGB))/7,avgGB=avg(wk.map(f=>f.sizeGB))||12.6;
+ const used=pendGB+other,free=cap-used;
+ return {pending:pending.length,pendGB,used,free,cap,other,freed,avgGB,perDay:wk.length/7,canNow:Math.floor(free/avgGB),canTomorrow:Math.floor((free+freed)/avgGB)};
+}
+
+/* ===================== DOM helpers + tooltip ===================== */
+const SVGNS='http://www.w3.org/2000/svg';
+function setA(e,a){if(!a)return;for(const k in a){const v=a[k];if(v==null||v===false)continue;if(k==='class')e.setAttribute('class',v);else if(k==='tip'){e._tip=v;e.setAttribute('data-tip','')}else if(k.startsWith('on')&&typeof v==='function')e.addEventListener(k.slice(2),v);else e.setAttribute(k,v===true?'':v)}}
+function add(e,kids){for(const c of kids.flat(9)){if(c==null||c===false)continue;e.append(c.nodeType?c:document.createTextNode(String(c)))}}
+function h(tag,a,...kids){const e=document.createElement(tag);setA(e,a);add(e,kids);return e}
+function sv(tag,a,...kids){const e=document.createElementNS(SVGNS,tag);setA(e,a);add(e,kids);return e}
+function icon(n,cls){const t=document.createElement('template');t.innerHTML=I(n,cls);return t.content.firstChild}
+function svgIcon(n,x,y,size,color){const e=sv('svg',{x,y,width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:color,'stroke-width':2,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'});e.innerHTML=P[n];return e}
+const $=s=>document.querySelector(s);
+const tt=document.getElementById('tt');let tipEl=null;
+function fillTip(t){
+ if(typeof t==='function')t=t();
+ tt.replaceChildren();
+ if(t.title)tt.append(h('div',{class:'tt-title'},t.title));
+ (t.rows||[]).forEach(r=>tt.append(h('div',{class:'tt-row'},h('span',{class:'tt-key'+(r.color?'':' none'),style:r.color?'background:'+r.color:null}),h('b',{},r.value),h('span',{},r.label||''))));
+ if(t.note)tt.append(h('div',{class:'tt-note'},t.note));
+ tt.hidden=false;
+}
+function placeTip(x,y,above){
+ const w=tt.offsetWidth,hh=tt.offsetHeight,vw=window.innerWidth,vh=window.innerHeight;
+ let l=x+14,t=above?y-hh-10:y+14;
+ if(l+w>vw-8)l=x-w-14;if(l<8)l=8;
+ if(t+hh>vh-8)t=y-hh-14;if(t<8)t=above?y+14:8;
+ tt.style.transform=`translate(${Math.round(l)}px,${Math.round(t)}px)`;
+}
+function showTip(t,x,y,above){fillTip(t);placeTip(x,y,above)}
+function hideTip(){tt.hidden=true;tipEl=null}
+document.addEventListener('pointerover',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');if(el&&el._tip){tipEl=el;showTip(el._tip,e.clientX,e.clientY)}});
+document.addEventListener('pointermove',e=>{if(tipEl&&!tt.hidden&&tipEl.contains(e.target))placeTip(e.clientX,e.clientY)});
+document.addEventListener('pointerout',e=>{if(tipEl&&!tipEl.contains(e.relatedTarget))hideTip()});
+document.addEventListener('focusin',e=>{const el=e.target.closest&&e.target.closest('[data-tip]');if(el&&el._tip){tipEl=el;const r=el.getBoundingClientRect();showTip(el._tip,r.left+r.width/2,r.top,true)}});
+document.addEventListener('focusout',e=>{if(tipEl&&tipEl===e.target)hideTip()});
+window.addEventListener('scroll',()=>{if(!tt.hidden&&!(document.activeElement&&document.activeElement._tip))hideTip()},{passive:true});
+
+/* chart registry: containers are drawn after insertion, redrawn on resize */
+let CH=[];
+function chart(draw,hgt,cls){const el=h('div',{class:'chart'+(cls?' '+cls:''),style:`min-height:${hgt}px`});CH.push({el,draw});return el}
+function drawCharts(){hideTip();CH=CH.filter(c=>c.el.isConnected);CH.forEach(c=>{const w=Math.floor(c.el.clientWidth);if(w<10)return;c.el.replaceChildren();c.draw(c.el,w)})}
+function svgRoot(W,Hh,label){return sv('svg',{viewBox:`0 0 ${W} ${Hh}`,width:W,height:Hh,class:'chart-svg',role:'img','aria-label':label,'data-rove-group':''})}
+function niceTicks(max,count){if(!(max>1e-6))return [0,1];const raw=max/count,mag=Math.pow(10,Math.floor(Math.log10(raw))),st=[1,2,2.5,5,10].map(x=>x*mag).find(x=>x>=raw-1e-12),top=Math.ceil(max/st-1e-9)*st,t=[];for(let v=0;v<=top+1e-9;v+=st)t.push(+v.toFixed(6));return t}
+const tickFmt=v=>v>=1000?(v/1000).toFixed(v%1000?1:0)+'K':String(+v.toFixed(2));
+const colPath=(x,y,w,hh)=>{const r=Math.min(4,w/2,hh);return `M${x},${y+hh}V${y+r}A${r},${r} 0 0 1 ${x+r},${y}H${x+w-r}A${r},${r} 0 0 1 ${x+w},${y+r}V${y+hh}Z`};
+const barPath=(x,y,w,hh)=>{const r=Math.min(4,hh/2,w);return `M${x},${y}H${x+w-r}A${r},${r} 0 0 1 ${x+w},${y+r}V${y+hh-r}A${r},${r} 0 0 1 ${x+w-r},${y+hh}H${x}Z`};
+const linePath=pts=>{let d='',pen=false;pts.forEach(p=>{if(!p){pen=false;return}d+=(pen?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1);pen=true});return d};
+function rover(){let first=true;return()=>{const v=first?'0':'-1';first=false;return v}}
+function timeTicks(R,x,minGap){const out=[];let last=-1e9;for(let i=0;i<R.n;i++){const px=x(R.bs(i));if(px-last>=(minGap||58)){out.push({x:px,label:R.short(i)});last=px}}return out}
+
+/* ---------- column chart (stacked, optional previous-period line) ---------- */
+function colChart(box,W,o){
+ const Hh=o.h||232,mini=o.mini,padL=mini?22:34,padR=6,padT=mini?8:18,padB=mini?18:24,n=o.n;
+ const pw=Math.max(40,W-padL-padR),ph=Hh-padT-padB;
+ const tot=i=>sum(o.series.map(s=>s.vals[i]||0));
+ const all=Array.from({length:n},(_,i)=>tot(i)).concat((o.prev||[]).map(v=>v||0));
+ const mx=o.yMax!=null?o.yMax:Math.max(0,...all);
+ const ticks=niceTicks(mx||1,mini?2:4),top=ticks[ticks.length-1];
+ const y=v=>padT+ph-(v/top)*ph,band=pw/n,bw=Math.max(1.5,Math.min(24,band*.68,band-2));
+ const svg=svgRoot(W,Hh,o.label),ro=rover();
+ if(o.uncov>0){const uw=pw*Math.min(1,o.uncov);svg.append(sv('rect',{x:padL,y:padT,width:uw,height:ph,class:'uncov'}));if(uw>48&&!mini)svg.append(sv('text',{x:padL+uw/2,y:padT+ph/2,'text-anchor':'middle',class:'uncov-t'},'无记录'))}
+ ticks.forEach(t=>{svg.append(sv('line',{x1:padL,x2:padL+pw,y1:y(t),y2:y(t),class:t===0?'axis':'grid'}));svg.append(sv('text',{x:padL-6,y:y(t)+3.5,'text-anchor':'end',class:'tick'},tickFmt(t)))});
+ const every=o.tickAll?1:Math.max(1,Math.ceil((mini?42:52)/band));
+ if(o.tick)for(let i=0;i<n;i+=every){const lb=o.tick(i);if(lb)svg.append(sv('text',{x:clamp(padL+band*i+band/2,padL+14,W-16),y:Hh-6,'text-anchor':'middle',class:'tick'},lb))}
+ for(let i=0;i<n;i++){
+  const x=padL+band*i+(band-bw)/2;
+  const g=sv('g',{'data-rove':'',tabindex:ro(),tip:o.tip?()=>o.tip(i):null});
+  g.append(sv('rect',{x:padL+band*i,y:padT,width:band,height:ph,class:'hit'}));
+  let acc=0;const segs=o.series.map(s=>({s,v:s.vals[i]||0})).filter(z=>z.v>0);
+  segs.forEach((z,k)=>{const y0=y(acc),y1=y(acc+z.v);acc+=z.v;let hh=y0-y1;if(k>0)hh-=2;if(hh<1)hh=1;
+   g.append(k===segs.length-1?sv('path',{d:colPath(x,y1,bw,hh),class:'mk',style:'fill:'+z.s.color}):sv('rect',{x,y:y1,width:bw,height:hh,class:'mk',style:'fill:'+z.s.color}))});
+  svg.append(g);
+ }
+ if(o.prev)svg.append(sv('path',{d:linePath(o.prev.map((v,i)=>v==null?null:[padL+band*i+band/2,y(v)])),class:'prev-line'}));
+ if(o.labelMax){let im=-1,mv=0;for(let i=0;i<n;i++)if(tot(i)>mv){mv=tot(i);im=i}if(im>=0)svg.append(sv('text',{x:clamp(padL+band*im+band/2,padL+10,W-14),y:y(mv)-6,'text-anchor':'middle',class:'dlabel'},(o.fmt||String)(mv)))}
+ box.append(svg);
+}
+/* ---------- horizontal bar chart (optional stacking + severity icons) ---------- */
+function hbarH(rows,rowH){return rows.length*(rowH||30)+8}
+function hbarChart(box,W,o){
+ const rows=o.rows,rowH=o.rowH||30,lw=Math.min(o.lw||110,Math.round(W*.42)),vw=o.vw||64,top=4,Hh=hbarH(rows,rowH);
+ const pw=Math.max(30,W-lw-vw),mx=o.max||Math.max(1e-9,...rows.map(r=>sum(r.segs.map(s=>s.v)))),th=Math.min(o.th||14,rowH-10);
+ const svg=svgRoot(W,Hh,o.label),ro=rover();
+ rows.forEach((r,ri)=>{
+  const cy=top+ri*rowH+rowH/2,g=sv('g',{'data-rove':'',tabindex:ro(),tip:r.tip});
+  g.append(sv('rect',{x:0,y:cy-rowH/2,width:W,height:rowH,class:'hit'}));
+  let lx=0;if(r.icon){g.append(svgIcon(r.icon,0,cy-7,14,r.iconColor||'currentColor'));lx=20}
+  g.append(sv('text',{x:lx,y:cy+4,class:'rlabel'},r.label));
+  let acc=0;const segs=r.segs.filter(s=>s.v>0);
+  segs.forEach((s,k)=>{let xx=lw+acc/mx*pw,w=s.v/mx*pw;acc+=s.v;if(k>0){xx+=2;w-=2}if(w<1)w=1;
+   g.append(k===segs.length-1?sv('path',{d:barPath(xx,cy-th/2,w,th),class:'mk',style:'fill:'+s.color}):sv('rect',{x:xx,y:cy-th/2,width:w,height:th,class:'mk',style:'fill:'+s.color}))});
+  if(r.value!=null)g.append(sv('text',{x:lw+acc/mx*pw+6,y:cy+4,class:'dlabel'},r.value));
+  svg.append(g);
+ });
+ box.append(svg);
+}
+/* ---------- range strips (min-max hairline, p25-p75 band, avg dot) ---------- */
+function rangeH(rows){return 6+rows.length*42+22}
+function rangeChart(box,W,o){
+ const narrow=W<480,lw=narrow?70:92,vw=narrow?92:118,rowH=42,top=6,axH=22,Hh=rangeH(o.rows),pw=Math.max(40,W-lw-vw-8);
+ const mx=Math.max(1e-9,...o.rows.map(r=>r.st?r.st.max:0)),ticks=niceTicks(mx,narrow?3:4),tv=ticks[ticks.length-1],x=v=>lw+(v/tv)*pw;
+ const svg=svgRoot(W,Hh,o.label),ro=rover(),yb=top+o.rows.length*rowH;
+ ticks.forEach(t=>{svg.append(sv('line',{x1:x(t),x2:x(t),y1:top,y2:yb,class:t===0?'axis':'grid'}));svg.append(sv('text',{x:x(t),y:Hh-6,'text-anchor':'middle',class:'tick'},tickFmt(t)))});
+ o.rows.forEach((r,ri)=>{
+  const cy=top+ri*rowH+rowH/2,st=r.st;
+  const g=sv('g',{'data-rove':'',tabindex:ro(),tip:()=>({title:r.label+(st?' · '+st.n+' 部':''),rows:st?[{color:r.color,value:o.fmt(st.avg),label:'平均'},{value:o.fmt(st.p50),label:'中位数'},{value:o.fmt(st.p25)+' – '+o.fmt(st.p75),label:'中间一半（p25–p75）'},{value:o.fmt(st.min),label:'最短'},{value:o.fmt(st.max),label:'最长'}]:[{value:'—',label:'这个时段没有数据'}]})});
+  g.append(sv('rect',{x:0,y:cy-rowH/2,width:W,height:rowH,class:'hit'}));
+  g.append(sv('text',{x:0,y:cy+4,class:'rlabel'},r.label));
+  if(st){
+   g.append(sv('line',{x1:x(st.min),x2:x(st.max),y1:cy,y2:cy,style:`stroke:${r.color};stroke-width:1;opacity:.85`,class:'mk'}));
+   g.append(sv('rect',{x:x(st.p25),y:cy-4,width:Math.max(2,x(st.p75)-x(st.p25)),height:8,rx:2,class:'mk',style:'fill:'+r.color}));
+   g.append(sv('circle',{cx:x(st.avg),cy,r:4.5,class:'mk',style:`fill:var(--surface);stroke:${r.color};stroke-width:2`}));
+   const t=sv('text',{x:W-vw+6,y:cy-2});t.append(sv('tspan',{class:'vt1'},'平均 '+o.fmt(st.avg)));t.append(sv('tspan',{x:W-vw+6,dy:14,class:'vt2'},'最长 '+o.fmt(st.max)));g.append(t);
+  }else g.append(sv('text',{x:lw,y:cy+4,class:'tick'},'没有数据'));
+  svg.append(g);
+ });
+ box.append(svg);
+}
+/* ---------- 100% share bar ---------- */
+function shareBar(box,W,segs,label){
+ const Hh=34,bh=24,y0=5,tot=sum(segs.map(s=>s.v));if(!tot){box.append(h('p',{class:'small muted'},'这个时段没有数据'));return}
+ const avail=W-2*(segs.length-1);let ws=segs.map(s=>Math.max(3,s.v/tot*avail));const over=sum(ws)-avail;const big=ws.indexOf(Math.max(...ws));ws[big]-=over;
+ const svg=svgRoot(W,Hh,label),ro=rover();let x=0;
+ segs.forEach((s,k)=>{const g=sv('g',{'data-rove':'',tabindex:ro(),tip:s.tip});g.append(sv('rect',{x,y:0,width:ws[k]+2,height:Hh,class:'hit'}));
+  g.append(k===segs.length-1?sv('path',{d:barPath(x,y0,ws[k],bh),class:'mk',style:'fill:'+s.color}):sv('rect',{x,y:y0,width:ws[k],height:bh,class:'mk',style:'fill:'+s.color}));svg.append(g);x+=ws[k]+2});
+ box.append(svg);
+}
+/* ---------- swimlane timeline ---------- */
+function laneH(n){return 6+n*34+22}
+function laneChart(box,W,A,lanes,label){
+ const R=A.R,narrow=W<520,lw=narrow?96:132,rw=narrow?64:84,rowH=34,top=6,Hh=laneH(lanes.length),pw=Math.max(40,W-lw-rw),x=t=>lw+(t-R.start)/R.len*pw,yb=top+lanes.length*rowH;
+ const svg=svgRoot(W,Hh,label),ro=rover();
+ if(A.visStart>R.start){const uw=x(A.visStart)-lw;svg.append(sv('rect',{x:lw,y:top,width:uw,height:yb-top,class:'uncov'}));if(uw>48)svg.append(sv('text',{x:lw+uw/2,y:yb-6,'text-anchor':'middle',class:'uncov-t'},'无记录'))}
+ timeTicks(R,x).forEach(t=>{svg.append(sv('line',{x1:t.x,x2:t.x,y1:top,y2:yb,class:'grid'}));svg.append(sv('text',{x:clamp(t.x,lw+14,W-rw-6),y:Hh-6,'text-anchor':'middle',class:'tick'},t.label))});
+ lanes.forEach((ln,li)=>{
+  const cy=top+li*rowH+rowH/2,bh=14,y0=cy-bh/2,s=Math.max(A.visStart,ln.from||0),e=A.visEnd;
+  svg.append(sv('text',{x:0,y:cy+4,class:'rlabel'},ln.name));
+  if(e>s){
+   const g=sv('g',{'data-rove':'',tabindex:ro(),tip:ln.tip});
+   g.append(sv('rect',{x:x(s),y:cy-rowH/2+2,width:Math.max(12,x(e)-x(s)),height:rowH-4,class:'hit'}));
+   g.append(sv('rect',{x:x(s),y:y0,width:Math.max(2,x(e)-x(s)),height:bh,rx:2,class:'mk',style:'fill:var(--lane-on)'}));
+   svg.append(g);
+   ['stop','off'].forEach(stt=>ln.segs.filter(z=>z.st===stt).forEach(z=>{
+    const a=Math.max(z.s,s),b=Math.min(z.e,e);if(b<=a)return;const xa=x(a),w=Math.max(2,x(b)-xa);
+    const gg=sv('g',{'data-rove':'',tabindex:'-1',tip:()=>({title:ln.name,rows:[{color:stt==='off'?'var(--st-red)':'var(--st-amber)',value:stt==='off'?'离线':'停领',label:z.note||''},{value:fMDHM(z.s)+' – '+(z.e>=NOW?'现在':fMDHM(z.e)),label:''},{value:fSpan(z.e-z.s),label:'时长'}]})});
+    gg.append(sv('rect',{x:xa+w/2-Math.max(12,w)/2,y:cy-rowH/2+2,width:Math.max(12,w),height:rowH-4,class:'hit'}));
+    gg.append(sv('rect',{x:xa,y:y0,width:w,height:bh,rx:1,class:'mk',style:'fill:'+(stt==='off'?'var(--st-red)':'var(--st-amber)')}));
+    svg.append(gg);
+   }));
+  }else svg.append(sv('text',{x:lw+6,y:cy+4,class:'tick'},ln.empty||'没有记录'));
+  svg.append(sv('text',{x:W-rw+10,y:cy+4,class:'vt1'},ln.upText));
+ });
+ box.append(svg);
+}
+/* ---------- event strip on a time axis ---------- */
+function stripChart(box,W,A,items,label){
+ const R=A.R,Hh=56,lw=0,pw=W-4,x=t=>lw+(t-R.start)/R.len*pw,y0=10,bh=14;
+ const svg=svgRoot(W,Hh,label),ro=rover();
+ if(A.visStart>R.start)svg.append(sv('rect',{x:lw,y:y0-4,width:x(A.visStart)-lw,height:bh+8,class:'uncov'}));
+ svg.append(sv('rect',{x:x(A.visStart),y:y0,width:Math.max(0,x(A.visEnd)-x(A.visStart)),height:bh,rx:2,style:'fill:var(--track)'}));
+ timeTicks(R,x).forEach(t=>{svg.append(sv('line',{x1:t.x,x2:t.x,y1:y0+bh+2,y2:y0+bh+7,class:'axis'}));svg.append(sv('text',{x:clamp(t.x,16,W-18),y:Hh-6,'text-anchor':'middle',class:'tick'},t.label))});
+ items.forEach(it=>{const xa=x(it.s),w=Math.max(3,x(it.e)-xa),g=sv('g',{'data-rove':'',tabindex:ro(),tip:it.tip});g.append(sv('rect',{x:xa+w/2-8,y:0,width:Math.max(16,w),height:y0+bh+8,class:'hit'}));g.append(sv('rect',{x:xa,y:y0,width:w,height:bh,rx:1,class:'mk',style:'fill:var(--st-amber)'}));svg.append(g)});
+ box.append(svg);
+}
+/* ---------- sparkline (de-emphasis hue, current point in accent) ---------- */
+function spark(box,W,vals,fmt,labels){
+ const Hh=34,p=4,nn=vals.length,v=vals.filter(x=>x!=null);if(!v.length){box.append(h('div',{class:'tiny muted',style:'height:34px;line-height:34px'},'没有足够记录'));return}
+ const lo=Math.min(0,...v),hi=Math.max(...v)||1,x=i=>p+i*(W-2*p)/(nn-1),y=val=>Hh-p-(val-lo)/(hi-lo||1)*(Hh-2*p);
+ const svg=svgRoot(W,Hh,'近期趋势');svg.removeAttribute('data-rove-group');
+ svg.append(sv('path',{d:linePath(vals.map((val,i)=>val==null?null:[x(i),y(val)])),class:'spark-line'}));
+ let li=-1;vals.forEach((val,i)=>{if(val!=null)li=i});
+ if(li>=0)svg.append(sv('circle',{cx:x(li),cy:y(vals[li]),r:3.5,style:'fill:var(--c1);stroke:var(--surface);stroke-width:2'}));
+ vals.forEach((val,i)=>svg.append(sv('rect',{x:x(i)-(W/nn)/2,y:0,width:W/nn,height:Hh,class:'spark-hit',tip:{title:labels[i],rows:[{color:i===li?'var(--c1)':'var(--c-spark)',value:val==null?'无记录':fmt(val),label:''}]}})));
+ box.append(svg);
+}
+
+/* ===================== UI pieces ===================== */
+function legend(items,...extra){return h('div',{class:'lgd'},extra,items.map(it=>h('span',{class:'lgd-i'},it.icon?h('span',{style:'color:'+(it.iconColor||'var(--muted)'),class:'lgd-ic'},icon(it.icon)):null,h('span',{class:'lgd-k '+(it.kind||'rect'),style:'background:'+it.color}),it.label)))}
+function panel(id,title,desc,o){
+ const v=o.noToggle?'chart':S.view[id]||'chart';
+ const tog=o.noToggle?null:h('div',{class:'seg vt',role:'radiogroup','aria-label':title+' 显示方式'},[['chart','图表','chart'],['table','表格','table']].map(([k,l,ic])=>h('button',{type:'button',class:'seg-opt',role:'radio','aria-checked':String(v===k),'data-act':'view','data-k':id,'data-v':k,id:`vt-${id}-${k}`},icon(ic),l)));
+ return h('section',{class:'panel',id:'sec-'+id,'aria-labelledby':'h-'+id},
+  h('div',{class:'panel-head'},h('div',{},h('h2',{id:'h-'+id},title,...(o.badges||[])),h('p',{},desc)),h('div',{class:'ph-actions'},...(o.actions||[]),tog)),
+  h('div',{class:'panel-body'},v==='chart'?o.chart():o.table()));
+}
+function dtable(cols,rows,cap){return h('div',{class:'table-wrap'},h('table',{class:'grid fit'},cap?h('caption',{class:'sr-only'},cap):null,h('thead',{},h('tr',{},cols.map(c=>h('th',{class:c.num?'num':null,scope:'col'},c.l)))),h('tbody',{},rows.length?rows.map(r=>h('tr',{},r.map((v,j)=>h('td',{class:cols[j].num?'num':null},v)))):h('tr',{},h('td',{colspan:cols.length,class:'muted'},'这个时段没有数据')))))}
+function block(title,desc,...kids){return h('div',{class:'block'},h('h3',{},...[].concat(title)),desc?h('p',{class:'bdesc'},desc):null,...kids)}
+const estChip=()=>h('span',{class:'chip tag',title:'按 GPU 平均功率 × 运行时长估算'},'估算');
+function stChip(st,m){
+ if(st==='off')return h('span',{class:'chip red'},icon('off'),'离线');
+ if(st==='stop')return h('span',{class:'chip amber'},icon('pause'),'停领');
+ if(st==='none'||(m&&m.joined))return h('span',{class:'chip blue'},icon('plus'),'新加入');
+ return h('span',{class:'chip green'},icon('ok'),'在线');
+}
+function mNote(d,m){
+ if(m.joined)return '今天 '+fHM(m.joined)+' 加入 · 尚无历史';
+ const st=stateAt(d,m.id,NOW-1);if(st==='on')return null;
+ const cur=(d.iv[m.id]||[]).filter(x=>x.s<=NOW-1&&x.e>=NOW-1).pop();return cur?(cur.note||'')+' · '+fMDHM(cur.s)+' 起':null;
+}
+const mName=id=>id==='ctrl'?'本机':(BASE_GPUS.concat(NEWPIG).find(m=>m.id===id)||{}).name||id;
+function dlt(A,cur,prev,good,o){
+ o=o||{};
+ if(!A.prevOk)return h('div',{class:'delta flat'},icon('flat'),!A.R.hasPrev?'全部时段没有上一周期':S.sc==='cover'?'上一周期记录不全':'上一周期没有记录');
+ if(cur==null||prev==null||(prev===0&&!o.pp))return h('div',{class:'delta flat'},icon('flat'),'上一周期无可比数据');
+ const d=o.pp?cur-prev:(cur-prev)/prev*100;
+ if(o.pp?Math.abs(d)<.05:Math.abs(d)<1)return h('div',{class:'delta flat'},icon('flat'),'与上一周期持平');
+ const txt=(d>0?'+':'−')+(o.pp?Math.abs(d).toFixed(1)+' 个百分点':Math.abs(Math.round(d))+'%');
+ const dir=d>0?'up':'down',cls=good==='none'?'flat':dir===good?'good':'bad';
+ return h('div',{class:'delta '+cls},icon(dir),h('span',{},txt),h('span',{class:'vs'},'较上一周期'));
+}
+
+/* ===================== sections ===================== */
+function sliceLabels(A){return A.slices.map(([s,e])=>A.R.kind==='h'?fMDHM(s)+'–'+fHM(e):fMD(s)+' – '+fMD(e))}
+function kpiRow(A){
+ const c=A.cur,p=A.prev,L=sliceLabels(A),k4=c.filter(f=>f.res==='4K').length;
+ const tile=o=>h('div',{class:'panel kpi'},h('div',{class:'label'},o.label,o.tag||null),h('strong',{class:'kv'},o.value,o.unit?h('em',{},o.unit):null),o.delta,h('div',{class:'note'},o.note),o.spark?chart((el,w)=>spark(el,w,o.spark,o.fmt,L),34,'spark-box'):null);
+ const inSl=(s,e)=>c.filter(f=>inS(f.tDone,s,e));
+ const fails=A.ev.filter(isFail),pf=A.evPrev?A.evPrev.filter(isFail):null;
+ const rate=(fl,n)=>n+fl?fl/(n+fl)*100:null;
+ const lead=c.map(f=>f.leadH),rest=c.map(f=>f.restoreH),en=sum(c.map(A.energyOf));
+ const fleet=A.fleet,ctrlOnly=A.ctrl;
+ const live=fleet.filter(m=>!m.joined||NOW>=m.joined),onl=live.filter(m=>stateAt(A.d,m.id,NOW-1)!=='off'),avail=onl.filter(m=>stateAt(A.d,m.id,NOW-1)==='on');
+ const gpuNote=ctrlOnly?'主控 · RTX 5060 8GB':live.filter(m=>stateAt(A.d,m.id,NOW-1)!=='on').map(m=>{const st=stateAt(A.d,m.id,NOW-1),cur=(A.d.iv[m.id]||[]).filter(x=>x.s<=NOW-1).pop();return m.name+(st==='off'?' 离线 ':' 停领 ')+Math.max(1,Math.round((NOW-(cur?cur.s:NOW))/H))+' 小时'}).join(' · ')||(fleet.some(m=>m.joined)?'Newpig 今天加入':'全部在线');
+ return h('div',{class:'kpis'},
+  tile({label:'完成影片',value:fInt(c.length),unit:'部',delta:dlt(A,c.length,p&&p.length,'up'),note:`4K ${k4} · 1080P ${c.length-k4}`,spark:sliceVals(A,(s,e)=>inSl(s,e).length),fmt:v=>v+' 部'}),
+  tile({label:'平均全程时长',value:n1(avg(lead)),unit:'小时',delta:dlt(A,avg(lead),p&&avg(p.map(f=>f.leadH)),'down'),note:`入库→归档 · 最短 ${fH(amin(lead))} · 最长 ${fH(amax(lead))}`,spark:sliceVals(A,(s,e)=>avg(inSl(s,e).map(f=>f.leadH))),fmt:fH}),
+  ctrlOnly?tile({label:'平均修复时长',value:'—',delta:h('div',{class:'delta flat'},icon('info'),'本机不做修复'),note:'修复只在 GPU 机器上运行'}):
+  tile({label:'平均修复时长',value:n1(avg(rest)),unit:'小时',delta:dlt(A,avg(rest),p&&avg(p.map(f=>f.restoreH)),'down'),note:`4K ${fH(avg(c.filter(f=>f.res==='4K').map(f=>f.restoreH)))} · 1080P ${fH(avg(c.filter(f=>f.res==='1080P').map(f=>f.restoreH)))}`,spark:sliceVals(A,(s,e)=>avg(inSl(s,e).map(f=>f.restoreH))),fmt:fH}),
+  tile({label:'总用电',tag:estChip(),value:fKwh(en),unit:'kWh',delta:dlt(A,en,p&&sum(p.map(A.energyOf)),'none'),note:`每片平均 ${fKwh(avg(c.map(A.energyOf)))} kWh`,spark:sliceVals(A,(s,e)=>sum(inSl(s,e).map(A.energyOf))),fmt:v=>fKwh(v)+' kWh'}),
+  tile({label:'失败率',value:rate(fails.length,c.length)==null?'—':n1(rate(fails.length,c.length)),unit:'%',delta:dlt(A,rate(fails.length,c.length),pf&&rate(pf.length,p.length),'down',{pp:true}),note:`失败 ${fails.length} 次 · 重试 ${fails.length} 次`,spark:sliceVals(A,(s,e)=>rate(fails.filter(x=>inS(x.t,s,e)).length,inSl(s,e).length)),fmt:v=>n1(v)+'%'}),
+  tile({label:ctrlOnly?'本机状态':'GPU 在线',value:ctrlOnly?'在线':fleet.length===1?{on:'在线',off:'离线',stop:'停领',none:'新加入'}[stateAt(A.d,fleet[0].id,NOW-1)]:`${onl.length} / ${live.length}`,
+   delta:ctrlOnly?h('div',{class:'delta flat'},icon('ok'),'主控正常'):h('div',{class:'delta flat'},icon('check'),`可领取 ${avail.length} 台`),note:gpuNote,
+   spark:ctrlOnly?null:sliceVals(A,(s,e)=>live.filter(m=>{const st=stateAt(A.d,m.id,e-1);return st==='on'||st==='stop'}).length),fmt:v=>v+' 台在线'}));
+}
+function secProduction(A){
+ const R=A.R,series=resList().map(r=>({...r,vals:bucketize(A,A.cur.filter(f=>f.res===r.k))}));
+ const prev=S.compare&&A.prevOk?bucketize(A,A.prev,null,true):null,tot=i=>sum(series.map(s=>s.vals[i]));
+ const tip=i=>({title:R.title(i),rows:[...series.map(s=>({color:s.color,value:s.vals[i]+' 部',label:s.name})),{value:tot(i)+' 部',label:'合计'},...(prev?[{color:'var(--c-prev)',value:prev[i]+' 部',label:'上一周期同位置'}]:[])],note:R.be(i)<=A.cover?'早于数据记录起点，没有记录':null});
+ return panel('prod','产量趋势',`${R.unit}完成归档的影片数，按分辨率分层 · ${R.name}共 ${A.cur.length} 部`,{
+  chart:()=>h('div',{},legend([...series.map(s=>({label:s.name,color:s.color})),...(prev?[{label:'上一周期',color:'var(--c-prev)',kind:'line'}]:[])]),
+   S.compare&&!A.prevOk?h('p',{class:'tiny muted',style:'margin:-4px 0 8px'},'上一周期没有完整记录，暂时无法对比。'):null,
+   chart((el,w)=>colChart(el,w,{n:R.n,series,prev,tick:R.short,tip,labelMax:true,uncov:A.uncov,label:'产量趋势：每个时段完成的影片数'}),232)),
+  table:()=>dtable([{l:'时段'},...series.map(s=>({l:s.name,num:1})),{l:'合计',num:1},...(prev?[{l:'上一周期',num:1}]:[])],Array.from({length:R.n},(_,i)=>[R.title(i),...series.map(s=>s.vals[i]),tot(i),...(prev?[prev[i]]:[])]),'产量趋势')});
+}
+const SORT_COLS=[['name','机器'],['st','状态'],['total','修复影片'],['a4','平均修复 4K',1],['a1','平均修复 1080P',1],['min','最短 / 最长',1],['power','平均功率',1],['kwh','用电',1],['fails','失败',1],['eff','修复效率',1]];
+function sortRows(rows){const {k,d}=S.sort,ord={on:0,stop:1,none:2,off:3};const val=r=>k==='name'?r.m.name:k==='st'?ord[r.st]:k==='model'?r.m.name:r[k];return [...rows].sort((a,b)=>{const x=val(a),y=val(b);if(x==null&&y==null)return 0;if(x==null)return 1;if(y==null)return -1;return (typeof x==='string'?x.localeCompare(y):x-y)*d})}
+function secMachines(A){
+ const desc='按归档完成时间统计每台机器修复的影片，同型号放在一起比较 · 点击一行只看这台机器';
+ if(A.ctrl)return panel('machines','各 GPU 机器',desc,{noToggle:true,chart:()=>h('div',{class:'notice'},icon('info'),h('div',{},'已筛选「本机」。主控只做 ASR、翻译、刮削和归档，不做修复，这里没有 GPU 数据。',h('button',{type:'button',class:'link-btn','data-act':'machine-all',id:'btn-machine-all'},'查看全部 GPU 机器')))});
+ const rows=machineRows(A),groups=modelGroups(rows),rl=resList();
+ const maxT=Math.max(1,...rows.map(r=>r.total));
+ const modelAvg=g=>{const w=g.rows.filter(r=>!r.m.joined);return w.length>1?avg(w.map(r=>r.total)):null};
+ const back=S.machine!=='all'?h('button',{type:'button',class:'link-btn','data-act':'machine-all',id:'btn-machine-all'},'查看全部 GPU 机器'):null;
+ const days=Math.max(A.days,1/24);
+ // per-model throughput: films per machine per online day
+ const tp=groups.map(g=>{const w=g.rows.filter(r=>!r.m.joined),od=sum(w.map(r=>r.onDays));return {model:g.model,count:g.rows.length,hist:w.length,od,p4:od?sum(w.map(r=>r.n4))/od:null,p1:od?sum(w.map(r=>r.n1))/od:null,pt:od?sum(w.map(r=>r.total))/od:null,a4:avg(w.flatMap(r=>r.fs.filter(f=>f.res==='4K').map(f=>f.restoreH))),a1:avg(w.flatMap(r=>r.fs.filter(f=>f.res==='1080P').map(f=>f.restoreH)))}});
+ const tpTable=()=>block('各机型实测产能',`每台机器每个在线日完成的影片数（按在线时长折算${tp.some(t=>t.hist<t.count)?'；新加入、尚无记录的机器不计入':''}）`,
+  dtable([{l:'机型'},{l:'台数',num:1},{l:'每台每天 4K',num:1},{l:'每台每天 1080P',num:1},{l:'每台每天合计',num:1},{l:'平均修复 4K',num:1},{l:'平均修复 1080P',num:1}],
+   tp.map(t=>[t.model,t.hist<t.count?`${t.count}（${t.hist} 台有记录）`:t.count,S.res==='1080P'?'—':n1(t.p4),S.res==='4K'?'—':n1(t.p1),n1(t.pt),fH(t.a4),fH(t.a1)]),'各机型实测产能'));
+ const head=()=>h('thead',{},h('tr',{},SORT_COLS.map(([k,l,num])=>{const on=S.sort.k===k;return h('th',{class:num?'num':null,scope:'col','aria-sort':on?(S.sort.d>0?'ascending':'descending'):null,title:k==='eff'?'每 1 小时片长需要的修复时间':null},h('button',{type:'button',class:'th-btn','data-act':'sort','data-k':k,id:'sort-'+k},l,icon(on?(S.sort.d>0?'sortA':'sortD'):'sort')))})));
+ const rowEl=(r,ma)=>{
+  const segs=rl.map(x=>({x,n:x.k==='4K'?r.n4:r.n1})).filter(z=>z.n>0);
+  return h('tr',{class:'pick'+(S.machine===r.m.id?' sel':''),tabindex:'0','data-act':'pick-machine','data-k':r.m.id,id:'mrow-'+r.m.id,'aria-label':`只看 ${r.m.name}`},
+   h('td',{},h('div',{class:'mname'},h('strong',{},r.m.name),h('span',{},r.m.model))),
+   h('td',{},stChip(r.st,r.m),mNote(A.d,r.m)?h('span',{class:'state-note'},mNote(A.d,r.m)):null),
+   h('td',{},h('div',{class:'sbar-cell'},h('div',{class:'sbar-track'},h('div',{class:'sbar',style:`width:${r.total/maxT*100}%`},segs.map(z=>h('span',{style:`flex:${z.n} 1 0;background:${z.x.color}`,tip:{title:r.m.name,rows:[{color:z.x.color,value:z.n+' 部',label:z.x.name},{value:r.total+' 部',label:'合计'}]}}))),ma!=null?h('span',{class:'avg-mk',style:`left:${ma/maxT*100}%`,tip:{title:r.m.model+' 同型号平均',rows:[{value:n1(ma)+' 部',label:'每台平均'}]}}):null),h('b',{},r.total))),
+   h('td',{class:'num'},fH(r.a4)),h('td',{class:'num'},fH(r.a1)),h('td',{class:'num'},fH(r.min)+' / '+fH(r.max)),
+   h('td',{class:'num'},r.power?fInt(r.power)+' W':'—'),h('td',{class:'num'},fKwh(r.kwh)+' kWh'),h('td',{class:'num'},r.fails),h('td',{class:'num'},r.eff?n1(r.eff)+' 小时':'—'));
+ };
+ const sm=()=>{
+  const per=rows.map(r=>({r,series:rl.map(x=>({...x,vals:bucketize(A,r.fs.filter(f=>f.res===x.k))}))}));
+  const yMax=Math.max(1,...per.flatMap(p=>Array.from({length:A.R.n},(_,i)=>sum(p.series.map(s=>s.vals[i])))));
+  return block('每台机器每个时段的修复量',`${A.R.unit}一格，所有小图用同一个纵轴（最高 ${yMax} 部）`,legend(rl.map(x=>({label:x.name,color:x.color}))),
+   h('div',{class:'multiples'},per.map(p=>h('div',{class:'mini'},h('div',{class:'mini-h'},h('strong',{},p.r.m.name),h('span',{class:'muted'},p.r.m.joined?'尚无记录':p.r.total+' 部')),
+    chart((el,w)=>colChart(el,w,{n:A.R.n,series:p.series,mini:true,h:96,yMax,tick:A.R.short,uncov:A.uncov,label:p.r.m.name+' 每个时段修复量',tip:i=>({title:p.r.m.name+' · '+A.R.title(i),rows:p.series.map(s=>({color:s.color,value:s.vals[i]+' 部',label:s.name}))})}),96)))));
+ };
+ return panel('machines','各 GPU 机器',desc,{actions:[back],
+  chart:()=>h('div',{},
+   legend([...rl.map(x=>({label:x.name,color:x.color})),{label:'同型号平均（每台）',kind:'tickmk',color:'var(--text)'}]),
+   h('div',{class:'table-wrap'},h('table',{class:'grid mt'},head(),h('tbody',{},groups.map(g=>{const ma=modelAvg(g);return [h('tr',{class:'grp'},h('th',{colspan:SORT_COLS.length,scope:'colgroup'},g.model+' × '+g.rows.length,h('span',{},ma!=null?`同型号平均每台 ${n1(ma)} 部`:'只有一台，无同型号比较'))),...sortRows(g.rows).map(r=>rowEl(r,ma))]})))),
+   h('div',{class:'divider'}),tpTable(),h('div',{class:'divider'}),sm()),
+  table:()=>h('div',{},dtable([{l:'机型'},{l:'机器'},{l:'状态'},{l:'4K',num:1},{l:'1080P',num:1},{l:'合计',num:1},{l:'平均修复 4K',num:1},{l:'平均修复 1080P',num:1},{l:'最短',num:1},{l:'最长',num:1},{l:'平均功率',num:1},{l:'用电 kWh',num:1},{l:'失败',num:1},{l:'修复效率',num:1}],
+    groups.flatMap(g=>sortRows(g.rows)).map(r=>[r.m.model,r.m.name,{on:'在线',off:'离线',stop:'停领',none:'新加入'}[r.st]+(r.m.joined?'（新加入）':''),r.n4,r.n1,r.total,fH(r.a4),fH(r.a1),fH(r.min),fH(r.max),r.power?fInt(r.power)+' W':'—',fKwh(r.kwh),r.fails,r.eff?n1(r.eff)+' 小时':'—']),'各 GPU 机器'),
+   h('div',{class:'divider'}),tpTable(),h('div',{class:'divider'}),
+   block('每台机器每个时段的修复量',null,dtable([{l:'时段'},...rows.map(r=>({l:r.m.name,num:1}))],Array.from({length:A.R.n},(_,i)=>[A.R.title(i),...rows.map(r=>r.fs.filter(f=>A.R.idx(f.tDone)===i).length)]),'每台机器每个时段的修复量')))});
+}
+function secController(A){
+ const c=A.cur,tr=c.filter(f=>f.subs),lines=sum(tr.map(f=>f.lines));
+ const gpuSel=S.machine!=='all'&&!A.ctrl;
+ const outs=A.ev.filter(e=>e.type==='trans'),outMin=sum(outs.map(e=>e.dur))/MIN;
+ const main=c.filter(f=>f.target==='main').length,cat=c.filter(f=>f.target==='cat').length,sec=c.filter(f=>f.second).length;
+ const ms=(label,val,unit,note,extra)=>h('div',{class:'mstat'},h('div',{class:'label'},label),h('strong',{},val,h('em',{},unit)),h('div',{class:'note'},note),extra||null);
+ const tg=[{label:'主片库（演员目录）',v:main},{label:'分类目录',v:cat},{label:'第二目标（额外复制）',v:sec}];
+ const tgRows=tg.map(t=>({label:t.label,segs:[{v:t.v,color:'var(--c1)'}],value:t.v+' 部',tip:{title:t.label,rows:[{color:'var(--c1)',value:t.v+' 部',label:c.length?Math.round(t.v/c.length*100)+'% 的完成影片':''}]}}));
+ const outBlock=()=>block([h('span',{style:'color:var(--amber);display:inline-flex'},icon('alert')),'翻译服务中断'],gpuSel?'翻译服务属于本机；选择「全部 GPU 机器」或「本机」时显示。':`中断 ${outs.length} 次 · 共 ${fSpan(outMin*MIN)}${outs.length?' · 最长 '+fSpan(Math.max(...outs.map(e=>e.dur))):''} · 期间影片在本机排队，恢复后自动继续`,
+  gpuSel?null:chart((el,w)=>stripChart(el,w,A,outs.map(e=>({s:e.t,e:e.t+e.dur,tip:{title:'翻译服务中断',rows:[{color:'var(--st-amber)',value:fSpan(e.dur),label:'中断时长'},{value:fMDHM(e.t)+' – '+fHM(e.t+e.dur),label:''}]}})),'翻译服务中断时间轴'),56));
+ return panel('ctrl','本机（主控）处理',gpuSel?`${mName(S.machine)} 修复的影片在本机完成的后处理`:'ASR、翻译、刮削、归档都在本机 BlackGoldPig 上运行',{
+  chart:()=>h('div',{},h('div',{class:'ministats'},
+    ms('ASR',fInt(c.length),'片',`平均 ${fMin(avg(c.map(f=>f.asrMin)))} · 最长 ${fMin(amax(c.map(f=>f.asrMin)))}`),
+    ms('翻译',fInt(tr.length),'片',`共 ${n1(lines/1e4)} 万行字幕 · 平均 ${fMin(avg(tr.map(f=>f.transSec/60)))}`,h('div',{class:'chips'},h('span',{class:'chip'},'deepseek-flash 100%'),c.length-tr.length?h('span',{class:'chip'},`${c.length-tr.length} 片无语音`):null)),
+    ms('刮削',fInt(c.length),'片',`平均 ${fMin(avg(c.map(f=>f.scrapeMin)))} · 最长 ${fMin(amax(c.map(f=>f.scrapeMin)))}`),
+    ms('归档',fInt(c.length),'片',`平均 ${fMin(avg(c.map(f=>f.archiveMin)))} · 最长 ${fMin(amax(c.map(f=>f.archiveMin)))}`)),
+   h('div',{class:'divider'}),
+   h('div',{class:'grid2'},block('归档去向','一部片可以同时进主片库并复制到第二目标',chart((el,w)=>hbarChart(el,w,{rows:tgRows,lw:150,label:'归档去向'}),hbarH(tgRows))),outBlock())),
+  table:()=>h('div',{},dtable([{l:'环节'},{l:'影片',num:1},{l:'平均',num:1},{l:'最长',num:1}],[['ASR',c.length,fMin(avg(c.map(f=>f.asrMin))),fMin(amax(c.map(f=>f.asrMin)))],['翻译（deepseek-flash）',tr.length,fMin(avg(tr.map(f=>f.transSec/60))),fMin(amax(tr.map(f=>f.transSec/60)))],['刮削',c.length,fMin(avg(c.map(f=>f.scrapeMin))),fMin(amax(c.map(f=>f.scrapeMin)))],['归档',c.length,fMin(avg(c.map(f=>f.archiveMin))),fMin(amax(c.map(f=>f.archiveMin)))]],'本机处理'),
+   h('div',{class:'divider'}),dtable([{l:'归档去向'},{l:'影片',num:1}],tg.map(t=>[t.label,t.v]),'归档去向'),
+   h('div',{class:'divider'}),gpuSel?h('p',{class:'small muted'},'翻译服务中断只在选择「全部 GPU 机器」或「本机」时显示。'):dtable([{l:'翻译服务中断开始'},{l:'恢复'},{l:'时长',num:1}],outs.map(e=>[fMDHM(e.t),fMDHM(e.t+e.dur),fSpan(e.dur)]),'翻译服务中断'))});
+}
+function secDurations(A){
+ const c=A.cur,c4=c.filter(f=>f.res==='4K'),c1=c.filter(f=>f.res==='1080P');
+ const hrs=[{label:'排队等待',color:STAGE.queue[1],v:c.map(f=>f.queueH)}];
+ if(!A.ctrl){if(c4.length)hrs.push({label:'修复 4K',color:STAGE.restore[1],v:c4.map(f=>f.restoreH)});if(c1.length)hrs.push({label:'修复 1080P',color:STAGE.restore[1],v:c1.map(f=>f.restoreH)})}
+ hrs.push({label:'全程',color:STAGE.total[1],v:c.map(f=>f.leadH)});
+ const mins=[{label:'ASR',color:STAGE.asr[1],v:c.map(f=>f.asrMin)},{label:'翻译',color:STAGE.trans[1],v:c.filter(f=>f.subs).map(f=>f.transSec/60)},{label:'刮削',color:STAGE.scrape[1],v:c.map(f=>f.scrapeMin)},{label:'归档',color:STAGE.archive[1],v:c.map(f=>f.archiveMin)}];
+ [hrs,mins].forEach(g=>g.forEach(r=>r.st=stats(r.v)));
+ const sh=[['queue',avg(c.map(f=>f.queueH))],['restore',avg(c.map(f=>f.restoreH))],['asr',avg(c.map(f=>f.asrMin/60))],['trans',avg(c.map(f=>f.transSec/3600))],['scrape',avg(c.map(f=>f.scrapeMin/60))],['archive',avg(c.map(f=>f.archiveMin/60))]].map(([k,v])=>({k,v:v||0,label:STAGE[k][0],color:STAGE[k][1]}));
+ const shT=sum(sh.map(s=>s.v));sh.forEach(s=>{s.pct=shT?s.v/shT*100:0;s.tip={title:'平均每部片',rows:[{color:s.color,value:fPct(s.pct),label:s.label},{value:fAutoH(s.v),label:'平均耗时'}]}});
+ const lg=legend([['queue'],['restore'],['asr'],['trans'],['scrape'],['archive'],['total']].map(([k])=>({label:STAGE[k][0],color:STAGE[k][1]})));
+ const rows=g=>g.map(r=>[r.label,r.st?r.st.n:0,...(r.st?[r.st.min,r.st.p25,r.st.p50,r.st.p75,r.st.max,r.st.avg]:[null,null,null,null,null,null])]);
+ return panel('dur','耗时分布','每个阶段最短到最长（细线）、中间一半的影片（粗段）和平均值（圆点）',{
+  chart:()=>h('div',{},lg,h('div',{class:'grid2'},
+    block('以小时计','排队等待 = 入库到开始修复；全程 = 入库到归档完成',chart((el,w)=>rangeChart(el,w,{rows:hrs,fmt:fH,label:'按小时计的阶段耗时分布'}),rangeH(hrs))),
+    block('以分钟计','本机上的后处理环节，翻译只统计有语音的影片',chart((el,w)=>rangeChart(el,w,{rows:mins,fmt:fMin,label:'按分钟计的阶段耗时分布'}),rangeH(mins)))),
+   h('div',{class:'divider'}),
+   block('一部片的时间都花在哪','各阶段平均耗时占比；不含文件传输与回传',chart((el,w)=>shareBar(el,w,sh,'各阶段平均耗时占比'),34),
+    h('div',{class:'share-lg'},sh.map(s=>h('span',{class:'lgd-i'},h('span',{class:'lgd-k rect',style:'background:'+s.color}),s.label,h('b',{},fPct(s.pct)),h('span',{class:'m'},fAutoH(s.v))))))),
+  table:()=>h('div',{},dtable([{l:'阶段'},{l:'影片',num:1},{l:'最短',num:1},{l:'p25',num:1},{l:'中位数',num:1},{l:'p75',num:1},{l:'最长',num:1},{l:'平均',num:1}],[...rows(hrs).map(r=>[r[0],r[1],...r.slice(2).map(fH)]),...rows(mins).map(r=>[r[0],r[1],...r.slice(2).map(fMin)])],'耗时分布'),
+   h('div',{class:'divider'}),dtable([{l:'阶段'},{l:'平均耗时',num:1},{l:'占比',num:1}],sh.map(s=>[s.label,fAutoH(s.v),fPct(s.pct)]),'时间占比'))});
+}
+function secEnergy(A){
+ const R=A.R,c=A.cur,E=A.energyOf,vals=bucketize(A,c,E),prev=S.compare&&A.prevOk?bucketize(A,A.prev,E,true):null;
+ const series=[{name:'用电',color:'var(--c1)',vals}];
+ const sorted=[...c].sort((a,b)=>E(b)-E(a)),mx=sorted[0],mn=sorted[sorted.length-1];
+ const c4=c.filter(f=>f.res==='4K'),c1=c.filter(f=>f.res==='1080P');
+ const resRows=resList().map(r=>{const fs=r.k==='4K'?c4:c1,v=avg(fs.map(E));return {label:r.name+' 每片平均',segs:[{v:v||0,color:r.color}],value:fKwh(v)+' kWh',tip:{title:r.name,rows:[{color:r.color,value:fKwh(v)+' kWh',label:'每片平均'},{value:fs.length+' 部',label:'影片'}]}}});
+ const mRows=(A.ctrl?[]:A.fleet.filter(m=>!m.joined).map(m=>({label:m.name,v:sum(c.filter(f=>f.m===m.id).map(f=>f.kwhR))}))).concat([{label:'本机（后处理）',v:sum(c.map(f=>f.kwhC))}]).map(r=>({label:r.label,segs:[{v:r.v,color:'var(--c1)'}],value:fKwh(r.v),tip:{title:r.label,rows:[{color:'var(--c1)',value:fKwh(r.v)+' kWh',label:'估算用电'}]}}));
+ const top5=sorted.slice(0,5).map(f=>[f.code,mName(f.m),f.res,fH(f.restoreH),fH(f.durH),fKwh(E(f))]);
+ const topT=()=>block('用电最多的 5 部影片',null,dtable([{l:'影片'},{l:'修复机器'},{l:'分辨率'},{l:'修复时长',num:1},{l:'片长',num:1},{l:'用电 kWh',num:1}],top5,'用电最多的影片'));
+ const tip=i=>({title:R.title(i),rows:[{color:'var(--c1)',value:fKwh(vals[i])+' kWh',label:'用电（估算）'},...(prev?[{color:'var(--c-prev)',value:fKwh(prev[i])+' kWh',label:'上一周期同位置'}]:[])]});
+ const ms=(label,val,note)=>h('div',{class:'mstat'},h('div',{class:'label'},label),h('strong',{},val,h('em',{},'kWh')),h('div',{class:'note'},note));
+ return panel('energy','用电',`${A.ctrl?'本机后处理':'GPU 修复 + 本机后处理'}的估算用电，按归档完成时间计入 · ${R.name}共 ${fKwh(sum(c.map(E)))} kWh`,{badges:[h('span',{class:'chip amber',title:'没有电表数据，按 GPU 平均功率 × 运行时长估算'},icon('zap'),'估算')],
+  chart:()=>h('div',{},h('div',{class:'egrid'},
+    block(`${R.unit}用电`,prev?null:'单一序列，柱高 = kWh',prev?legend([{label:'本周期',color:'var(--c1)'},{label:'上一周期',color:'var(--c-prev)',kind:'line'}]):null,chart((el,w)=>colChart(el,w,{n:R.n,series,prev,tick:R.short,tip,labelMax:true,fmt:fKwh,uncov:A.uncov,h:210,label:'每个时段的估算用电'}),210)),
+    h('div',{class:'estats'},ms('每片平均',fKwh(avg(c.map(E))),`${c.length} 部影片`),ms('最多',mx?fKwh(E(mx)):'—',mx?`${mx.code} · ${mName(mx.m)} · ${mx.res} · 修复 ${fH(mx.restoreH)}`:'—'),ms('最少',mn?fKwh(E(mn)):'—',mn?`${mn.code} · ${mName(mn.m)} · ${mn.res} · 修复 ${fH(mn.restoreH)}`:'—'))),
+   h('div',{class:'divider'}),
+   h('div',{class:'grid2'},h('div',{},block('按分辨率',null,chart((el,w)=>hbarChart(el,w,{rows:resRows,lw:120,vw:78,label:'按分辨率的每片平均用电'}),hbarH(resRows))),
+     h('div',{style:'height:14px'}),block('按机器','GPU 修复用电，加上本机的后处理',chart((el,w)=>hbarChart(el,w,{rows:mRows,lw:120,vw:60,label:'按机器的估算用电'}),hbarH(mRows)))),topT())),
+  table:()=>h('div',{},dtable([{l:'时段'},{l:'用电 kWh',num:1},...(prev?[{l:'上一周期 kWh',num:1}]:[])],Array.from({length:R.n},(_,i)=>[R.title(i),fKwh(vals[i]),...(prev?[fKwh(prev[i])]:[])]),'用电'),h('div',{class:'divider'}),
+   dtable([{l:'分组'},{l:'kWh',num:1}],[...resRows.map(r=>[r.label,r.value.replace(' kWh','')]),...mRows.map(r=>[r.label,r.value])],'用电分组'),h('div',{class:'divider'}),topT())});
+}
+function secUptime(A){
+ const lanesM=A.ctrl?[]:A.fleet;const show=lanesM.concat(S.machine==='all'||A.ctrl?[CTRL]:[]);
+ const lanes=show.map(m=>{
+  const up=uptime(A.d,m.id,A.visStart,A.visEnd),segs=(A.d.iv[m.id]||[]).filter(x=>x.e>A.visStart&&x.s<A.visEnd);
+  const name=m.id==='ctrl'?'本机':m.name;
+  return {name,from:m.joined||0,segs,empty:m.joined?'今天 '+fHM(m.joined)+' 加入':null,up,upText:up?'在线 '+fPct(up.on*100):'—',
+   tip:()=>({title:name+(m.model?' · '+m.model:''),rows:up?[{color:'var(--lane-on)',value:fPct(up.on*100),label:'在线率'},{value:fSpan(up.off),label:'离线合计'},{value:fSpan(up.stop),label:'停领合计'}]:[{value:'—',label:'没有记录'}],note:m.joined?'今天 '+fHM(m.joined)+' 加入，之前没有记录':null})};
+ });
+ return panel('uptime','设备在线','每台机器在所选时段内的在线、停领与离线',{badges:[h('span',{class:'chip amber'},icon('plus'),'需新增记录')],
+  chart:()=>h('div',{},h('div',{class:'notice amber',style:'margin-bottom:14px'},icon('info'),h('div',{},'在线历史目前没有保存，开发时新增心跳记录后才有数据。下图为示意。')),
+   legend([{label:'在线',color:'var(--lane-on)',icon:'ok',iconColor:'var(--green-light)'},{label:'停领',color:'var(--st-amber)',icon:'pause',iconColor:'var(--amber)'},{label:'离线',color:'var(--st-red)',icon:'off',iconColor:'var(--red)'}]),
+   chart((el,w)=>laneChart(el,w,A,lanes,'设备在线时间轴'),laneH(lanes.length))),
+  table:()=>h('div',{},dtable([{l:'机器'},{l:'在线率',num:1},{l:'离线合计',num:1},{l:'停领合计',num:1}],lanes.map(l=>[l.name,l.up?fPct(l.up.on*100):'—',l.up?fSpan(l.up.off):'—',l.up?fSpan(l.up.stop):'—']),'在线率'),h('div',{class:'divider'}),
+   dtable([{l:'机器'},{l:'状态'},{l:'开始'},{l:'结束'},{l:'时长',num:1},{l:'说明'}],lanes.flatMap(l=>l.segs.map(z=>[l.name,z.st==='off'?'离线':'停领',fMDHM(z.s),z.e>=NOW?'现在':fMDHM(z.e),fSpan(z.e-z.s),z.note||''])),'离线与停领记录'))});
+}
+function secAlerts(A){
+ const ev=A.ev,types=Object.keys(ETYPES).filter(k=>!(A.ctrl&&['4551','ltx','ffprobe','offline'].includes(k))&&!(S.machine!=='all'&&!A.ctrl&&['whitelist','trans','cpu'].includes(k)));
+ const tRows=types.map(k=>{const t=ETYPES[k],n=ev.filter(e=>e.type===k).length,f=t.sev==='fail';return {label:t.label,icon:f?'fail':'alert',iconColor:f?'var(--red)':'var(--amber)',segs:[{v:n,color:f?'var(--st-red)':'var(--st-amber)'}],value:String(n),tip:{title:t.label,rows:[{color:f?'var(--st-red)':'var(--st-amber)',value:n+' 次',label:f?'失败':'警告'}],note:t.hint}}});
+ const ms=(A.ctrl?[]:A.fleet.filter(m=>!m.joined)).concat(S.machine==='all'||A.ctrl?[CTRL]:[]);
+ const mRows=ms.map(m=>{const n=ev.filter(e=>e.mid===m.id&&isFail(e)).length;return {label:m.id==='ctrl'?'本机':m.name,segs:[{v:n,color:'var(--st-red)'}],value:String(n),tip:{title:m.id==='ctrl'?'本机':m.name,rows:[{color:'var(--st-red)',value:n+' 次',label:'失败'}]}}});
+ const spikeEv=ev.filter(e=>e.spike);
+ const shown=ev.filter(e=>!(S.hideCpu&&e.type==='cpu')),hidden=ev.length-shown.length,list=shown.slice(0,14);
+ const needs=ev.filter(e=>e.result==='需要处理').length;
+ const typeChip=e=>{const t=ETYPES[e.type],f=t.sev==='fail';return h('span',{class:'chip '+(f?'red':'amber')},icon(f?'fail':'alert'),t.label)};
+ const resChip=r=>{const [c,ic]=RESULT[r]||['','check'];return h('span',{class:'chip'+(c?' '+c:'')},icon(ic),r)};
+ const recent=()=>block('最近的异常与报警',`显示 ${list.length} 条${hidden?` · 已隐藏 ${hidden} 条主控 CPU 高占用`:''}${needs?` · ${needs} 条需要处理`:''}`,
+  h('div',{class:'switch-l',style:'margin-bottom:10px'},h('button',{type:'button',class:'toggle',role:'switch','aria-checked':String(S.hideCpu),'aria-labelledby':'lbl-hidecpu','data-act':'hidecpu',id:'f-hidecpu'}),h('span',{id:'lbl-hidecpu'},'隐藏主控 CPU 高占用（提示类，较频繁）')),
+  h('div',{class:'table-wrap'},h('table',{class:'grid'},h('caption',{class:'sr-only'},'最近的异常与报警'),h('thead',{},h('tr',{},['时间','机器','类型','影片','处理结果','说明'].map(l=>h('th',{scope:'col'},l)))),
+   h('tbody',{},list.length?list.map(e=>h('tr',{class:e.spike?'hl':null},h('td',{class:'mono'},fMDHM(e.t)),h('td',{},mName(e.mid)),h('td',{},typeChip(e)),h('td',{class:'mono'},e.code||'—'),h('td',{},resChip(e.result)),h('td',{class:'muted'},e.note||(ETYPES[e.type].sev==='fail'?ETYPES[e.type].hint:'')))):h('tr',{},h('td',{colspan:6,class:'muted'},'这个时段没有异常'))))));
+ return panel('alerts','异常与报警',`失败（红）需要重试或改派，警告（琥珀）多为自动恢复 · ${A.R.name}失败 ${ev.filter(isFail).length} 次、警告 ${ev.filter(e=>!isFail(e)).length} 次`,{
+  chart:()=>h('div',{},spikeEv.length?h('div',{class:'notice red',style:'margin-bottom:16px'},icon('alert'),h('div',{},h('strong',{},`Gorilla 今天 ${fHM(spikeEv[spikeEv.length-1].t)}–${fHM(spikeEv[0].t)} 出现 ${spikeEv.length} 次「应用程序控制拦截」（WinError 4551）`),h('div',{},`影片已自动改派到其他机器；${fHM(SPIKE_STOP)} 起 Gorilla 自动停领。需要在 Gorilla 上检查应用程序控制设置，处理后在「设备」里恢复领取。`))):null,
+   h('div',{class:'grid2'},block('按类型',null,chart((el,w)=>hbarChart(el,w,{rows:tRows,lw:150,vw:44,label:'按类型的异常次数'}),hbarH(tRows))),
+    block([h('span',{style:'color:var(--red);display:inline-flex'},icon('fail')),'各机器失败次数'],null,chart((el,w)=>hbarChart(el,w,{rows:mRows,lw:120,vw:44,label:'各机器失败次数'}),hbarH(mRows)))),
+   h('div',{class:'divider'}),recent()),
+  table:()=>h('div',{},dtable([{l:'类型'},{l:'严重程度'},{l:'次数',num:1}],types.map((k,i)=>[ETYPES[k].label,ETYPES[k].sev==='fail'?'失败':'警告',tRows[i].value]),'按类型'),h('div',{class:'divider'}),
+   dtable([{l:'机器'},{l:'失败',num:1}],mRows.map(r=>[r.label,r.value]),'各机器失败次数'),h('div',{class:'divider'}),recent())});
+}
+function inboxCard(d){
+ const x=inboxNow(d),pct=x.used/x.cap*100,col=pct>92?'var(--st-red)':pct>80?'var(--st-amber)':'var(--c1)';
+ return h('div',{class:'inbox',role:'group','aria-labelledby':'h-inbox'},
+  h('div',{},h('h3',{id:'h-inbox'},h('span',{style:'display:inline-flex;color:var(--muted)'},icon('drive')),'INBOX 空间 · D:\\TODO',h('span',{class:'chip tag'},'当前 · 不随时段筛选')),
+   h('div',{class:'meter',role:'meter','aria-valuemin':'0','aria-valuemax':String(x.cap),'aria-valuenow':String(Math.round(x.used)),'aria-label':'INBOX 已用空间',tip:{title:'INBOX 1 TB',rows:[{color:col,value:fInt(x.used)+' GB',label:'已用'},{value:fInt(x.pendGB)+' GB',label:'待处理影片'},{value:fInt(x.other)+' GB',label:'其他文件'},{value:fInt(x.free)+' GB',label:'剩余'}]}},h('span',{style:`width:${pct}%;background:${col}`})),
+   h('div',{class:'sub'},`已用 ${fInt(x.used)} GB · 剩余 ${fInt(x.free)} GB（共 1 TB）`)),
+  h('div',{},h('div',{class:'sub'},'待处理影片占用'),h('div',{class:'fig'},fInt(x.pendGB),h('em',{},'GB')),h('div',{class:'sub'},`${x.pending} 部 · 已入库、未归档`)),
+  h('div',{},h('div',{class:'sub'},'平均每天腾出'),h('div',{class:'fig'},fInt(x.freed),h('em',{},'GB')),h('div',{class:'sub'},`近 7 天每天归档约 ${n1(x.perDay)} 部，原片归档后删除`)),
+  h('div',{},h('div',{class:'sub'},'现在还可放入'),h('div',{class:'fig'},'约 '+x.canNow,h('em',{},'部')),h('div',{class:'sub'},`按平均每部 ${n1(x.avgGB)} GB`)),
+  h('p',{class:'hint'},icon('info'),`约 1 天后可再放入约 ${x.canTomorrow} 部（剩余空间加上一天腾出的 ${fInt(x.freed)} GB，按平均每部 ${n1(x.avgGB)} GB）`));
+}
+function secSources(A){
+ const c=A.cur;
+ const hist=(vals,lo,step,nb)=>{const out=new Array(nb).fill(0);vals.forEach(v=>{out[clamp(Math.floor((v-lo)/step),0,nb-1)]++});return out};
+ const sz=hist(c.map(f=>f.sizeGB),0,5,9),szL=i=>`${i*5}–${i*5+5}`,du=hist(c.map(f=>f.durH),1.5,.5,5),duL=i=>`${(1.5+i*.5).toFixed(1)}–${(2+i*.5).toFixed(1)}`;
+ const act={};c.forEach(f=>{if(f.actor)act[f.actor]=(act[f.actor]||0)+1});
+ const top=Object.entries(act).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).slice(0,8);
+ const aRows=top.map(([n,v])=>({label:n,segs:[{v,color:'var(--c1)'}],value:v+' 部',tip:{title:n,rows:[{color:'var(--c1)',value:v+' 部',label:'归档影片'}]}}));
+ const marks=[['无码',c.filter(f=>f.unc).length],['中文字幕',c.filter(f=>f.subs).length],['4K',c.filter(f=>f.res==='4K').length],['修复',c.length]];
+ const mkRows=marks.map(([l,n])=>{const p=c.length?n/c.length*100:0;return {label:l,segs:[{v:p,color:'var(--c1)'}],value:fPct(p),tip:{title:'标识：'+l,rows:[{color:'var(--c1)',value:fPct(p),label:'占完成影片'},{value:n+' 部',label:''}]}}});
+ const one=[{name:'影片',color:'var(--c1)'}];
+ return panel('src','片源与片库','收进来的片子是什么样，以及归档进了哪些演员目录',{
+  chart:()=>h('div',{},inboxCard(A.d),h('div',{class:'divider'}),h('div',{class:'grid2'},
+   block('输入大小','原片大小分布，单位 GB',chart((el,w)=>colChart(el,w,{n:9,series:[{...one[0],vals:sz}],tick:szL,tickAll:w>420,h:190,labelMax:true,label:'输入大小分布',tip:i=>({title:szL(i)+' GB',rows:[{color:'var(--c1)',value:sz[i]+' 部',label:'影片'}]})}),190)),
+   block('片长','视频时长分布，单位小时',chart((el,w)=>colChart(el,w,{n:5,series:[{...one[0],vals:du}],tick:duL,tickAll:true,h:190,labelMax:true,label:'片长分布',tip:i=>({title:duL(i)+' 小时',rows:[{color:'var(--c1)',value:du[i]+' 部',label:'影片'}]})}),190)),
+   block('归档最多的演员（前 8）','只统计进主片库演员目录的影片',top.length?chart((el,w)=>hbarChart(el,w,{rows:aRows,lw:90,vw:52,label:'归档最多的演员'}),hbarH(aRows)):h('p',{class:'small muted'},'这个时段没有数据')),
+   block('标识占比','一部片可以同时有多个标识',chart((el,w)=>hbarChart(el,w,{rows:mkRows,lw:90,vw:52,max:100,label:'标识占比'}),hbarH(mkRows))))),
+  table:()=>h('div',{},inboxCard(A.d),h('div',{class:'divider'}),h('div',{class:'grid2'},
+   dtable([{l:'输入大小（GB）'},{l:'影片',num:1}],sz.map((v,i)=>[szL(i),v]),'输入大小'),dtable([{l:'片长（小时）'},{l:'影片',num:1}],du.map((v,i)=>[duL(i),v]),'片长'),
+   dtable([{l:'演员'},{l:'影片',num:1}],top.map(([n,v])=>[n,v]),'归档最多的演员'),dtable([{l:'标识'},{l:'影片',num:1},{l:'占比',num:1}],marks.map(([l,n])=>[l,n,fPct(c.length?n/c.length*100:0)]),'标识占比')))});
+}
+
+/* ===================== shell ===================== */
+const NAV=[['overview','概览','grid'],['pending','待处理','list','pend'],['queue','影片队列','film',4],['review','待确认','review',3],['exceptions','异常','alert','exc'],['devices','设备','monitor'],['local','本机','laptop'],['library','片库与规则','folder'],['analytics','数据分析','chart',null,true],['prefs','设置','sliders']];
+function navItems(d){
+ const pend=inboxNow(d).pending,exc=d.events.filter(e=>e.result==='需要处理').length+d.fleet.filter(m=>stateAt(d,m.id,NOW-1)!=='on'&&!m.joined).length;
+ return NAV.map(([k,l,ic,n,isNew])=>{const cnt=n==='pend'?pend:n==='exc'?exc:n;
+  return h('button',{type:'button',class:'nav-item','data-act':'nav','data-k':k,'aria-current':S.page===k?'page':null},isNew?h('span',{class:'dot',title:'新增页面'}):null,icon(ic),h('span',{},l),cnt?h('span',{class:'nav-count'},cnt):null)});
+}
+function render(){
+ const d=data();
+ $('#scenario-seg').replaceChildren(...SCEN.map(([k,l])=>h('button',{type:'button',class:'seg-opt',role:'radio','aria-checked':String(S.sc===k),'data-act':'scenario','data-k':k,id:'sc-'+k},l)));
+ const label=NAV.find(n=>n[0]===S.page)[1];
+ const live=d.fleet.filter(m=>!m.joined),offs=live.filter(m=>stateAt(d,m.id,NOW-1)==='off'),stops=live.filter(m=>stateAt(d,m.id,NOW-1)==='stop');
+ const onl=d.fleet.filter(m=>stateAt(d,m.id,NOW-1)!=='off').length;
+ $('#app').replaceChildren(
+  h('div',{class:'scope-banner'},h('span',{},'TaskPaw / 媒体处理中心 / '+label),h('div',{class:'health','aria-label':'运行状态'},
+   h('span',{class:'chip green'},icon('check'),'主控正常'),
+   h('span',{class:'chip '+(offs.length?'amber':'green')},`GPU ${onl} / ${d.fleet.length} 在线`),
+   ...offs.map(m=>h('span',{class:'chip red'},icon('off'),m.name+' 离线')),...stops.map(m=>h('span',{class:'chip amber'},icon('pause'),m.name+' 停领')),
+   ...d.fleet.filter(m=>m.joined).map(m=>h('span',{class:'chip blue'},icon('plus'),m.name+' 新加入')))),
+  h('nav',{class:'mobile-nav','aria-label':'媒体处理中心导航（窄屏）'},navItems(d)),
+  h('div',{class:'workspace-shell'},h('aside',{class:'workspace-rail'},h('div',{class:'workspace-heading'},h('strong',{},'媒体处理中心'),h('span',{class:'small muted'},'主控 · 本机')),h('nav',{class:'nav-group','aria-label':'媒体处理中心导航'},navItems(d))),
+   h('main',{class:'content',id:'main',tabindex:'-1'})));
+ if(S.page!=='analytics'){
+  $('#main').append(h('div',{class:'page-title'},h('h1',{},label)),h('div',{class:'untouched'},icon('info'),h('h2',{style:'color:var(--text)'},'本次不改动'),h('p',{class:'small'},'沿用现有页面。本预览只涉及带紫点的「数据分析」。'),h('button',{type:'button',class:'btn small','data-act':'nav','data-k':'analytics'},'去看数据分析')));
+  return;
+ }
+ $('#main').append(h('div',{id:'topbar'}),h('div',{id:'sections'}));
+ renderTop();renderSections();
+}
+function renderTop(){
+ const keep=document.activeElement&&document.activeElement.id;
+ const d=data(),cover=coverOf(),R=rangeDef(S.range);
+ const seg=(name,opts,cur,act)=>h('div',{class:'seg',role:'radiogroup','aria-label':name},opts.map(([k,l])=>h('button',{type:'button',class:'seg-opt',role:'radio','aria-checked':String(cur===k),'data-act':act,'data-k':k,id:`f-${act}-${k}`},l)));
+ const sel=h('select',{id:'f-machine','aria-label':'机器'},h('option',{value:'all'},'全部 GPU 机器'),
+  ...MODEL_ORDER.map(md=>{const ms=d.fleet.filter(m=>m.model===md);return ms.length?h('optgroup',{label:md+' × '+ms.length},ms.map(m=>h('option',{value:m.id},m.name+(m.joined?'（新加入）':'')))):null}),
+  h('optgroup',{label:'主控'},h('option',{value:'ctrl'},'本机（BlackGoldPig）')));
+ if(!d.fleet.some(m=>m.id===S.machine)&&S.machine!=='ctrl')S.machine='all';
+ sel.value=S.machine;
+ const notice=R.start<cover?h('div',{class:'notice amber',style:'margin-bottom:16px'},icon('alert'),h('div',{},`所选时段早于数据记录起点（${fMD(cover)}），只统计 ${Math.ceil((NOW-cover)/DAY)} 天。图中灰色区域没有记录。`)):null;
+ $('#topbar').replaceChildren(
+  h('div',{class:'page-title'},h('div',{class:'page-title-main'},h('h1',{},'数据分析'),h('span',{class:'page-sub'},`处理量、耗时、用电与设备健康 · 数据自 ${dt(cover).getUTCFullYear()}-${fMD(cover)} 起`)),
+   h('div',{class:'refresh-meta'},h('span',{},'最后刷新 ',h('span',{class:'mono',id:'refreshed'},fMD(S.refreshed)+' '+fHM(S.refreshed)+':'+pad(dt(S.refreshed).getUTCSeconds()))),h('span',{class:'chip green'},icon('refresh'),'自动刷新 · 每 30 秒'))),
+  h('div',{class:'filterbar',role:'group','aria-label':'筛选（作用于下方全部内容）'},
+   h('div',{class:'fgroup'},h('span',{},'时段 · 过去'),seg('时段',RANGES,S.range,'range')),
+   h('label',{class:'fgroup',for:'f-machine'},h('span',{},'机器'),sel),
+   h('div',{class:'fgroup'},h('span',{},'分辨率'),seg('分辨率',[['all','全部'],['4K','4K'],['1080P','1080P']],S.res,'res')),
+   h('div',{class:'switch-l'},h('button',{type:'button',class:'toggle',role:'switch','aria-checked':String(S.compare),'aria-labelledby':'lbl-compare','data-act':'compare',id:'f-compare',disabled:R.hasPrev?null:true,title:R.hasPrev?null:'「全部」没有上一周期'}),h('span',{id:'lbl-compare'},'对比上一周期'))),
+  ...(notice?[notice]:[]));
+ if(keep){const el=document.getElementById(keep);if(el&&el!==document.activeElement)el.focus()}
+}
+function renderSections(){
+ const keep=document.activeElement&&document.activeElement.id;
+ CH=[];hideTip();
+ const A=compute();
+ $('#sections').replaceChildren(kpiRow(A),secProduction(A),secMachines(A),secController(A),secDurations(A),secEnergy(A),secUptime(A),secAlerts(A),secSources(A));
+ drawCharts();
+ $('#live').textContent=`已更新：${A.R.name} · ${S.machine==='all'?'全部 GPU 机器':mName(S.machine)} · ${S.res==='all'?'全部分辨率':S.res} · 完成 ${A.cur.length} 部`;
+ if(keep){const el=document.getElementById(keep);if(el&&el!==document.activeElement)el.focus({preventScroll:true})}
+}
+const RM=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+let fadeT;
+function refresh(){ // filter change: keep the frame, fade the old render briefly, then redraw
+ renderTop();const sec=$('#sections');if(!sec)return;
+ sec.classList.add('busy');clearTimeout(fadeT);
+ fadeT=setTimeout(()=>{renderSections();sec.classList.remove('busy')},RM?0:170);
+}
+
+/* ===================== events ===================== */
+document.addEventListener('click',e=>{
+ const t=e.target.closest('[data-act]');if(!t||t.disabled)return;
+ const a=t.dataset.act,k=t.dataset.k;
+ switch(a){
+  case 'scenario':S.sc=k;if(k==='cover'&&S.range==='7d')S.range='30d';render();break;
+  case 'nav':S.page=k;render();break;
+  case 'range':S.range=k;if(k==='all')S.compare=false;refresh();break;
+  case 'res':S.res=k;refresh();break;
+  case 'compare':S.compare=!S.compare;refresh();break;
+  case 'view':S.view[k]=t.dataset.v;renderSections();break;
+  case 'sort':S.sort=S.sort.k===k?{k,d:-S.sort.d}:{k,d:k==='name'||k==='st'?1:-1};renderSections();break;
+  case 'pick-machine':S.machine=S.machine===k?'all':k;refresh();break;
+  case 'machine-all':S.machine='all';refresh();break;
+  case 'hidecpu':S.hideCpu=!S.hideCpu;renderSections();break;
+ }
+});
+document.addEventListener('change',e=>{if(e.target.id==='f-machine'){S.machine=e.target.value;refresh()}});
+document.addEventListener('keydown',e=>{
+ const el=e.target;
+ if((e.key==='Enter'||e.key===' ')&&el.matches&&el.matches('tr[data-act]')){e.preventDefault();el.click();return}
+ if(el.matches&&el.matches('[data-rove]')&&['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)){
+  const grp=[...el.closest('[data-rove-group]').querySelectorAll('[data-rove]')];let i=grp.indexOf(el);
+  i=e.key==='Home'?0:e.key==='End'?grp.length-1:clamp(i+(e.key==='ArrowLeft'||e.key==='ArrowUp'?-1:1),0,grp.length-1);
+  e.preventDefault();grp.forEach(g=>g.setAttribute('tabindex','-1'));grp[i].setAttribute('tabindex','0');grp[i].focus();
+ }
+ if(e.key==='Escape')hideTip();
+});
+let lastW=0,rT;
+new ResizeObserver(es=>{const w=es[0].contentRect.width;if(Math.abs(w-lastW)>2){lastW=w;clearTimeout(rT);rT=setTimeout(drawCharts,120)}}).observe(document.getElementById('app'));
+setInterval(()=>{S.refreshed+=30e3;const el=document.getElementById('refreshed');if(el)el.textContent=fMD(S.refreshed)+' '+fHM(S.refreshed)+':'+pad(dt(S.refreshed).getUTCSeconds())},30e3);
+render();
+})();
+</script>

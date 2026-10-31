@@ -142,10 +142,11 @@ class TranslateExecutor:
             if sub.decision in _TRANSLATED:
                 work.append((video, sub, self._ja_cues(sub)))
         translated: dict[str, SubtitleFacts] = {}
+        cues: int | None = None  # #387: none for 「无需翻译」
         if work:
             if not self.chain_fn():
                 raise attention(NO_MODEL)
-            translated = self._translate(context, work, stems)
+            translated, cues = self._translate(context, work, stems)
         results = tuple(
             video.model_copy(
                 update={"subtitle": translated.get(video.video_item_id, video.subtitle)}
@@ -163,7 +164,7 @@ class TranslateExecutor:
             ),
         )
         message = f"翻译完成：{len(work)} 卷" if work else "无需翻译"
-        return ExecOutcome.succeeded(message, digest)
+        return ExecOutcome.succeeded(message, digest, item_count=cues)
 
     def _ja_cues(self, sub: SubtitleFacts) -> tuple[srt.Cue, ...]:
         if sub.ja is None:
@@ -185,7 +186,8 @@ class TranslateExecutor:
         context: JobContext,
         work: list[tuple[VideoResult, SubtitleFacts, tuple[srt.Cue, ...]]],
         stems: dict[str, str],
-    ) -> dict[str, SubtitleFacts]:
+    ) -> tuple[dict[str, SubtitleFacts], int]:
+        """The translated volumes' facts and the cues written across them."""
         rt = self.runtime
         checkpoint_dir = rt.work_dir / CHECKPOINTS_DIRNAME
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -199,10 +201,12 @@ class TranslateExecutor:
                 context, translator, {v.video_item_id for v, *_ in work}
             )
             facts: dict[str, SubtitleFacts] = {}
+            written = 0
             for video, sub, _ in work:
                 result = done[video.video_item_id]
                 target = context.workdir / f"{stems[video.video_item_id]}.zh.srt"
                 write_text_atomic(target, srt.serialize(result.zh_cues))
+                written += len(result.zh_cues)
                 facts[video.video_item_id] = sub.model_copy(
                     update={
                         "zh": file_ref(rt.work_dir, target),
@@ -211,7 +215,7 @@ class TranslateExecutor:
                 )
                 if result.checkpoint_key:
                     translator.discard_checkpoint(result.checkpoint_key)
-            return facts
+            return facts, written
         finally:
             translator.cancel()
             translator.join(self.join_timeout)

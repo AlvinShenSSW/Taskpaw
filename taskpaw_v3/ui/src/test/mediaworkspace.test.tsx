@@ -19,6 +19,8 @@ import {
   counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, performer, plan, PLANS, preflight, PREFLIGHTS, revisions, row, steps,
 } from "./fixtures/mediaWorkspace";
 import { CAT_K, LIB_A, LIB_B, LIBRARIES, NO_LIBRARIES } from "./fixtures/mediaLibrary";
+import ANALYTICS from "./fixtures/analytics-sample.json";
+import type { WorkflowAnalytics } from "../api";
 
 const wrapWith = (ui: ReactNode) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -49,6 +51,7 @@ function mockApi() {
   });
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
   vi.spyOn(api, "libraries").mockResolvedValue(LIBRARIES);
+  vi.spyOn(api, "workflowAnalytics").mockResolvedValue(ANALYTICS as WorkflowAnalytics);
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
   vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { inbox_root: "D:\\TODO" } });
   vi.spyOn(api, "workflowDevices").mockResolvedValue({
@@ -211,20 +214,22 @@ describe("#302 finished history", () => {
 });
 
 describe("MediaWorkspace shell", () => {
-  it("lists the ten pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 only on Mac 信息桥", async () => {
+  it("lists the eleven pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 only on Mac 信息桥", async () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
     await waitFor(() => expect(within(rail()).getByRole("button", { name: /^待确认/ })).toHaveTextContent("待确认4"));
     const items = within(rail()).getAllByRole("button");
     expect(items.map((b) => b.dataset.nav)).toEqual(
-      ["overview", "pending", "queue", "review", "exceptions", "devices", "local", "libraries", "bridge", "settings"]);
+      ["overview", "pending", "queue", "review", "exceptions", "devices", "local", "libraries", "analytics", "bridge", "settings"]);
     expect(items[1]).toHaveTextContent("待处理3");
     expect(items[4]).toHaveTextContent("异常6");
-    expect(items[8]).toHaveTextContent("后续");
-    // 设备 is live since P2-2, 片库与规则 and 设置 (renamed from 设置 / 迁移) since #361
-    for (const i of [5, 7, 9]) expect(items[i]).not.toHaveTextContent("后续");
-    expect(items[9]).toHaveTextContent(/^设置$/);
+    expect(items[9]).toHaveTextContent("后续");
+    // 设备 is live since P2-2, 片库与规则 and 设置 (renamed from 设置 / 迁移) since #361, 数据分析 since C3 #390
+    for (const i of [5, 7, 8, 10]) expect(items[i]).not.toHaveTextContent("后续");
+    expect(items[8]).toHaveTextContent(/^数据分析$/);
+    expect(items[8].querySelector(".nav-count")).toBeNull();
+    expect(items[10]).toHaveTextContent(/^设置$/);
     for (const i of [0, 2, 6]) expect(items[i].querySelector(".nav-count")).toBeNull();
     expect(items[0]).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("TaskPaw / 媒体处理中心 / 概览")).toBeInTheDocument();
@@ -234,7 +239,7 @@ describe("MediaWorkspace shell", () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
-    for (const label of ["概览", "待处理", "影片队列", "待确认", "异常", "设备", "本机", "片库与规则", "Mac 信息桥", "设置"]) {
+    for (const label of ["概览", "待处理", "影片队列", "待确认", "异常", "设备", "本机", "片库与规则", "数据分析", "Mac 信息桥", "设置"]) {
       await go(label);
       const main = screen.getByRole("main");
       expect(within(main).getAllByRole("heading", { level: 1 })).toHaveLength(1);
@@ -242,6 +247,7 @@ describe("MediaWorkspace shell", () => {
       expect(document.body.textContent).not.toMatch(FORBIDDEN);
       expect(main).toHaveFocus();
       if (label === "Mac 信息桥") expect(within(main).getByText("此功能将在多机工作流阶段提供")).toBeInTheDocument();
+      if (label === "数据分析") expect(await within(main).findByRole("group", { name: /^完成影片/ })).toBeInTheDocument();
     }
   });
 
@@ -268,6 +274,9 @@ describe("MediaWorkspace shell", () => {
     fireEvent.click(trigger);
     const dialog = await screen.findByRole("dialog", { name: "工作台导航" });
     expect(within(dialog).getByRole("button", { name: "关闭主导航" })).toBeInTheDocument();
+    // the narrow nav lists the same pages: 数据分析 right after 片库与规则 (C3 #390)
+    const navKeys = within(dialog).getAllByRole("button").map((b) => b.dataset.nav).filter(Boolean);
+    expect(navKeys.slice(navKeys.indexOf("libraries"), navKeys.indexOf("libraries") + 2)).toEqual(["libraries", "analytics"]);
     await waitFor(() => expect(within(dialog).getByRole("heading", { name: "工作台导航" })).toHaveFocus());
     // IR01: the title is focused once on open, not again on every rerender (the poll, a keystroke)
     const item = within(dialog).getByRole("button", { name: /^影片队列/ });
