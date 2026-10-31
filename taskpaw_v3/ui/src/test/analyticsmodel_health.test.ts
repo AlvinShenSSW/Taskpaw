@@ -254,7 +254,8 @@ describe("alertFigures (异常与报警, AC3)", () => {
     ],
   };
   const outages = [{ start: iso(T + 6 * H), end: iso(T + 7 * H), paused: false }];
-  const d = data({ failures: fails, devices, outages, coverage: { ...data().coverage, devices: iso(T - DAY), outages: iso(T - 2 * DAY) } });
+  const machines = [machine(CTRL, { name: "本机", kind: "controller", model: "RTX 5060 8GB" }), machine("gpu-a", { state_now: "offline" }), machine("gpu-b")];
+  const d = data({ machines, failures: fails, devices, outages, coverage: { ...data().coverage, devices: iso(T - DAY), outages: iso(T - 2 * DAY) } });
 
   it("types by §7.3 with fail / warn severity and the 「（重试已用尽）」 label; offline spans and outages are warnings", () => {
     const a = alertFigures(d, analyse(d));
@@ -331,6 +332,25 @@ describe("alertFigures (异常与报警, AC3)", () => {
     expect(events.filter((e) => e.outcome === "已恢复")).toHaveLength(5 * 183);
     // loose: about 13 ms alone with the per-machine index, about 485 ms with the earlier per-span rescan
     expect(ms).toBeLessThan(200);
+  });
+
+  it("an open offline span is 仍离线 only while fresh (≤ 90 s before server_time) and the machine is offline now (C5-X10)", () => {
+    const at = local(2026, 10, 30, 12);
+    const open = (end: number, state: AnalyticsMachine["state_now"]) => {
+      const d2 = data({
+        machines: [machine(CTRL, { name: "本机", kind: "controller" }), machine("gpu-a", { state_now: state }), machine("gpu-b")],
+        devices: { available: true, reason: "", spans: [span("gpu-a", "offline", at, end, { open: true })] },
+        coverage: { ...data().coverage, devices: iso(at - DAY) },
+      });
+      return alertFigures(d2, analyse(d2)).events.find((e) => e.kind === "offline")!;
+    };
+    // the recorder stalled hours ago while reads still work: no claim it is still offline
+    expect(open(at + H, "online")).toMatchObject({ outcome: "记录中断", tone: "neutral" });
+    expect(open(at + H, "online").note).toMatch(/^离线 1 小时，之后没有记录$/);
+    expect(open(at + H, "offline")).toMatchObject({ outcome: "记录中断" }); // stale even if still offline
+    expect(open(NOW - 30_000, "online")).toMatchObject({ outcome: "记录中断" }); // fresh tick, but online now
+    expect(open(NOW - 30_000, "offline")).toMatchObject({ outcome: "仍离线", tone: "red" });
+    expect(open(NOW - 30_000, "offline").note).toMatch(/，至今$/);
   });
 
   it("failures per machine count severity fail only; fleet machines without failures show 0", () => {

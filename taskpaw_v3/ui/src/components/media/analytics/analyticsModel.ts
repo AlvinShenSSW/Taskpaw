@@ -877,16 +877,21 @@ export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures
   const end = Math.min(A.R.end, A.now);
   let offline = 0;
   const recovered = recoveryIndex(data.devices.spans);
+  // an open offline span is 仍离线 only while its last tick is fresh (the §6.2 gap rule: ≤ 3 ticks before the
+  // response's server_time) and the machine is offline now; a stalled recorder proves nothing about now
+  const serverNow = Date.parse(data.server_time);
+  const stateNow = new Map(data.machines.map((m) => [m.id, m.state_now]));
   data.devices.spans.forEach((sp, i) => {
     const s = Date.parse(sp.start), e = spanEnd(sp);
     if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
     offline += 1;
+    const still = sp.open && serverNow - e <= 3 * TICK && stateNow.get(sp.machine) === "offline";
     const back = !sp.open && recovered(sp);
     count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
     events.push({
       key: `d${i}`, at: s, machine: sp.machine, kind: "offline", label: CLIENT_TYPE.offline.label, severity: "warn", code: null,
-      outcome: sp.open ? "仍离线" : back ? "已恢复" : "记录中断", tone: sp.open ? "red" : "neutral",
-      note: `离线 ${fSpan(e - s)}${sp.open ? "，至今" : back ? "" : "，之后没有记录"}`, burst: false,
+      outcome: still ? "仍离线" : back ? "已恢复" : "记录中断", tone: still ? "red" : "neutral",
+      note: `离线 ${fSpan(e - s)}${still ? "，至今" : back ? "" : "，之后没有记录"}`, burst: false,
     });
   });
   const outages = scope === null || A.ctrl ? outageFigures(data, A).items : [];
