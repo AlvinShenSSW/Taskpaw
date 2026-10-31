@@ -826,12 +826,27 @@ export interface AlertFigures {
 }
 
 const TICK = 30_000; // the recorder's tick (§6.2)
-/** A closed offline span is a recovery only when the same machine's next span starts as it ends (within a tick)
- *  and is online or 停领. The recorder also closes spans on a controller restart or a stall (§6.2): then
- *  nothing says the machine came back, so the outcome is 「记录中断」, not 「已恢复」. */
-function recovered(spans: AnalyticsSpan[], sp: AnalyticsSpan): boolean {
-  const end = spanEnd(sp);
-  return spans.some((n) => n !== sp && n.machine === sp.machine && n.state !== "offline" && Math.abs(Date.parse(n.start) - end) <= TICK);
+/**
+ * Whether a closed offline span ended in a recovery: the same machine's chronologically next span (start ≥ its
+ * end, within a tick) is online or 停领. The recorder also closes spans on a controller restart or a stall
+ * (§6.2); then nothing says the machine came back, and the outcome is 「记录中断」, not 「已恢复」. The spans
+ * are indexed per machine by start once, so a year of history is one sort plus a binary search per span (OD2).
+ */
+function recoveryIndex(spans: AnalyticsSpan[]): (sp: AnalyticsSpan) => boolean {
+  const by = new Map<string, Array<{ sp: AnalyticsSpan; t: number }>>();
+  for (const sp of spans) {
+    const list = by.get(sp.machine);
+    if (list) list.push({ sp, t: Date.parse(sp.start) }); else by.set(sp.machine, [{ sp, t: Date.parse(sp.start) }]);
+  }
+  for (const list of by.values()) list.sort((x, y) => x.t - y.t);
+  return (sp) => {
+    const list = by.get(sp.machine) ?? [], end = spanEnd(sp);
+    let lo = 0, hi = list.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid].t < end) lo = mid + 1; else hi = mid; }
+    while (lo < list.length && list[lo].sp === sp) lo += 1; // a zero-length span starts at its own end
+    const next = list[lo];
+    return next !== undefined && next.t - end <= TICK && next.sp.state !== "offline";
+  };
 }
 
 export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures {
@@ -858,11 +873,12 @@ export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures
   const scope = A.ctrl ? new Set(ctrlId ? [ctrlId] : []) : A.machine === ALL_MACHINES ? null : new Set([A.machine]);
   const end = Math.min(A.R.end, A.now);
   let offline = 0;
+  const recovered = recoveryIndex(data.devices.spans);
   data.devices.spans.forEach((sp, i) => {
     const s = Date.parse(sp.start), e = spanEnd(sp);
     if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
     offline += 1;
-    const back = !sp.open && recovered(data.devices.spans, sp);
+    const back = !sp.open && recovered(sp);
     count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
     events.push({
       key: `d${i}`, at: s, machine: sp.machine, kind: "offline", label: CLIENT_TYPE.offline.label, severity: "warn", code: null,

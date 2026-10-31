@@ -270,6 +270,55 @@ describe("alertFigures (异常与报警, AC3)", () => {
     expect(a.bursts).toHaveLength(1);
   });
 
+  it("recovery needs the chronologically next span: one starting a tick before a zero-length offline span is not it (C5-X5)", () => {
+    const at = local(2026, 10, 30, 12);
+    const d2 = data({
+      devices: { available: true, reason: "", spans: [span("gpu-b", "online", at - 20_000, at - 10_000), span("gpu-b", "offline", at, at)] },
+      coverage: { ...data().coverage, devices: iso(at - DAY) },
+    });
+    expect(alertFigures(d2, analyse(d2)).events.find((e) => e.kind === "offline")).toMatchObject({ outcome: "记录中断" });
+    const d3 = data({
+      devices: { available: true, reason: "", spans: [span("gpu-b", "offline", at, at), span("gpu-b", "online", at + 20_000, at + H)] },
+      coverage: { ...data().coverage, devices: iso(at - DAY) },
+    });
+    expect(alertFigures(d3, analyse(d3)).events.find((e) => e.kind === "offline")).toMatchObject({ outcome: "已恢复" });
+  });
+
+  it("a year of device history: outcomes match the naive next-span rule (C5-X6, OD2)", () => {
+    // 5 workers × 365 days × 8 spans, one closed offline span a day: back online at once on even days, after a gap on odd
+    const start = local(2025, 10, 31), spans: AnalyticsSpan[] = [];
+    for (let w = 0; w < 5; w++) {
+      for (let dd = 0; dd < 365; dd++) {
+        const b = start + dd * DAY, id = `gpu-${w}`;
+        spans.push(span(id, "online", b, b + 3 * H), span(id, "paused", b + 3 * H, b + 4 * H), span(id, "online", b + 4 * H, b + 8 * H),
+          span(id, "offline", b + 8 * H, b + 9 * H), span(id, "online", b + (dd % 2 ? 10 : 9) * H, b + 15 * H),
+          span(id, "online", b + 15 * H, b + 20 * H), span(id, "paused", b + 20 * H, b + 22 * H), span(id, "online", b + 22 * H, b + 24 * H));
+      }
+    }
+    const machines = [machine(CTRL, { name: "本机", kind: "controller" }), ...[0, 1, 2, 3, 4].map((w) => machine(`gpu-${w}`))];
+    const d = data({ machines, devices: { available: true, reason: "", spans }, coverage: { ...data().coverage, archives: iso(start), devices: iso(start) } });
+    const A = compute(d, rangeDef("all", NOW, start), ALL, NOW);
+    const t0 = performance.now();
+    const events = alertFigures(d, A).events.filter((e) => e.kind === "offline");
+    const ms = performance.now() - t0;
+    // the reference: a plain linear search for the earliest span of the machine starting at or after the end
+    const own = new Map([0, 1, 2, 3, 4].map((w) => [`gpu-${w}`, spans.filter((n) => n.machine === `gpu-${w}`).map((n) => ({ n, t: Date.parse(n.start) }))]));
+    const naive = (sp: AnalyticsSpan) => {
+      const end = Date.parse(sp.end);
+      let next: { n: AnalyticsSpan; t: number } | null = null;
+      for (const c of own.get(sp.machine)!) if (c.n !== sp && c.t >= end && (next === null || c.t < next.t)) next = c;
+      return next && next.t - end <= 30_000 && next.n.state !== "offline" ? "已恢复" : "记录中断";
+    };
+    const offline = spans.filter((sp) => sp.state === "offline");
+    expect(events).toHaveLength(1825);
+    const key = (m: string, at: number, o: string) => `${m}|${at}|${o}`;
+    expect(events.map((e) => key(e.machine, e.at, e.outcome)).sort())
+      .toEqual(offline.map((sp) => key(sp.machine, Date.parse(sp.start), naive(sp))).sort());
+    expect(events.filter((e) => e.outcome === "已恢复")).toHaveLength(5 * 183);
+    // loose: about 13 ms alone with the per-machine index, about 485 ms with the earlier per-span rescan
+    expect(ms).toBeLessThan(200);
+  });
+
   it("failures per machine count severity fail only; fleet machines without failures show 0", () => {
     const a = alertFigures(d, analyse(d));
     expect(Object.fromEntries(a.perMachine.map((m) => [m.label, m.n]))).toEqual({ "gpu-a": 3, "gpu-b": 0, "本机": 1 });

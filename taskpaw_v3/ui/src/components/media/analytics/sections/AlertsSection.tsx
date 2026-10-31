@@ -31,7 +31,9 @@ function BurstNotice({ data, b }: { data: WorkflowAnalytics; b: Burst }) {
   const name = machineName(data, b.machine);
   const sameDay = fMD(b.start) === fMD(b.end);
   const when = sameDay ? `${fMD(b.start)} ${fHM(b.start)}–${fHM(b.end)}` : `${fMDHM(b.start)}–${fMDHM(b.end)}`;
-  const moved = b.rows.filter((r) => r.outcome === "reassigned").length, needs = b.rows.filter((r) => r.outcome === "needs_action").length;
+  // 部 counts films (an attempt can repeat on one film); the heading's 次 counts attempts
+  const films = (o: string) => new Set(b.rows.filter((r) => r.outcome === o).map((r) => r.code)).size;
+  const moved = films("reassigned"), needs = films("needs_action");
   const done = [moved ? `已自动改派 ${moved} 部` : null, needs ? `${needs} 部需要处理` : null].filter(Boolean).join("，");
   return (
     <Notice tone="red" icon={WarningAmberIcon}>
@@ -44,6 +46,8 @@ function BurstNotice({ data, b }: { data: WorkflowAnalytics; b: Burst }) {
 /** `resetKey` names the filters: a new one starts the event list at 14 rows again, keeping the panel's view. */
 export function AlertsSection({ data, A, resetKey }: { data: WorkflowAnalytics; A: Analysis; resetKey: string }) {
   const [page, setPage] = useState({ key: resetKey, shown: PAGE });
+  // a new filter stores its key and starts again at 14 rows (React: storing information from previous renders)
+  if (page.key !== resetKey) setPage({ key: resetKey, shown: PAGE });
   const shown = page.key === resetKey ? page.shown : PAGE;
   const a = alertFigures(data, A);
   const desc = `失败（红）需要重试或改派，警告（琥珀）多为自动恢复 · ${A.R.name}失败 ${a.fails} 次、警告 ${a.warns} 次`

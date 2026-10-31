@@ -199,6 +199,15 @@ describe("异常与报警 (AC3, D5, D6, D16)", () => {
     expect(list.querySelectorAll("tbody tr.hl")).toHaveLength(3);
   });
 
+  it("burst outcome counts are films (部), the heading counts attempts (次) (C5-X7)", async () => {
+    // two of the three faults hit the same film: 3 attempts, 2 films
+    const failures = FIXTURE.failures.map((f) => (f.code === "ZZE-085" ? { ...f, code: "ZZD-084" } : f));
+    await mount({ ...FIXTURE, failures });
+    const banner = alerts().querySelector(".notice.red")!;
+    expect(banner).toHaveTextContent("出现 3 次「应用程序控制拦截」");
+    expect(banner).toHaveTextContent("已自动改派 2 部");
+  });
+
   it("an older, recovered burst keeps its highlighted rows without the banner", async () => {
     const shift = (iso: string) => new Date(Date.parse(iso) - 3 * 86_400_000).toISOString();
     const failures = FIXTURE.failures.map((f) => (f.type === "machine_fault" ? { ...f, at: shift(f.at) } : f));
@@ -240,6 +249,9 @@ describe("异常与报警 (AC3, D5, D6, D16)", () => {
     expect(list()).toHaveTextContent("已恢复"); // Dune came back online right after its offline span
     await range("30 天"); // a new filter starts at 14 rows again
     expect(rows()).toHaveLength(14);
+    await range("7 天"); // C5-X8: and coming back to the first filter does not bring its old expansion back
+    expect(rows()).toHaveLength(14);
+    await range("30 天");
     view(alerts(), "表格");
     fireEvent.click(within(alerts()).getByRole("button", { name: "显示更多" }));
     await range("7 天"); // C5-X4: the chosen 表格 view survives a filter change
