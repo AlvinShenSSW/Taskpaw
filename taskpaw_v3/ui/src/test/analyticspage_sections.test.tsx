@@ -4,7 +4,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { api, type WorkflowAnalytics } from "../api";
+import { api, HttpError, type WorkflowAnalytics } from "../api";
 import { AnalyticsPage } from "../components/media/analytics/AnalyticsPage";
 import SAMPLE from "./fixtures/analytics-sample.json";
 
@@ -260,6 +260,39 @@ describe("耗时分布 (AC4)", () => {
     expect(within(t).getAllByRole("row")).toHaveLength(9);
     const share = within(durations()).getByRole("table", { name: "时间占比" });
     expect(within(share).getAllByRole("row")).toHaveLength(7);
+  });
+});
+
+describe("panels and errors", () => {
+  it("the C4 panels give way to an error notice and come back with data; the filter bar stays", async () => {
+    const spy = await mount();
+    spy.mockImplementation(async (since) => {
+      if (since === "2026-09-01T16:00:00.000Z") throw new HttpError("工作流未启用", 503);
+      return FIXTURE;
+    });
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "时段" })).getByRole("radio", { name: "30 天" }));
+    expect(await screen.findByText("媒体流水线未运行：工作流未启用")).toBeInTheDocument();
+    for (const name of ["各 GPU 机器", "本机（主控）处理", "耗时分布"]) expect(screen.queryByRole("region", { name })).toBeNull();
+    expect(screen.getByRole("group", { name: "筛选（作用于下方全部内容）" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "时段" })).getByRole("radio", { name: "7 天" }));
+    expect(await screen.findByRole("region", { name: "各 GPU 机器" })).toBeInTheDocument();
+    expect(ctrl()).toBeInTheDocument();
+    expect(durations()).toBeInTheDocument();
+  });
+
+  it("a machine with restores but no energy reading shows 「—」, not 0 kWh; missing readings say 部分", async () => {
+    // Cedar's restores carry no reading at all; Dune's films in range each lack one stage's energy
+    const films = FIXTURE.films.map((f) => (f.worker === "w-gpu-cedar" ? { ...f, restore_wh: [] }
+      : f.worker === "w-gpu-dune" && in7d(f.archived_at) ? { ...f, energy_partial: true } : f));
+    await mount({ ...FIXTURE, films });
+    const cells = (name: string) => within(rowOf(name)).getAllByRole("cell");
+    expect(cells("Cedar")[6]).toHaveTextContent(/^—$/); // 平均功率
+    expect(cells("Cedar")[7]).toHaveTextContent(/^—（部分）$/); // 用电: no reading, restores lacked energy
+    expect(cells("Dune")[7]).toHaveTextContent(/kWh（部分）$/);
+    expect(cells("Aurora")[7]).toHaveTextContent(/^\d+(\.\d+)? kWh$/);
+    view(machines(), "表格");
+    const row = within(within(machines()).getByRole("table", { name: "各 GPU 机器" })).getByRole("row", { name: /Cedar/ });
+    expect(row).toHaveTextContent("—（部分）");
   });
 });
 

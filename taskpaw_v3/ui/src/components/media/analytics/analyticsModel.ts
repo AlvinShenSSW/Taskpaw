@@ -393,7 +393,8 @@ export interface MachineRow {
   n4: number; n1: number; nNone: number; total: number;
   a4: number | null; a1: number | null; min: number | null; max: number | null; // restore hours
   power: number | null; // W: Σwh × 3600 ÷ Σseconds over its restore_wh entries (§7.1)
-  kwh: number; // its restore_wh entries, failed attempts on any film included
+  kwh: number | null; // its restore_wh entries, failed attempts on any film included; null without any reading
+  kwhPartial: number; // films it restored whose restore reading is missing or energy_partial (the sum is incomplete)
   fails: number; // severity fail only
   eff: number | null; // restore hours per hour of film
   days: number; // online (+ 停领) days when device history covers the range, else calendar days present
@@ -438,8 +439,8 @@ export function machineRows(data: WorkflowAnalytics, A: Analysis): MachineRow[] 
   return ms.map((m) => {
     const films = A.cur.filter((f) => f.worker === m.id);
     const all = restoreH(films);
-    let wh = 0, secs = 0;
-    for (const f of A.rangeFilms) for (const [w, e, s] of f.restore_wh) if (w === m.id) { wh += e; secs += s; }
+    let wh = 0, secs = 0, read = false;
+    for (const f of A.rangeFilms) for (const [w, e, s] of f.restore_wh) if (w === m.id) { wh += e; secs += s; read = true; }
     const timed = films.filter((f) => f.restore_s != null && f.duration_s);
     const filmH = sum(timed.map((f) => f.duration_s! / 3600));
     const isNew = isNewMachine(m, A.R, A.now);
@@ -449,7 +450,9 @@ export function machineRows(data: WorkflowAnalytics, A: Analysis): MachineRow[] 
       nNone: films.filter((f) => f.res === null).length, total: films.length,
       a4: avg(restoreH(films.filter((f) => f.res === "4K"))), a1: avg(restoreH(films.filter((f) => f.res === "1080p"))),
       min: amin(all), max: amax(all),
-      power: secs > 0 ? (wh * 3600) / secs : null, kwh: wh / 1000,
+      // restore_wh holds only attempts with an energy reading, so both sums stay honest (never 0 for "no reading")
+      power: secs > 0 ? (wh * 3600) / secs : null, kwh: read ? wh / 1000 : null,
+      kwhPartial: films.filter((f) => f.energy_partial || !f.restore_wh.some(([w]) => w === m.id)).length,
       fails: A.failures.filter((f) => f.machine === m.id && isFail(f)).length,
       eff: filmH > 0 ? sum(timed.map((f) => f.restore_s! / 3600)) / filmH : null,
       days: machineDays(data, A, m, covered),

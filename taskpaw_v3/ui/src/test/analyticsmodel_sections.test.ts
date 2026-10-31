@@ -82,7 +82,7 @@ describe("machine rows (AC1, AC2)", () => {
     expect(a.eff).toBe(2); // 6 h restore for 3 h of film
     expect(a.fails).toBe(1);
     expect(row("gpu-b").fails).toBe(1); // an exhausted transient is a failure
-    expect(row("gpu-c")).toMatchObject({ total: 0, a4: null, power: null, kwh: 0, fails: 0, eff: null });
+    expect(row("gpu-c")).toMatchObject({ total: 0, a4: null, power: null, kwh: null, kwhPartial: 0, fails: 0, eff: null });
   });
 
   it("平均功率 = Σwh × 3600 ÷ Σseconds from restore_wh, a machine with only failed attempts included", () => {
@@ -91,6 +91,22 @@ describe("machine rows (AC1, AC2)", () => {
     expect(row("gpu-b").total).toBe(0);
     expect(row("gpu-b").power).toBeCloseTo(200, 6);
     expect(row("gpu-b").kwh).toBeCloseTo(0.1, 6);
+  });
+
+  it("用电 is never 0 kWh without a reading; films whose restore lacked energy mark it partial", () => {
+    const films = [
+      film(AT, { worker: "gpu-a", restore_wh: [["gpu-a", 600, 7200]] }),
+      film(AT + H, { worker: "gpu-a", restore_wh: [] }), // restored, no reading at all
+      film(AT + 2 * H, { worker: "gpu-a", restore_wh: [["gpu-a", 300, 3600]], energy_partial: true }),
+      film(AT + 3 * H, { worker: "gpu-b", restore_wh: [] }),
+    ];
+    const e = data({ films });
+    const rs = machineRows(e, compute(e, WEEK, F, NOW));
+    const a = rs.find((r) => r.m.id === "gpu-a")!, b = rs.find((r) => r.m.id === "gpu-b")!;
+    expect(a.kwh).toBeCloseTo(0.9, 6);
+    expect(a.kwhPartial).toBe(2);
+    expect(a.power).toBeCloseTo((900 * 3600) / 10800, 6); // seconds only from attempts with a reading
+    expect([b.kwh, b.kwhPartial, b.power]).toEqual([null, 1, null]);
   });
 
   it("marks 新加入 by the D14 rule and keeps the state key", () => {

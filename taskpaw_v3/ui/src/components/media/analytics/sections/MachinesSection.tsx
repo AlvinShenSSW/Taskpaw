@@ -37,6 +37,11 @@ function stateNote(r: MachineRow): string | null {
   return null;
 }
 const power = (r: MachineRow) => (r.power === null ? "—" : `${fInt(r.power)} W`);
+// C3's energy rule: no reading is 「—」, never 0 kWh; restores that lacked energy mark the sum 「部分」
+const PARTIAL = "（部分）";
+const kwhText = (r: MachineRow, unit: boolean) =>
+  `${r.kwh === null ? "—" : `${fKwh(r.kwh)}${unit ? " kWh" : ""}`}${r.kwhPartial ? PARTIAL : ""}`;
+const PARTIAL_TITLE = "部分修复没有用电记录，只合计已有的记录";
 const eff = (r: MachineRow) => (r.eff === null ? "—" : `${n1(r.eff)} 小时`);
 
 export function MachinesSection({ data, A, res, onMachine }: {
@@ -159,7 +164,7 @@ export function MachinesSection({ data, A, res, onMachine }: {
                         <td className="num">{fH(r.a1)}</td>
                         <td className="num">{`${fH(r.min)} / ${fH(r.max)}`}</td>
                         <td className="num">{power(r)}</td>
-                        <td className="num">{`${fKwh(r.kwh)} kWh`}</td>
+                        <td className="num" title={r.kwhPartial ? PARTIAL_TITLE : undefined}>{kwhText(r, true)}</td>
                         <td className="num">{r.fails}</td>
                         <td className="num">{eff(r)}</td>
                       </tr>
@@ -190,7 +195,7 @@ export function MachinesSection({ data, A, res, onMachine }: {
           const note = stateNote(r);
           return [r.m.model ?? "未识别型号", nameOf(r), `${MACHINE_STATE_TEXT[r.state]}${note ? `（${note}）` : ""}`, r.n4, r.n1,
             ...(unknown ? [r.nNone] : []), r.total, ma === null ? "—" : n1(ma), fH(r.a4), fH(r.a1), fH(r.min), fH(r.max), power(r),
-            fKwh(r.kwh), r.fails, eff(r)];
+            kwhText(r, false), r.fails, eff(r)];
         })} />
       <div className="divider" />
       {throughput()}
