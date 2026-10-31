@@ -232,7 +232,7 @@ describe("耗时分布 (AC4)", () => {
     await mount();
     const hoursChart = within(durations()).getByRole("img", { name: "按小时计的阶段耗时分布" });
     const labels = Array.from(hoursChart.querySelectorAll(".rlabel")).map((t) => t.textContent);
-    expect(labels).toEqual(["排队等待", "修复 4K", "修复 1080P", "全程"]);
+    expect(labels).toEqual(["排队等待", "修复 4K", "修复 1080P", "修复 未知分辨率", "全程"]); // Birch restored one unprobed film
     const minutes = within(durations()).getByRole("img", { name: "按分钟计的阶段耗时分布" });
     expect(Array.from(minutes.querySelectorAll(".rlabel")).map((t) => t.textContent)).toEqual(["ASR", "翻译", "刮削", "归档"]);
     const queued = WEEK.filter((f) => f.queue_s != null).length;
@@ -257,7 +257,7 @@ describe("耗时分布 (AC4)", () => {
     view(durations(), "表格");
     const t = within(durations()).getByRole("table", { name: "耗时分布" });
     expect(within(t).getAllByRole("columnheader").map((c) => c.textContent)).toEqual(["阶段", "影片", "最短", "p25", "中位数", "p75", "最长", "平均"]);
-    expect(within(t).getAllByRole("row")).toHaveLength(9);
+    expect(within(t).getAllByRole("row")).toHaveLength(10);
     const share = within(durations()).getByRole("table", { name: "时间占比" });
     expect(within(share).getAllByRole("row")).toHaveLength(7);
   });

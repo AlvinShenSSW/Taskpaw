@@ -346,7 +346,11 @@ const UNPROBED = "未识别型号";
 /** GPU machines grouped by model, plus retired ones with data in range 「（已退休）」. */
 export function machineGroups(data: WorkflowAnalytics, R: RangeDef, now: number): MachineGroup[] {
   const active = new Set<string>();
-  for (const f of data.films) if (f.worker && within(filmTime(f), R.start, R.end)) active.add(f.worker);
+  for (const f of data.films) {
+    if (!within(filmTime(f), R.start, R.end)) continue;
+    if (f.worker) active.add(f.worker);
+    for (const [w] of f.restore_wh) active.add(w); // a failed attempt's energy is data in range too
+  }
   for (const f of data.failures) if (within(failureTime(f), R.start, R.end)) active.add(f.machine);
   const byModel = new Map<string, AnalyticsMachine[]>();
   for (const m of data.machines) {
@@ -412,7 +416,8 @@ export function machineDays(data: WorkflowAnalytics, A: Analysis, m: AnalyticsMa
   let ms = 0;
   for (const sp of data.devices.spans) {
     if (sp.machine !== m.id || sp.state === "offline") continue;
-    const a = Math.max(s, Date.parse(sp.start)), b = Math.min(e, sp.open ? A.now : Date.parse(sp.end));
+    // an open span ends at its last recorded tick: time after it is unrecorded, never online (§6.2)
+    const a = Math.max(s, Date.parse(sp.start)), b = Math.min(e, Date.parse(sp.end));
     if (b > a) ms += b - a;
   }
   return ms / DAY;
@@ -439,8 +444,9 @@ export function machineRows(data: WorkflowAnalytics, A: Analysis): MachineRow[] 
   return ms.map((m) => {
     const films = A.cur.filter((f) => f.worker === m.id);
     const all = restoreH(films);
-    let wh = 0, secs = 0, read = false;
-    for (const f of A.rangeFilms) for (const [w, e, s] of f.restore_wh) if (w === m.id) { wh += e; secs += s; read = true; }
+    let wh = 0, secs = 0;
+    const fed = new Set<AnalyticsFilm>(); // films it put restore energy into, failed attempts included
+    for (const f of A.rangeFilms) for (const [w, e, s] of f.restore_wh) if (w === m.id) { wh += e; secs += s; fed.add(f); }
     const timed = films.filter((f) => f.restore_s != null && f.duration_s);
     const filmH = sum(timed.map((f) => f.duration_s! / 3600));
     const isNew = isNewMachine(m, A.R, A.now);
@@ -451,8 +457,9 @@ export function machineRows(data: WorkflowAnalytics, A: Analysis): MachineRow[] 
       a4: avg(restoreH(films.filter((f) => f.res === "4K"))), a1: avg(restoreH(films.filter((f) => f.res === "1080p"))),
       min: amin(all), max: amax(all),
       // restore_wh holds only attempts with an energy reading, so both sums stay honest (never 0 for "no reading")
-      power: secs > 0 ? (wh * 3600) / secs : null, kwh: read ? wh / 1000 : null,
-      kwhPartial: films.filter((f) => f.energy_partial || !f.restore_wh.some(([w]) => w === m.id)).length,
+      power: secs > 0 ? (wh * 3600) / secs : null, kwh: fed.size ? wh / 1000 : null,
+      // incomplete: a film it restored without its reading, or any film it fed that is energy_partial (C3's rule)
+      kwhPartial: new Set([...films, ...fed].filter((f) => f.energy_partial || !fed.has(f))).size,
       fails: A.failures.filter((f) => f.machine === m.id && isFail(f)).length,
       eff: filmH > 0 ? sum(timed.map((f) => f.restore_s! / 3600)) / filmH : null,
       days: machineDays(data, A, m, covered),
@@ -583,6 +590,8 @@ export function durationFigures(A: Analysis): DurationFigures {
   const hoursRows: DurationRow[] = [{ key: "queue", label: "排队等待", st: stats(queue) }];
   if (r4.length) hoursRows.push({ key: "restore4k", label: "修复 4K", st: stats(r4) });
   if (r1.length) hoursRows.push({ key: "restore1080", label: "修复 1080P", st: stats(r1) });
+  const rNone = restoreHours(A, c.filter((f) => f.res === null)); // as 产量趋势's 未知分辨率 series
+  if (rNone.length) hoursRows.push({ key: "restoreNone", label: "修复 未知分辨率", st: stats(rNone) });
   hoursRows.push({ key: "lead", label: "全程", st: stats(lead) });
   const asr = minutesOf(c.map((f) => f.asr_s)), trans = minutesOf(tr.map((f) => f.translate_s));
   const scrape = minutesOf(c.map((f) => f.scrape_s)), archive = minutesOf(c.map((f) => f.archive_s));

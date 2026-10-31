@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 import type { AnalyticsFailure, AnalyticsFilm, AnalyticsMachine, AnalyticsSpan, WorkflowAnalytics } from "../api";
 import {
-  compute, controllerFigures, devicesCoverRange, durationFigures, machineDays, machineRows, modelAverage, modelGroups, modelThroughput,
+  compute, controllerFigures, devicesCoverRange, durationFigures, machineDays, machineGroups, machineRows, modelAverage, modelGroups,
+  modelThroughput,
   outageFigures, rangeDef, sortMachineRows, type Filters,
 } from "../components/media/analytics/analyticsModel";
 
@@ -109,6 +110,30 @@ describe("machine rows (AC1, AC2)", () => {
     expect([b.kwh, b.kwhPartial, b.power]).toEqual([null, 1, null]);
   });
 
+  it("C4-X1: a retired machine whose only trace in range is a failed attempt's energy keeps its row and select entry", () => {
+    const e = data({
+      machines: [...d.machines, machine("gpu-ghost", { name: "Ghost", retired: true })],
+      films: [film(AT, { worker: "gpu-a", restore_wh: [["gpu-a", 800, 14400], ["gpu-ghost", 100, 1800]] })],
+    });
+    const A2 = compute(e, WEEK, F, NOW);
+    const ghost = machineRows(e, A2).find((r) => r.m.id === "gpu-ghost");
+    expect(ghost).toMatchObject({ total: 0, kwh: 0.1 });
+    expect(ghost!.power).toBeCloseTo(200, 6);
+    expect(machineGroups(e, WEEK, NOW).flatMap((g) => g.options.map((o) => o.id))).toContain("gpu-ghost");
+  });
+
+  it("C4-X2: completeness covers every film a machine put energy into, failed attempts on others' films included", () => {
+    const e = data({
+      films: [
+        film(AT, { worker: "gpu-a", restore_wh: [["gpu-a", 800, 14400], ["gpu-b", 100, 1800]], energy_partial: true }),
+        film(AT + H, { worker: "gpu-b", restore_wh: [["gpu-b", 400, 7200]] }),
+      ],
+    });
+    const rs = machineRows(e, compute(e, WEEK, F, NOW));
+    expect(rs.find((r) => r.m.id === "gpu-b")).toMatchObject({ kwh: 0.5, kwhPartial: 1 });
+    expect(rs.find((r) => r.m.id === "gpu-a")!.kwhPartial).toBe(1);
+  });
+
   it("marks 新加入 by the D14 rule and keeps the state key", () => {
     expect(row("gpu-new").isNew).toBe(true);
     expect(row("gpu-new").state).toBe("new");
@@ -172,14 +197,15 @@ describe("各机型实测产能 (AC1)", () => {
       span("gpu-a", "online", local(2026, 10, 26), local(2026, 10, 27)),
       span("gpu-a", "paused", local(2026, 10, 27), local(2026, 10, 27, 12)),
       span("gpu-a", "offline", local(2026, 10, 27, 12), local(2026, 10, 28)),
-      span("gpu-a", "online", local(2026, 10, 30), local(2026, 10, 31, 14), true), // open: runs to now
+      span("gpu-a", "online", local(2026, 10, 30), local(2026, 10, 31, 14), true), // open: counts up to its last tick only
       span("gpu-a", "online", local(2026, 10, 20), local(2026, 10, 25, 12)), // half a day inside
       span("gpu-b", "online", local(2026, 10, 26), local(2026, 10, 27)),
     ];
     const d = data({ machines, films, coverage: { ...data().coverage, devices: iso(local(2026, 10, 20)) }, devices: { available: true, reason: "", spans } });
     const A = compute(d, WEEK, F, NOW);
     expect(devicesCoverRange(d, A)).toBe(true);
-    expect(machineDays(d, A, machines[1], true)).toBeCloseTo(1 + 0.5 + (NOW - local(2026, 10, 30)) / DAY + 0.5, 6);
+    // C4-X3: the 20 minutes after the open span's last recorded tick are unrecorded, not online
+    expect(machineDays(d, A, machines[1], true)).toBeCloseTo(1 + 0.5 + (local(2026, 10, 31, 14) - local(2026, 10, 30)) / DAY + 0.5, 6);
     expect(machineDays(d, A, machines[2], true)).toBe(0);
     const unavailable = data({ ...d, devices: { available: false, reason: "坏了", spans } });
     expect(devicesCoverRange(unavailable, compute(unavailable, WEEK, F, NOW))).toBe(false);
@@ -256,6 +282,14 @@ describe("耗时分布 figures (AC4)", () => {
     expect(f.hours[1].st).toMatchObject({ min: 4, max: 6, avg: 5 });
     expect(f.minutes.map((r) => [r.key, r.st?.n])).toEqual([["asr", 3], ["translate", 2], ["scrape", 3], ["archive", 3]]);
     expect(f.minutes[0].st?.avg).toBe(10);
+  });
+
+  it("C4-X4: restores of films without a resolution get their own 修复 未知分辨率 strip", () => {
+    const e = data({ films: [...films, film(AT + 3 * H, { res: null, restore_s: 3 * 3600 })] });
+    const f = durationFigures(compute(e, WEEK, F, NOW));
+    expect(f.hours.map((r) => [r.key, r.label, r.st?.n])).toEqual([
+      ["queue", "排队等待", 3], ["restore4k", "修复 4K", 2], ["restore1080", "修复 1080P", 1], ["restoreNone", "修复 未知分辨率", 1], ["lead", "全程", 4],
+    ]);
   });
 
   it("time share: each stage's average in hours", () => {

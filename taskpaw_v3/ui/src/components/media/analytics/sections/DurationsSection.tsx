@@ -8,7 +8,7 @@ import { RangeChart, ShareBar } from "../charts";
 
 // Stage colours of the approved preview (STAGE): fixed, never cycled
 const COLOR: Record<string, string> = {
-  queue: "var(--c-queue)", restore: "var(--c1)", restore4k: "var(--c1)", restore1080: "var(--c1)", asr: "var(--c3)",
+  queue: "var(--c-queue)", restore: "var(--c1)", restore4k: "var(--c1)", restore1080: "var(--c1)", restoreNone: "var(--c1)", asr: "var(--c3)",
   translate: "var(--c4)", scrape: "var(--c5)", archive: "var(--c6)", lead: "var(--c-total)",
 };
 const LEGEND = [
