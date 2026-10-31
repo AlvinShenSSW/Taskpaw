@@ -1136,6 +1136,55 @@ def test_cas_conflict_is_retried_quietly(monkeypatch, tmp_path):
     assert fin.waiting == {"film": "归档中"}
 
 
+def _cleanup_ticks(world: World, fin: Finalizer) -> list[tuple[str, str]]:
+    seen = []
+    for _ in range(5):
+        fin.run_once()
+        seen.append((world.status("cleanup_workcopy"), world.status("cleanup_input")))
+    return seen
+
+
+def test_archiving_starts_both_cleanup_scopes_in_one_tick(world, caplog):
+    """#378: the input scope is admitted against the film as the workcopy
+    admission left it, so it no longer loses its own CAS and slips a tick."""
+    world.scrape()
+    with world.fake, caplog.at_level("INFO", logger="taskpaw.workflow.finalize"):
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        seen = _cleanup_ticks(world, fin)
+    assert "cas_conflict" not in caplog.text
+    first = next(s for s in seen if s[0] == "succeeded")
+    assert first == ("succeeded", "succeeded"), seen
+
+
+def test_a_concurrent_film_change_still_fails_the_input_cas(world, caplog):
+    """#378: a real film-version bump between the re-read and the input
+    admission still surfaces as cas_conflict and is retried next tick."""
+    world.scrape()
+    real = world.rt.store.begin_cleanup
+    bumped = []
+
+    def begin_cleanup(auth, meta, command):
+        if command.scope == "input" and not bumped:
+            bumped.append(True)
+            with world.rt.store._lock:
+                world.rt.store._conn.execute(
+                    "UPDATE films SET version = version + 1 WHERE film_id = ?",
+                    (world.film,),
+                )
+                world.rt.store._conn.commit()
+        return real(auth, meta, command)
+
+    world.rt.store.begin_cleanup = begin_cleanup  # type: ignore[method-assign]
+    with world.fake, caplog.at_level("INFO", logger="taskpaw.workflow.finalize"):
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        _cleanup_ticks(world, fin)
+    assert caplog.text.count("cas_conflict, retrying") == 1
+    assert world.status("cleanup_workcopy") == "succeeded"
+    assert world.status("cleanup_input") == "succeeded"
+
+
 def test_empty_actor_folder_goes_with_its_last_film(tmp_path):
     """Operator 2026-10-24: after a film's INBOX folder is cleaned, its actor
     folder is removed only when no other film is left in it; the root stays."""
