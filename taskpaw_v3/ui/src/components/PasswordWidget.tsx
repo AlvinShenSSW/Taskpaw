@@ -36,7 +36,7 @@ export function PasswordWidget(props: WidgetProps) {
       InputProps={{
         readOnly: readonly,
         // Mono so masked/token characters stay aligned (tabular).
-        sx: { "& input": { fontFamily: '"Fira Code","Noto Sans SC",ui-monospace,monospace' } },
+        sx: { "& input": { fontFamily: '"Fira Code","Noto Sans SC","Microsoft YaHei","PingFang SC",ui-monospace,monospace' } },
         endAdornment: (
           <InputAdornment position="end">
             <Tooltip title={show ? t("common.hide") : t("common.show")}>

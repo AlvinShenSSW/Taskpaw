@@ -8,6 +8,7 @@ describe("theme", () => {
   it("includes a CJK fallback in the font stacks", () => {
     expect(theme.typography.fontFamily).toContain("Noto Sans SC");
     expect(String(theme.typography.body2.fontFamily)).toContain("Noto Sans SC");
+    expect(String(theme.typography.body2.fontFamily)).toContain("Microsoft YaHei"); // #379: system CJK, not monospace's default
     expect(theme.typography.fontFamily).toMatch(/Fira Sans/); // Latin/numerals first
   });
 

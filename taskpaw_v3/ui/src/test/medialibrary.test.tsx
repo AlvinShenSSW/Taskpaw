@@ -114,6 +114,26 @@ describe("片库与规则 · first run", () => {
     fireEvent.click(await within(dialog).findByRole("button", { name: "导入并扫描" }));
     await waitFor(() => expect(m.importRun).toHaveBeenCalledWith("E:\\old\\library.db"));
   });
+
+  it("re-reads the same path again after a failed read (#379: no polling to recover it)", async () => {
+    const m = mockLibrary();
+    libraries = NO_LIBRARIES;
+    let failing = true;
+    m.preview.mockImplementation(async (path = "") => {
+      if (!path || failing) throw new HttpError("busy", 503);
+      return IMPORT_PREVIEW;
+    });
+    mount(<LibraryPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "从 Filmpaw 导入" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(await within(dialog).findByLabelText(/^Filmpaw 片库位置/), { target: { value: "E:\\old\\library.db" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    await waitFor(() => expect(m.preview).toHaveBeenCalledWith("E:\\old\\library.db"));
+    expect(await within(dialog).findByText(/无法读取 Filmpaw 片库/)).toBeInTheDocument();
+    failing = false;
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新读取" }));
+    expect(await within(dialog).findByRole("button", { name: "导入并扫描" })).toBeEnabled();
+  });
 });
 
 describe("片库与规则 · NAS 片库", () => {

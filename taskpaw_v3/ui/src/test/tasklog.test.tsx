@@ -424,7 +424,74 @@ describe("TaskLog", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
     expect(fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("after") === "20260926-500")).toBe(true);
-    expect(screen.getAllByTestId(/^log-row/)).toHaveLength(501);
+    const rows = screen.getAllByTestId(/^log-row/);
+    expect(rows).toHaveLength(200);
+    expect(rows[0]).toHaveAttribute("data-testid", "log-row-20260926-501");
+    expect(rows[199]).toHaveAttribute("data-testid", "log-row-20260926-302");
+    expect(screen.getByRole("button", { name: "Load earlier" })).toBeInTheDocument();
+  });
+  it("pauses polling while the page is hidden and resumes on the next visible tick", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T12:00:00"));
+    const fetcher = stub(() => ({ entries: [entry("20260926-9")] }));
+    show(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    let hidden = true;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    try {
+      fetcher.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+      expect(fetcher).not.toHaveBeenCalled();
+      hidden = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      const queries = fetcher.mock.calls.map(([url]) => new URL(url).searchParams).filter(p => !p.has("days"));
+      expect(queries.map(p => p.get("after"))).toEqual(["20260926-9"]);
+    } finally { delete (document as { hidden?: boolean }).hidden; }
+  });
+  it("keeps the newest 200 of Today's rows and returns the rest through Load earlier", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T12:00:00"));
+    const ids = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => entry(`20260926-${to - i}`));
+    const fetcher = stub(p => {
+      const after = p.get("after");
+      if (after === "20260926-100") return { entries: ids(101, 250) };
+      if (after === "20260926-250") return { entries: [entry("20260926-251")] };
+      if (p.get("before") === "20260926-51") return { entries: ids(1, 50) };
+      if (!p.has("after") && !p.has("before")) return { entries: ids(1, 100) };
+      return {};
+    });
+    show(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getAllByTestId(/^log-row/)).toHaveLength(200);
+    expect(screen.getByTestId("log-row-20260926-250")).toBeInTheDocument();
+    expect(screen.queryByTestId("log-row-20260926-50")).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load earlier" })); await vi.advanceTimersByTimeAsync(0); });
+    expect(fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("before") === "20260926-51")).toBe(true);
+    expect(screen.getAllByTestId(/^log-row/)).toHaveLength(250);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getAllByTestId(/^log-row/)).toHaveLength(251);
+  });
+  it.each([true, false])("restarts on the new Today instead of trimming across midnight (clock advanced: %s)", async advanced => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T23:59:59"));
+    const next = Array.from({ length: 250 }, (_, i) => entry(`20260927-${250 - i}`));
+    const fetcher = stub(p => {
+      if (p.get("after") === "20260926-9") return { entries: next };
+      if (p.get("day") === "20260927" && !p.has("before")) return { entries: next.slice(0, 100) };
+      if (!p.has("after") && !p.has("before")) return { entries: [entry("20260926-9")] };
+      return {};
+    });
+    show(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    // C4-D10: a clock stepped back stays on day D and trims normally instead of restarting.
+    if (!advanced) vi.setSystemTime(new Date("2026-09-26T23:59:50"));
+    fetcher.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    const queries = () => fetcher.mock.calls.map(([url]) => new URL(url).searchParams).filter(p => !p.has("days"));
+    if (advanced) {
+      expect(queries().map(p => [p.get("day"), p.get("after"), p.get("before")])).toEqual([[null, "20260926-9", null], ["20260927", null, null]]);
+      expect(screen.getAllByTestId(/^log-row/)).toHaveLength(100);
+    } else {
+      expect(queries()).toHaveLength(1);
+      expect(screen.getAllByTestId(/^log-row/)).toHaveLength(200);
+    }
+    expect(screen.queryByTestId("log-row-20260926-9")).not.toBeInTheDocument();
+    expect(queries().some(p => p.get("before")?.startsWith("20260927"))).toBe(false);
   });
   it("exports all filtered pages to a localized txt blob", async () => {
     const fetcher = stub(p => ({ entries: [entry(p.has("before") ? "20260926-8" : "20260926-9")], next_before: p.has("before") ? null : "20260926-9" }));

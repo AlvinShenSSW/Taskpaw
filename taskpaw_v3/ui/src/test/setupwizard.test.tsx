@@ -173,7 +173,7 @@ describe("媒体主控: role → network → controller → done", () => {
   it("the done step shows the saved rows, adds the rule, completes and restarts", async () => {
     saved = settings({ enabled: true, role: "controller", inbox_root: "D:\\TODO", data_dir: "D:\\TaskpawWork", remote_workers: true,
       whisperjav_exe_path: "C:\\WhisperJAV\\Scripts\\whisperjav.exe" });
-    vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "192.168.1.20", token_set: true, api_token_hint: "7Q2f" }));
+    const net = vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "192.168.1.20", token_set: true, api_token_hint: "7Q2f" }));
     vi.spyOn(api, "restartState").mockResolvedValue({ required: true, fields: ["bind_host"], blocked: null, available: true });
     const fw = vi.spyOn(api, "networkFirewall").mockResolvedValue({ result: "declined" });
     const complete = vi.spyOn(api, "setupComplete").mockResolvedValue({ status: "done", step: "done", role: "controller" });
@@ -189,6 +189,7 @@ describe("媒体主控: role → network → controller → done", () => {
     expect(fw).toHaveBeenCalledTimes(1);
     expect(complete).toHaveBeenCalled();
     expect(fw.mock.invocationCallOrder[0]).toBeLessThan(complete.mock.invocationCallOrder[0]);
+    expect(net).toHaveBeenCalledTimes(2); // #379: the firewall row re-reads the network state
     expect(await screen.findByText(/未添加防火墙规则，其他设备可能连不上本机/)).toBeInTheDocument();
     expect(await screen.findByText("正在重启 TaskPaw…")).toBeInTheDocument();
   });

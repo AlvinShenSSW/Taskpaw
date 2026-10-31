@@ -36,12 +36,11 @@
 - **Heading Font:** Fira Code
 - **Body Font:** Fira Sans
 - **Mood:** dashboard, data, analytics, code, technical, precise
-- **Google Fonts:** [Fira Code + Fira Sans](https://fonts.google.com/share?selection.family=Fira+Code:wght@400;500;600;700|Fira+Sans:wght@300;400;500;600;700)
-
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
-```
+- **Font files:** self-hosted under `taskpaw_v3/ui/public/fonts/` (Fira Sans 400–700,
+  Fira Code 400–700, latin + latin-ext, OFL notices beside them) and linked from
+  `index.html` as `/fonts/fonts.css`. CJK text uses the system font (Microsoft YaHei on
+  Windows). Never add a Google Fonts link or `@import`: the app makes no runtime font
+  request, and the Tauri CSP allows `font-src 'self'` only (#379).
 
 ### Spacing Variables
 

@@ -59,6 +59,7 @@ export function DoneStep({ role, go }: StepProps) {
         try {
           const r = await api.networkFirewall(); // one UAC prompt; a refusal never blocks
           setFirewall(firewallText(r.result) ?? "");
+          qc.invalidateQueries({ queryKey: ["network"] }); // the 防火墙 row re-reads the rule
         } finally { setAsking(false); }
       }
       if (!completed) { await api.setupComplete(); setCompleted(true); }
