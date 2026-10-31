@@ -210,6 +210,20 @@ describe("failureBursts (D16)", () => {
     expect(b[0].rows).toHaveLength(5);
   });
 
+  it("a burst is a union of qualifying windows that share failures, not of faults merely ≤ 1 h apart (C5-X9)", () => {
+    // 0/20/40 and 100/120/140: two windows of 3, no 3-in-1 h window links them (40 → 100 is only 2 faults)
+    const two = failureBursts([0, 20, 40, 100, 120, 140].map((m) => fault(T + m * MIN)), NOW);
+    expect(two.map((b) => b.rows.length)).toEqual([3, 3]);
+    expect(two.map((b) => [b.start, b.end])).toEqual([[T + 100 * MIN, T + 140 * MIN], [T, T + 40 * MIN]]); // newest first
+    // 0/20/40/70: windows {0,20,40} and {20,40,70} share faults → one burst of 4
+    const chain = failureBursts([0, 20, 40, 70].map((m) => fault(T + m * MIN)), NOW);
+    expect(chain.map((b) => b.rows.length)).toEqual([4]);
+    // an old recovered window is not pulled into a recent banner through a 2-fault bridge
+    const old = NOW - 3 * DAY;
+    const split = failureBursts([0, 20, 40, 100, 120, 140].map((m) => fault(old + m * MIN, m >= 100 ? { outcome: "needs_action" } : {})), NOW);
+    expect(split.map((b) => b.banner)).toEqual([true, false]);
+  });
+
   it("the banner only for a burst that ended in the last 24 h or has a needs_action row", () => {
     const old = NOW - 3 * DAY;
     const recovered = failureBursts([fault(old), fault(old + 10 * MIN), fault(old + 20 * MIN)], NOW);

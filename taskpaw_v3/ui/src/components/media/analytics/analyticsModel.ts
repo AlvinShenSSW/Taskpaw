@@ -780,33 +780,36 @@ const OUTCOME: Record<AnalyticsFailure["outcome"], [string, OutcomeTone]> = {
 export interface Burst { machine: string; rows: AnalyticsFailure[]; start: number; end: number; banner: boolean }
 const BURST_MIN = 3;
 /**
- * D16: ≥ 3 machine_fault failures on one machine within any 1 h window; overlapping windows merge into one
- * burst. Its rows are always highlighted; the banner only when it ended in the last 24 h or has a
+ * D16: ≥ 3 machine_fault failures on one machine within any 1 h window; windows that share a failure merge
+ * into one burst. Its rows are always highlighted; the banner only when it ended in the last 24 h or has a
  * needs_action row. Newest burst first.
  */
 export function failureBursts(failures: AnalyticsFailure[], now: number): Burst[] {
   const by = new Map<string, AnalyticsFailure[]>();
-  for (const f of failures) if (f.type === "machine_fault" && isFail(f)) by.set(f.machine, [...(by.get(f.machine) ?? []), f]);
+  for (const f of failures) {
+    if (f.type !== "machine_fault" || !isFail(f)) continue;
+    const list = by.get(f.machine);
+    if (list) list.push(f); else by.set(f.machine, [f]);
+  }
   const out: Burst[] = [];
   for (const [machine, fs] of by) {
     const s = [...fs].sort((a, b) => failureTime(a) - failureTime(b)), t = s.map(failureTime);
-    const hit = s.map(() => false);
+    // qualifying windows [i, j]: ≥ 3 faults within 1 h (two pointers over the sorted times); windows that share
+    // a failure (index overlap) merge into one burst — faults merely ≤ 1 h apart do not link two windows
+    let cur: [number, number] | null = null;
+    const flush = () => {
+      if (!cur) return;
+      const rows = s.slice(cur[0], cur[1] + 1), start = t[cur[0]], end = t[cur[1]];
+      out.push({ machine, rows, start, end, banner: end >= now - DAY || rows.some((r) => r.outcome === "needs_action") });
+      cur = null;
+    };
     for (let i = 0, j = 0; i < s.length; i++) {
       if (j < i) j = i;
       while (j + 1 < s.length && t[j + 1] - t[i] <= HOUR) j++;
-      if (j - i + 1 >= BURST_MIN) for (let k = i; k <= j; k++) hit[k] = true;
+      if (j - i + 1 < BURST_MIN) continue;
+      if (cur && i <= cur[1]) cur[1] = j;
+      else { flush(); cur = [i, j]; }
     }
-    let rows: AnalyticsFailure[] = [];
-    const flush = () => {
-      if (!rows.length) return;
-      const start = failureTime(rows[0]), end = failureTime(rows[rows.length - 1]);
-      out.push({ machine, rows, start, end, banner: end >= now - DAY || rows.some((r) => r.outcome === "needs_action") });
-      rows = [];
-    };
-    s.forEach((f, k) => {
-      if (!hit[k] || (rows.length && t[k] - failureTime(rows[rows.length - 1]) > HOUR)) flush();
-      if (hit[k]) rows.push(f);
-    });
     flush();
   }
   return out.sort((a, b) => b.end - a.end);
