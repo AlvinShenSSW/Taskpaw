@@ -81,6 +81,35 @@ export function AnalyticsPage() {
       )} />
   );
 
+  // The header and the filter bar always render, so a range that fails (503, 409, other) can be left by
+  // picking another one; a cached range shows its data at once. Only the panels give way to the notice.
+  const filterBar = (
+    <div className="filterbar" role="group" aria-label="筛选（作用于下方全部内容）">
+      <div className="fgroup">
+        <span>时段 · 过去</span>
+        <Seg name="时段" options={RANGES} value={range} onChange={(k) => { setRange(k); if (k === "all") setCompareOn(false); }} />
+      </div>
+      <label className="fgroup">
+        <span>机器</span>
+        <select aria-label="机器" value={machineNow} onChange={(e) => setMachine(e.target.value)}>
+          <option value={ALL_MACHINES}>全部 GPU 机器</option>
+          {groups.map((g) => (
+            <optgroup key={g.label} label={g.label}>
+              {g.options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </optgroup>
+          ))}
+          {controller && <optgroup label="主控"><option value={controller.id}>{controllerLabel(controller)}</option></optgroup>}
+        </select>
+      </label>
+      <div className="fgroup"><span>分辨率</span><Seg name="分辨率" options={RESOLUTIONS} value={res} onChange={setRes} /></div>
+      <div className="switch-l">
+        <button type="button" className="toggle" role="switch" aria-checked={compare} aria-labelledby={compareId}
+          disabled={!hasPrev} title={hasPrev ? undefined : "「全部」没有上一周期"} onClick={() => setCompareOn((v) => !v)} />
+        <span id={compareId}>对比上一周期</span>
+      </div>
+    </div>
+  );
+
   let body;
   if (!data || !A) {
     const status = error instanceof HttpError ? error.status : null;
@@ -92,30 +121,6 @@ export function AnalyticsPage() {
     const resLabel = res === "all" ? "全部分辨率" : res === "4K" ? "4K" : "1080P";
     body = (
       <>
-        <div className="filterbar" role="group" aria-label="筛选（作用于下方全部内容）">
-          <div className="fgroup">
-            <span>时段 · 过去</span>
-            <Seg name="时段" options={RANGES} value={range} onChange={(k) => { setRange(k); if (k === "all") setCompareOn(false); }} />
-          </div>
-          <label className="fgroup">
-            <span>机器</span>
-            <select aria-label="机器" value={machineNow} onChange={(e) => setMachine(e.target.value)}>
-              <option value={ALL_MACHINES}>全部 GPU 机器</option>
-              {groups.map((g) => (
-                <optgroup key={g.label} label={g.label}>
-                  {g.options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                </optgroup>
-              ))}
-              {controller && <optgroup label="主控"><option value={controller.id}>{controllerLabel(controller)}</option></optgroup>}
-            </select>
-          </label>
-          <div className="fgroup"><span>分辨率</span><Seg name="分辨率" options={RESOLUTIONS} value={res} onChange={setRes} /></div>
-          <div className="switch-l">
-            <button type="button" className="toggle" role="switch" aria-checked={compare} aria-labelledby={compareId}
-              disabled={!hasPrev} title={hasPrev ? undefined : "「全部」没有上一周期"} onClick={() => setCompareOn((v) => !v)} />
-            <span id={compareId}>对比上一周期</span>
-          </div>
-        </div>
         {error && <Notice tone="amber" icon={WarningAmberIcon}>最近一次刷新失败，显示的是上次读取的数据。（{errorText(error)}）</Notice>}
         {A.uncov > 0 && A.cover !== null && (
           <Notice tone="amber" icon={WarningAmberIcon}>
@@ -138,6 +143,7 @@ export function AnalyticsPage() {
       <GlobalStyles styles={ANALYTICS_CSS} />
       <ChartTooltipProvider>
         {head}
+        {filterBar}
         {body}
       </ChartTooltipProvider>
     </div>

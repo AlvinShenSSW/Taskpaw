@@ -240,6 +240,23 @@ describe("数据分析 states", () => {
     expect(screen.queryByRole("group", { name: /^完成影片/ })).toBeNull();
   });
 
+  it("a failing range keeps the filter bar, so the working range is one click away (C3-X6)", async () => {
+    const { spy } = mount();
+    await screen.findByRole("group", { name: /^完成影片/ });
+    spy.mockImplementation(async (since) => {
+      if (since === "2026-09-01T16:00:00.000Z") throw new HttpError("工作流未启用", 503);
+      return FIXTURE;
+    });
+    range("30 天");
+    expect(await screen.findByText("媒体流水线未运行：工作流未启用")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /^完成影片/ })).toBeNull();
+    expect(screen.getByRole("heading", { level: 1, name: "数据分析" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "筛选（作用于下方全部内容）" })).toBeInTheDocument();
+    range("7 天");
+    expect(await screen.findByRole("group", { name: /^完成影片/ })).toBeInTheDocument();
+    expect(screen.queryByText("媒体流水线未运行：工作流未启用")).toBeNull();
+  });
+
   it("other errors say so with the message", async () => {
     mount(new HttpError("/control/workflow/analytics → 500", 500));
     expect(await screen.findByText(/无法读取数据分析/)).toBeInTheDocument();
