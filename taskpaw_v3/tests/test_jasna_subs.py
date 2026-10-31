@@ -2534,11 +2534,10 @@ def test_no_listing_happens_while_the_gpu_is_refused(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "exc", [PermissionError(13, "denied"), OSError(53, "net"), RuntimeError("bug")]
 )
-def test_an_unreadable_folder_before_the_asr_skips_and_releases_the_hold(
-    tmp_path, monkeypatch, exc
-):
-    # AC5 + F14: the listing (outside the K1 fence) never raises; the film is
-    # skipped, the hold released; one alert per run (F16).
+def test_an_unreachable_root_before_the_asr_stops_the_run(tmp_path, monkeypatch, exc):
+    # AC5 + F14: the listing (outside the K1 fence) never raises. #380: the
+    # output folder IS the root — unreachable, so the run stops; nothing is
+    # skipped and the hold is released.
     gpu = _gpu_spy(monkeypatch)
     r = _setup(tmp_path, monkeypatch, restored=["d.mp4", "e.mp4"])
     real = J.plan_subs
@@ -2550,16 +2549,21 @@ def test_an_unreadable_folder_before_the_asr_skips_and_releases_the_hold(
 
     monkeypatch.setattr(J, "plan_subs", plan_then_fail)
     r.inst.start(r.emit)
-    for n in ("d.mp4", "e.mp4"):
-        assert r.inst._settled[n] == ("skipped", "subtitle state unreadable")
-        assert _states(r.inst, n) == _SKIPPED
+    assert r.inst._settled == {}
     assert r.spawner.argvs == []
-    assert gpu == ["acquire", "release", "acquire", "release"]
-    alerts = _keyed(r.evs, "j1:subs-unreadable")
-    assert len(alerts) == 1 and "d.mp4" in alerts[0][2]
+    assert gpu == ["acquire", "release"]
+    assert r.inst._launch_error.startswith("片库不可访问")
+    assert str(r.out) in r.inst._launch_error
+    st = r.inst.check(r.emit)
+    assert st.state == "error" and st.detail == r.inst._launch_error
+    assert len(_keyed(r.evs, "j1:library-unreachable")) == 1
+    assert not _keyed(r.evs, "j1:subs-unreadable")
+    assert r.inst._stopping.is_set()
+    reasons = [row["data"]["reason"] for row in _tasklog("task.error")]
+    assert reasons == ["library_unreachable"]
+    assert not _tasklog("subs.skipped")
     r.inst.check(r.emit)
-    done = _done(r.evs)
-    assert len(done) == 1 and "Subs: 0/2 done, 0 failed, 2 skipped" in done[0][2]
+    assert not _done(r.evs)
 
 
 @pytest.mark.parametrize("case", ["subtitle", "unreadable"])
@@ -2572,20 +2576,25 @@ def test_a_translate_only_film_is_rechecked_before_its_submit(
     r.inst.start(r.emit)
     if case == "subtitle":
         _sub(r.out, "a.mp4", ".srt").write_text(LIB_ZH, encoding="utf-8")
-    else:
+    else:  # #380: the output folder (the root) is gone
         _scandir_spy(monkeypatch, r.out, PermissionError(13, "denied"))
-    r.inst.check(r.emit)  # a restored → translate-only → re-check
+    st = r.inst.check(r.emit)  # a restored → translate-only → re-check
     assert r.translators[0].submitted == []
-    reason = "subtitle exists" if case == "subtitle" else "subtitle state unreadable"
-    assert r.inst._settled["a.mp4"] == ("skipped", reason)
     assert _ja(r, "a.mp4").read_text(encoding="utf-8") == SRT_JA  # library's
     assert gpu == ["acquire", "release"]  # only the restore's hold
-    assert _states(r.inst, "a.mp4") == {
-        "restore": "done",
-        "asr": "done",
-        "translate": "skipped",
-    }
-    assert len(_done(r.evs)) == 1
+    if case == "subtitle":
+        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+        assert _states(r.inst, "a.mp4") == {
+            "restore": "done",
+            "asr": "done",
+            "translate": "skipped",
+        }
+        assert len(_done(r.evs)) == 1
+    else:
+        assert "a.mp4" not in r.inst._settled
+        assert st.state == "error" and st.detail.startswith("片库不可访问")
+        assert len(_keyed(r.evs, "j1:library-unreachable")) == 1
+        assert not _done(r.evs)
 
 
 def test_a_skipped_translate_only_film_lets_the_subs_only_walk_continue(
@@ -2619,25 +2628,156 @@ def test_a_full_film_is_rechecked_before_its_translation(tmp_path, monkeypatch, 
     if case == "subtitle":
         lib = _sub(r.out, "a.mp4", ".zh.srt")
         lib.write_text(LIB_ZH, encoding="utf-8")
-    else:
+    else:  # #380: the output folder (the root) is gone
         _scandir_spy(monkeypatch, r.out, PermissionError(13, "denied"))
     r.spawner.last.finish(0)
-    r.inst.check(r.emit)
+    st = r.inst.check(r.emit)
     assert r.translators[0].submitted == []
-    assert _states(r.inst, "a.mp4") == {
-        "restore": "done",
-        "asr": "done",
-        "translate": "skipped",
-    }
     if case == "subtitle":
+        assert _states(r.inst, "a.mp4") == {
+            "restore": "done",
+            "asr": "done",
+            "translate": "skipped",
+        }
         assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
         assert not _ja(r, "a.mp4").exists()  # this run's own transcript goes
         assert lib.read_text(encoding="utf-8") == LIB_ZH
+        assert len(_done(r.evs)) == 1
     else:
-        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle state unreadable")
+        assert "a.mp4" not in r.inst._settled
         assert _ja(r, "a.mp4").exists()  # kept: the next Start only translates
-        assert len(_keyed(r.evs, "j1:subs-unreadable")) == 1
-    assert len(_done(r.evs)) == 1
+        assert r.inst._subs_job is None and r.inst._gpu_holder is None
+        assert st.state == "error" and st.detail.startswith("片库不可访问")
+        assert len(_keyed(r.evs, "j1:library-unreachable")) == 1
+        assert not _keyed(r.evs, "j1:subs-unreadable")
+        assert not _done(r.evs)
+
+
+# ── #380: an unreachable output folder stops the run and keeps the queue ───
+def test_an_unreachable_root_stops_restores_and_the_next_start_resumes(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # a restored → ASR a
+    assert len(r.spawner.argvs) == 1 and r.launcher.n == 1
+    real = os.scandir
+    _scandir_spy(monkeypatch, r.out, OSError(53, "net"))
+    r.spawner.last.finish(0)
+    st = r.inst.check(r.emit)
+    assert st.state == "error" and st.detail.startswith("片库不可访问")
+    assert r.launcher.n == 1  # b never launched
+    assert r.inst._settled == {}
+    assert _ja(r, "a.mp4").exists()
+    r.inst.check(r.emit)
+    assert r.launcher.n == 1 and not _done(r.evs)
+    monkeypatch.setattr(os, "scandir", real)  # the share is back
+    r.inst.stop(timeout=1)
+    r.inst.start(r.emit)
+    assert r.inst._kinds["a.mp4"] == "translate_only"
+    assert r.launcher.n == 2 and r.launcher.inputs()[-1] == "b.mp4"  # b restores
+    assert [v.name for v in r.inst._subs_only] == ["a.mp4"]  # a translates next
+    r.inst.stop(timeout=1)
+
+
+def test_a_translation_result_after_the_unreachable_stop_is_not_published(
+    tmp_path, monkeypatch
+):
+    # #380 AC3 (C5-D1): a result already queued when the run stops is dropped.
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4", "e.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    tr = r.translators[0]
+    assert [q.job_id for q in tr.submitted] == ["d.mp4"]
+    assert len(r.spawner.argvs) == 1  # e transcribing
+    _scandir_spy(monkeypatch, r.out, OSError(53, "net"))
+    r.spawner.last.finish(0)
+    st = r.inst.check(r.emit)
+    assert st.state == "error" and st.detail.startswith("片库不可访问")
+    tr.answer("d.mp4")  # lands behind CANCELLED in the FIFO
+    r.inst.check(r.emit)
+    assert r.inst._settled == {}
+    assert not _zh(r, "d.mp4").exists()
+    assert tr.discarded == []
+
+
+def _zh_publish_fails(monkeypatch) -> None:
+    """Every `.zh.srt` publish fails like a dropped share (WinError 53)."""
+    monkeypatch.setattr(
+        SubsJob,
+        "publish_zh",
+        lambda self, cues: PublishResult(
+            "error", f"publish {self.zh_target.name}: FileNotFoundError: [WinError 53]"
+        ),
+    )
+
+
+def test_a_translate_only_publish_failure_on_an_unreachable_root_stops_and_settles_nothing(
+    tmp_path, monkeypatch
+):
+    # #380 AC4 (C5-D2): no failed settlement, no streak, subtitles not disabled.
+    names = ["d.mp4", "e.mp4", "f.mp4"]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names)
+    r.inst.start(r.emit)
+    tr = r.translators[0]
+    assert [q.job_id for q in tr.submitted] == names
+    r.inst._subs_consecutive_failures = 2
+    _zh_publish_fails(monkeypatch)
+    _scandir_spy(monkeypatch, r.out, OSError(53, "net"))
+    for n in names:
+        tr.answer(n)
+    st = r.inst.check(r.emit)
+    assert r.inst._settled == {}
+    assert r.inst._subs_disabled is None
+    assert r.inst._subs_consecutive_failures == 2
+    assert st.state == "error" and st.detail.startswith("片库不可访问")
+    assert len(_keyed(r.evs, "j1:library-unreachable")) == 1
+    assert not _keyed(r.evs, "j1:subs-disabled")
+    assert not [e for e in r.evs if (e[3] or "").startswith("j1:subs:")]
+    assert tr.discarded == []
+    for n in names:
+        assert _ja(r, n).read_text(encoding="utf-8") == SRT_JA
+
+
+def test_a_translate_only_publish_failure_on_a_reachable_root_is_unchanged(
+    tmp_path, monkeypatch
+):
+    names = ["d.mp4", "e.mp4", "f.mp4"]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names)
+    r.inst.start(r.emit)
+    r.inst._subs_consecutive_failures = 2
+    _zh_publish_fails(monkeypatch)
+    r.translators[0].answer("d.mp4")
+    r.inst.check(r.emit)
+    assert r.inst._settled["d.mp4"][0] == "failed"
+    assert r.inst._subs_disabled is not None
+    assert r.inst._settled["e.mp4"] == ("skipped", "cancelled")
+    assert r.inst._settled["f.mp4"] == ("skipped", "cancelled")
+    assert not _keyed(r.evs, "j1:library-unreachable")
+    assert r.inst._launch_error is None
+    r.inst.stop(timeout=1)
+
+
+def test_a_transient_unreadable_listing_with_a_reachable_root_skips_as_before(
+    tmp_path, monkeypatch
+):
+    # #380 AC6: a listing that fails once while the root opens is a skip.
+    names = ["d.mp4", "e.mp4"]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names)
+    real = J.list_names
+    seen: list = []
+
+    def fail_once(folder):
+        seen.append(folder)
+        return None if len(seen) == 1 else real(folder)
+
+    monkeypatch.setattr(J, "list_names", fail_once)
+    r.inst.start(r.emit)
+    assert r.inst._settled["d.mp4"] == ("skipped", "subtitle state unreadable")
+    assert len(_keyed(r.evs, "j1:subs-unreadable")) == 1
+    assert [q.job_id for q in r.translators[0].submitted] == ["e.mp4"]
+    assert r.inst._launch_error is None
+    assert not _keyed(r.evs, "j1:library-unreachable")
+    r.inst.stop(timeout=1)
 
 
 @pytest.mark.parametrize("kind", ["full", "translate_only"])

@@ -10,9 +10,10 @@ skipped entirely — when
 
 `judge` is pure and total: names in, the matching names out — no I/O, and it
 never raises (garbage input is ignored). The listing helpers are the only I/O
-here: `list_names` never raises (an unreadable folder is None, F14) and
-`list_names_missing_ok` (Jasna's planning listing) raises on every failure
-except a genuinely missing folder (F13/F18).
+here: `list_names` never raises (an unreadable folder is None, F14),
+`root_reachable` (#380: is the library root itself there?) never raises
+either, and `list_names_missing_ok` (Jasna's planning listing) raises on every
+failure except a genuinely missing folder (F13/F18).
 
 Names are compared as `norm(s)` = NFC + casefold. A subtitle is attributed to
 the video in the listing (any common video extension, plus the caller's own
@@ -280,6 +281,19 @@ def list_names(folder: PathLike) -> Optional[list[str]]:
     except Exception as e:
         log.warning("subs: cannot list %s (%s: %s)", folder, type(e).__name__, e)
         return None
+
+
+def root_reachable(root: PathLike) -> bool:
+    """Whether the library root can be opened (#380) — asked only after a
+    folder under it could not be listed or a publish into it failed. One
+    `os.scandir` opened and closed, never enumerated. Never raises (F14): ANY
+    exception reads as unreachable."""
+    try:
+        with os.scandir(root):
+            return True
+    except Exception as e:
+        log.warning("subs: cannot open %s (%s: %s)", root, type(e).__name__, e)
+        return False
 
 
 def list_names_missing_ok(folder: str) -> list[str]:

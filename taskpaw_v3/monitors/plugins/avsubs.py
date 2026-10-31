@@ -17,7 +17,10 @@ exists (e.g. `.chs.srt`), or (c) its folder holds only this one video and any
 non-Japanese subtitle file (`subs.existing`). The folder is looked at again
 right before the ASR and before a full film's translation; a subtitle found
 then skips the film (`subtitle exists`), a folder that cannot be read skips it
-too (`subtitle state unreadable`, one alert per run; retried next Start).
+too (`subtitle state unreadable`, one alert per run; retried next Start) —
+unless the library root itself cannot be opened (also checked when a
+translated `.zh.srt` fails to publish): then the run stops in error (片库不可访问)
+and every unfinished film stays queued for the next Start (#380).
 Publishing never overwrites: a refused `.srt` skips the film and drops only
 the `.ja.srt` this run wrote; a refused `.ja.srt` skips it (`transcript
 exists`) and the next Start only translates.
@@ -98,6 +101,7 @@ from taskpaw_v3.monitors.subs.existing import (
     judge,
     list_names,
     qualifies,
+    root_reachable,
     skip_reason,
     target_owner_conflict,
 )
@@ -990,7 +994,8 @@ class AvsubsInstance(MonitorInstance):
         #191 (AC5): the film's folder is listed once more with the hold held —
         OUTSIDE the lock (the listing never raises, F14) — and judged under
         it: subtitles there, or a folder that cannot be read, skip the film
-        without an ASR (the freed turn goes to the next waiter)."""
+        without an ASR (the freed turn goes to the next waiter) — unless the
+        library root cannot be opened either: then the run stops (#380)."""
         job: Optional[SubsJob] = None
         release = False
         try:
@@ -998,9 +1003,13 @@ class AvsubsInstance(MonitorInstance):
                 self._queue.pop(0)
             job = self._jobs[item.relpath]
             names = list_names(job.media.parent)
+            lost = names is None and not root_reachable(self._root())
             with self._launch_lock:
                 skip = self._recheck(job, names)
                 if self._stopping.is_set() or self._aborted:
+                    release = True
+                elif lost:  # #380: the library is gone — stop, settle nothing
+                    self._stop_unreachable(emit)
                     release = True
                 elif skip is not None:
                     self._skip_existing(job, skip, emit)
@@ -1221,9 +1230,12 @@ class AvsubsInstance(MonitorInstance):
                     self._tracker.finish(name, ASR, "done", time.monotonic())
                     # #191 (AC5/F15): the film's last look before its
                     # translation — the same class of I/O as the publish.
-                    skip = self._recheck(job, list_names(job.media.parent))
+                    names = list_names(job.media.parent)
+                    skip = self._recheck(job, names)
                     if skip is None:
                         self._submit_translation(job, list(outcome.cues), emit)
+                    elif names is None and not root_reachable(self._root()):
+                        self._stop_unreachable(emit)  # #380
                     else:
                         self._skip_existing(job, skip, emit)
                 elif res.kind == "exists":
@@ -1441,6 +1453,33 @@ class AvsubsInstance(MonitorInstance):
         # D9: a pre-existing transcript we cannot read is not a run failure.
         self._settle(job.job_id, "failed", detail, emit, streak=False)
         self._alert_job(job.job_id, detail, emit)
+
+    def _root(self) -> str:
+        return self._cfg.avsubs_root_folder.strip()
+
+    def _stop_unreachable(self, emit: EventEmitter) -> None:
+        """#380 (under `_launch_lock`): the library root cannot be opened, so
+        the run ends in error with ONE alert and settles nothing — every
+        unfinished film stays for the next Start. The teardown is `stop()`,
+        deferred until the lock is released; its `_stopping` keeps any queued
+        translator result from being published or settled."""
+        root = self._root()
+        self._launch_error = f"片库不可访问: {root}"
+        get_task_log().record(
+            self.instance_id,
+            "task.error",
+            task_type="avsubs",
+            severity="error",
+            data={"reason": "library_unreachable"},
+        )
+        emit(
+            "alert",
+            f"{self._cfg.name}: 片库不可访问",
+            f"片库不可访问: {root}。剩余影片保留在队列中，未标记跳过；"
+            "共享恢复后先「停止」再「启动」即可继续。",
+            dedupe_key=f"{self.instance_id}:library-unreachable",
+        )
+        self._deferred.append(self.stop)
 
     def _settle(
         self,
@@ -1673,6 +1712,8 @@ class AvsubsInstance(MonitorInstance):
                                 )
                         elif res.kind == "exists":  # #191 AC6: never replaced
                             self._skip_existing(job, SUBTITLE_EXISTS, emit)
+                        elif not root_reachable(self._root()):
+                            self._stop_unreachable(emit)  # #380 (C5-D2)
                         else:
                             self._settle(job.job_id, "failed", res.detail, emit)
                             self._alert_job(job.job_id, res.detail, emit)

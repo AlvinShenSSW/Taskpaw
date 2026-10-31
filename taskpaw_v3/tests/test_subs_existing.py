@@ -22,6 +22,7 @@ from taskpaw_v3.monitors.subs.existing import (
     judge,
     list_names,
     list_names_missing_ok,
+    root_reachable,
     skip_reason,
 )
 from taskpaw_v3.monitors.subs.job import SUBTITLE_EXISTS, SUBTITLE_UNREADABLE
@@ -396,6 +397,57 @@ def test_list_names_reads_any_failure_as_unreadable(tmp_path, monkeypatch, exc):
 
 def test_list_names_survives_an_invalid_path():
     assert list_names("bad" + chr(0) + "path") is None
+
+
+# ── root_reachable: never raises (#380) ───────────────────────────────────
+def test_root_reachable_opens_one_folder(tmp_path):
+    assert root_reachable(tmp_path) is True
+    assert root_reachable(str(tmp_path)) is True
+    assert root_reachable(str(tmp_path / "missing")) is False
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError(13, "denied"), OSError(53, "net"), RuntimeError("bug")]
+)
+def test_root_reachable_reads_any_failure_as_unreachable(tmp_path, monkeypatch, exc):
+    assert root_reachable("bad" + chr(0) + "path") is False
+
+    def scandir(path="."):
+        raise exc
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert root_reachable(tmp_path) is False
+
+
+def test_root_reachable_does_not_enumerate(tmp_path, monkeypatch):
+    calls: list = []
+
+    class _It:
+        closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+        def __iter__(self):
+            raise AssertionError("enumerated")
+
+        def __next__(self):
+            raise AssertionError("enumerated")
+
+        def close(self):
+            self.closed = True
+
+    def scandir(path="."):
+        it = _It()
+        calls.append((path, it))
+        return it
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert root_reachable(tmp_path) is True
+    assert len(calls) == 1 and calls[0][0] == tmp_path and calls[0][1].closed
 
 
 # ── list_names_missing_ok: Jasna's planning listing (AC3, F13/F18) ─────────
