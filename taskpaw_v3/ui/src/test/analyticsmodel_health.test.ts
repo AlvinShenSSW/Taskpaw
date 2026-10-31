@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { AnalyticsFailure, AnalyticsFilm, AnalyticsMachine, AnalyticsSpan, WorkflowAnalytics } from "../api";
 import {
-  alertFigures, compute, controllerFigures, durationFigures, energyFigures, failureBursts, histogram, inboxFigures, rangeDef, sourceFigures, uptimeLanes, type Filters,
+  alertFigures, compute, spanOngoing, controllerFigures, durationFigures, energyFigures, failureBursts, histogram, inboxFigures, rangeDef, sourceFigures, uptimeLanes, type Filters,
 } from "../components/media/analytics/analyticsModel";
 
 const MIN = 60_000, H = 60 * MIN, DAY = 24 * H;
@@ -150,7 +150,7 @@ describe("uptimeLanes (设备在线, AC2)", () => {
     expect(lane.segs.map((s) => s.state)).toEqual(["none", "online", "none", "paused", "offline", "online", "none"]);
     expect(lane.segs[0]).toMatchObject({ s: A.R.start, e: T0 });
     expect(lane.segs[3].reason).toBe("worker");
-    expect(lane.segs[5]).toMatchObject({ e: NOW - 30_000, open: true });
+    expect(lane.segs[5]).toMatchObject({ e: NOW - 30_000, open: true, ongoing: true }); // fresh tick, gpu-a online now
     expect(lane.segs[6]).toMatchObject({ s: NOW - 30_000, e: NOW }); // after the last tick: unrecorded, never online
     expect(lane.offline).toBe(H);
     expect(lane.paused).toBe(2 * H);
@@ -159,6 +159,27 @@ describe("uptimeLanes (设备在线, AC2)", () => {
     expect(lane.online).toBe(recorded - 3 * H);
     // 在线率 = (online + 停领) ÷ recorded time; unrecorded time is listed apart, never counted as offline
     expect(lane.rate).toBeCloseTo(((recorded - H) / recorded) * 100);
+  });
+
+  it("spanOngoing: open, fresh (≤ 90 s before server_time) and the live state (and 停领 reason) matches (C5-X11)", () => {
+    const m = machine("gpu-a", { state_now: "paused", state_reason: "worker" });
+    const sp = (end: number, o: Partial<AnalyticsSpan> = {}) => span("gpu-a", "paused", T0, end, { open: true, reason: "worker", ...o });
+    expect(spanOngoing(sp(NOW - 30_000), m, NOW)).toBe(true);
+    expect(spanOngoing(sp(NOW - 90_000), m, NOW)).toBe(true);
+    expect(spanOngoing(sp(NOW - 91_000), m, NOW)).toBe(false); // stale: the recorder stalled
+    expect(spanOngoing(sp(NOW - 30_000, { open: false }), m, NOW)).toBe(false);
+    expect(spanOngoing(sp(NOW - 30_000, { reason: "admission" }), m, NOW)).toBe(false); // another 停领 reason now
+    expect(spanOngoing(sp(NOW - 30_000), { ...m, state_now: "online", state_reason: "" }, NOW)).toBe(false);
+    expect(spanOngoing(sp(NOW - 30_000), undefined, NOW)).toBe(false);
+  });
+
+  it("a stale open span is not ongoing in its lane: only what was recorded (C5-X11)", () => {
+    const d = data({
+      machines: [machine(CTRL, { name: "本机", kind: "controller" }), machine("gpu-a", { state_now: "online" }), machine("gpu-b")],
+      devices: { available: true, reason: "", spans: [span("gpu-a", "offline", T0, T0 + H, { open: true })] },
+    });
+    const seg = uptimeLanes(d, analyse(d))[0].segs.find((z) => z.state === "offline")!;
+    expect(seg).toMatchObject({ open: true, ongoing: false });
   });
 
   it("a 新加入 machine's lane starts at first_seen (D14); others start at the range start", () => {

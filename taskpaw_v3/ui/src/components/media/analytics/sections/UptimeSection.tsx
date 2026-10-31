@@ -27,8 +27,9 @@ const DESC = "每台机器在所选时段内的在线、停领与离线 · 在�
 
 const nameOf = (l: UptimeLane) => (l.m.kind === "controller" ? "本机" : l.m.name);
 const stateText = (z: LaneSegment) => (z.state === "paused" && z.reason ? `停领（${PAUSE_REASON_TEXT[z.reason]}）` : STATE[z.state].text);
-// an open span is still going: its end is the last recorded tick, after which the lane is 无记录
-const until = (z: LaneSegment) => (z.open ? `${fMDHM(z.e)}（仍在继续）` : fMDHM(z.e));
+// 「仍在继续」 only when the span demonstrably continues (spanOngoing); an open span that does not (the recorder
+// stalled or the live state changed) says only its last recorded tick, after which the lane is 无记录
+const until = (z: LaneSegment) => (z.ongoing ? `${fMDHM(z.e)}（仍在继续）` : z.open ? `最后记录 ${fMDHM(z.e)}` : fMDHM(z.e));
 const rateText = (l: UptimeLane) => (l.rate === null ? "—" : fPct(l.rate));
 const joinedNote = (l: UptimeLane) => (l.isNew && l.m.first_seen ? `${fMDHM(Date.parse(l.m.first_seen))} 加入，之前没有记录` : null);
 

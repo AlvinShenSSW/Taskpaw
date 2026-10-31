@@ -166,6 +166,25 @@ describe("设备在线 (AC2, §8.6)", () => {
     expect(rates.querySelector("thead")).toHaveTextContent("无记录");
   });
 
+  it("「仍在继续」 only for a fresh open span matching the live state; otherwise 「最后记录」 (C5-X11)", async () => {
+    // Birch's open offline span is fresh, but Birch reports online now; Cedar's 停领 (admission) still matches
+    await mount({ ...FIXTURE, machines: FIXTURE.machines.map((m) => (m.id === "w-gpu-birch" ? { ...m, state_now: "online" as const } : m)) });
+    const chart = within(uptime()).getByRole("img", { name: "设备在线时间轴" });
+    const tips = roveItems(chart).map(tipOf);
+    const birch = tips.filter((t) => t.startsWith("Birch") && t.includes("离线"));
+    expect(birch.length).toBeGreaterThan(0);
+    for (const t of birch) expect(t).not.toContain("仍在继续");
+    expect(birch.some((t) => t.includes("最后记录 10-31 13:59"))).toBe(true);
+    expect(tips.some((t) => t.startsWith("Cedar") && t.includes("仍在继续"))).toBe(true);
+    view(uptime(), "表格");
+    const spans = within(uptime()).getByRole("table", { name: "离线与停领记录" });
+    const row = (name: string) => within(spans).getAllByRole("row").filter((r) => r.querySelector("td")?.textContent === name).pop()!;
+    expect(row("Birch")).not.toHaveTextContent("仍在继续");
+    expect(row("Birch")).toHaveTextContent("最后记录 10-31 13:59");
+    expect(row("Cedar")).toHaveTextContent("仍在继续");
+    expect(alerts()).not.toHaveTextContent("仍离线"); // the same rule in 异常与报警
+  });
+
   it("devices.available = false: 「设备记录不可用：<reason>」; no device history yet: its own notice", async () => {
     await mount({ ...FIXTURE, devices: { available: false, reason: "analytics.db 无法打开", spans: [] } });
     expect(uptime()).toHaveTextContent("设备记录不可用：analytics.db 无法打开");

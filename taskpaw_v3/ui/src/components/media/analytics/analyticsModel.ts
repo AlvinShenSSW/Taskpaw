@@ -689,7 +689,11 @@ export function energyFigures(data: WorkflowAnalytics, A: Analysis, res: ResFilt
 
 // ---- 设备在线 (§8.4 item 7; C5 AC2) ----
 export type LaneState = "online" | "paused" | "offline" | "none"; // none = 无记录 (no span: 主控未运行或未收到心跳)
-export interface LaneSegment { s: number; e: number; state: LaneState; reason: AnalyticsStateReason; open: boolean }
+export interface LaneSegment {
+  s: number; e: number; state: LaneState; reason: AnalyticsStateReason;
+  open: boolean; // the recorder still holds the span open
+  ongoing: boolean; // and it demonstrably continues now (spanOngoing); else only its last recorded tick is known
+}
 export interface UptimeLane {
   m: AnalyticsMachine;
   isNew: boolean;
@@ -702,6 +706,17 @@ export interface UptimeLane {
 const overlaps = (s: number, e: number, a: number, b: number) => s < b && e > a;
 // an open span ends at its last recorded tick: time after it is unrecorded (§6.2, as machineDays / C4-X3)
 const spanEnd = (sp: AnalyticsSpan) => Date.parse(sp.end);
+const TICK = 30_000; // the recorder's tick (§6.2)
+/**
+ * The one rule for "this state continues now", used wherever the page says so (「仍在继续」, 仍离线, 「至今」):
+ * the span is open, its last tick is fresh (≤ 3 ticks before the response's server_time — the §6.2 gap
+ * rule) and the machine's live state, and for 停领 its reason, still match. Otherwise a stalled recorder or a
+ * changed state means only the last recorded tick is known.
+ */
+export function spanOngoing(sp: AnalyticsSpan, m: AnalyticsMachine | undefined, serverTime: number): boolean {
+  return sp.open && m !== undefined && serverTime - spanEnd(sp) <= 3 * TICK && m.state_now === sp.state
+    && (sp.state !== "paused" || m.state_reason === sp.reason);
+}
 
 /** The machines of the 设备在线 panel: the GPU fleet in scope (retired ones only with a span in range), then 本机. */
 function laneMachines(data: WorkflowAnalytics, A: Analysis): AnalyticsMachine[] {
@@ -715,15 +730,15 @@ function laneMachines(data: WorkflowAnalytics, A: Analysis): AnalyticsMachine[] 
 }
 
 export function uptimeLanes(data: WorkflowAnalytics, A: Analysis): UptimeLane[] {
-  const to = A.visEnd;
+  const to = A.visEnd, serverNow = Date.parse(data.server_time);
   return laneMachines(data, A).map((m) => {
     const isNew = isNewMachine(m, A.R, A.now);
     const from = isNew && m.first_seen ? Math.max(A.R.start, Date.parse(m.first_seen)) : A.R.start;
     const segs: LaneSegment[] = [];
     const tot = { online: 0, paused: 0, offline: 0, none: 0 };
-    const push = (s: number, e: number, state: LaneState, reason: AnalyticsStateReason = "", open = false) => {
+    const push = (s: number, e: number, state: LaneState, reason: AnalyticsStateReason = "", open = false, ongoing = false) => {
       if (e <= s) return;
-      segs.push({ s, e, state, reason, open });
+      segs.push({ s, e, state, reason, open, ongoing });
       tot[state] += e - s;
     };
     if (to > from) {
@@ -733,7 +748,7 @@ export function uptimeLanes(data: WorkflowAnalytics, A: Analysis): UptimeLane[] 
         const a = Math.max(at, Date.parse(sp.start)), b = Math.min(to, spanEnd(sp));
         if (b <= a) continue;
         push(at, a, "none");
-        push(a, b, sp.state, sp.reason, sp.open);
+        push(a, b, sp.state, sp.reason, sp.open, spanOngoing(sp, m, serverNow));
         at = b;
       }
       push(at, to, "none");
@@ -828,7 +843,6 @@ export interface AlertFigures {
   fails: number; warns: number; offline: number; outages: number; // warns = failure rows of severity warn
 }
 
-const TICK = 30_000; // the recorder's tick (§6.2)
 /**
  * Whether a closed offline span ended in a recovery: the same machine's chronologically next span (start ≥ its
  * end, within a tick) is online or 停领. The recorder also closes spans on a controller restart or a stall
@@ -877,15 +891,14 @@ export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures
   const end = Math.min(A.R.end, A.now);
   let offline = 0;
   const recovered = recoveryIndex(data.devices.spans);
-  // an open offline span is 仍离线 only while its last tick is fresh (the §6.2 gap rule: ≤ 3 ticks before the
-  // response's server_time) and the machine is offline now; a stalled recorder proves nothing about now
+  // 仍离线 / 「至今」 only for an offline span that demonstrably continues (spanOngoing)
   const serverNow = Date.parse(data.server_time);
-  const stateNow = new Map(data.machines.map((m) => [m.id, m.state_now]));
+  const machineOf = new Map(data.machines.map((m) => [m.id, m]));
   data.devices.spans.forEach((sp, i) => {
     const s = Date.parse(sp.start), e = spanEnd(sp);
     if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
     offline += 1;
-    const still = sp.open && serverNow - e <= 3 * TICK && stateNow.get(sp.machine) === "offline";
+    const still = spanOngoing(sp, machineOf.get(sp.machine), serverNow);
     const back = !sp.open && recovered(sp);
     count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
     events.push({
