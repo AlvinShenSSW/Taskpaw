@@ -186,11 +186,21 @@ def test_reclaim_slow_probe_does_not_sleep_past_deadline(monkeypatch, multiple):
         sleeps.append(seconds)
         now[0] += seconds
 
-    monkeypatch.setattr(net, "psutil", SimpleNamespace())
-    monkeypatch.setattr(
-        net, "_find_stale_backends", lambda *a: [SimpleNamespace(pid=123)]
-    )
-    monkeypatch.setattr(net, "_terminate_backend", lambda *a: True)
+    killed_at = []
+
+    def terminate(*_a):
+        killed_at.append((len(polls), now[0]))
+        return True
+
+    proc = SimpleNamespace(pid=123)
+    monkeypatch.setattr(net, "psutil", SimpleNamespace(CONN_LISTEN="LISTEN"))
+    monkeypatch.setattr(net, "_find_stale_backends", lambda *a: [proc])
+    listen = [
+        SimpleNamespace(status="LISTEN", laddr=SimpleNamespace(ip="127.0.0.1", port=p))
+        for p in (1234, 1235)
+    ]
+    monkeypatch.setattr(net, "_our_listeners", lambda role: [(proc, listen)])
+    monkeypatch.setattr(net, "_terminate_backend", terminate)
     monkeypatch.setattr(net, "port_available", unavailable)
     monkeypatch.setattr(net.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(net.time, "sleep", sleep)
@@ -204,8 +214,10 @@ def test_reclaim_slow_probe_does_not_sleep_past_deadline(monkeypatch, multiple):
         assert net.reclaim_port_from_stale_instance(
             "127.0.0.1", 1234, role="agent", what="read", wait=0.1
         )
-    assert polls == [("127.0.0.1", 1234)]
-    assert now[0] <= 0.1 + 1.0
+    # Only the post-terminate wait matters (the plural fast path probes first).
+    [(probes_before, killed)] = killed_at
+    assert polls[probes_before:] == [("127.0.0.1", 1234)]
+    assert now[0] - killed <= 0.1 + 1.0
     assert not any(sleeps)
 
 

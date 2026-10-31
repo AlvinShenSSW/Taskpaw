@@ -365,19 +365,21 @@ def _proc_listen_conns(proc: "psutil.Process") -> list:
     return getter(kind="inet")
 
 
-def _find_stale_backends(host: str, port: int, role: str):
-    """Yield THIS app's own `role` backend processes that hold a bind-conflicting
-    LISTEN on (host, port). Scans OUR OWN processes (process_iter → per-process
-    sockets) rather than doing a system-wide socket scan, so it needs no root on macOS
-    where the stale instance runs as the same logged-in user (Codex 外门)."""
+def _our_listeners(role: str) -> list:
+    """THIS app's own `role` backend processes with their LISTENing inet sockets, as
+    [(proc, conns)], from ONE process enumeration. Scans OUR OWN processes
+    (process_iter → per-process sockets) rather than doing a system-wide socket scan,
+    so it needs no root on macOS where the stale instance runs as the same logged-in
+    user (Codex 外门)."""
     if psutil is None:
-        return
+        return []
     try:
         procs = list(psutil.process_iter())
     except (psutil.Error, OSError) as e:
         log.warning("could not enumerate processes to reclaim a port: %s", e)
-        return
+        return []
     me = os.getpid()
+    found = []
     for proc in procs:
         if proc.pid == me:
             continue
@@ -391,15 +393,27 @@ def _find_stale_backends(host: str, port: int, role: str):
             conns = _proc_listen_conns(proc)
         except (psutil.Error, OSError):
             continue
-        for c in conns:
-            if (
-                getattr(c, "status", None) == psutil.CONN_LISTEN
-                and c.laddr
-                and c.laddr.port == port
-                and _addr_conflicts(host, c.laddr.ip)
-            ):
-                yield proc
-                break
+        found.append((proc, conns))
+    return found
+
+
+def _holds(conns: list, host: str, port: int) -> bool:
+    """Whether any of these sockets is a bind-conflicting LISTEN on (host, port)."""
+    return any(
+        getattr(c, "status", None) == psutil.CONN_LISTEN
+        and c.laddr
+        and c.laddr.port == port
+        and _addr_conflicts(host, c.laddr.ip)
+        for c in conns
+    )
+
+
+def _find_stale_backends(host: str, port: int, role: str):
+    """Yield THIS app's own `role` backend processes that hold a bind-conflicting
+    LISTEN on (host, port)."""
+    for proc, conns in _our_listeners(role):
+        if _holds(conns, host, port):
+            yield proc
 
 
 def _terminate_backend(proc: "psutil.Process", pid: int, wait: float) -> bool:
@@ -433,6 +447,10 @@ def reclaim_ports_from_stale_instance(
     (Codex 外门). claim_port then fails loudly on the real conflict. `specs` is a list
     of (host, port, what). Used by the agent, which needs BOTH its network and control
     ports viable before it supersedes the old agent.
+
+    When every port is bindable no backend of ours can block startup, so it returns
+    without enumerating processes (the normal launch, #377); otherwise it enumerates
+    processes once for all ports.
     """
     if psutil is None:
         return False
@@ -456,17 +474,23 @@ def reclaim_ports_from_stale_instance(
                     p2,
                 )
                 return False
+    # Fast path — every port binds with startup's own semantics, so nothing of ours
+    # holds one: skip the process scan (about 0.7 s per enumeration on Windows).
+    free = {(host, port): port_available(host, port) for host, port, _w in specs}
+    if all(free.values()):
+        return False
     # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
     # sockets without root (macOS), so a port that is neither ours nor bindable is
     # treated as foreign — and a single foreign holder anywhere aborts the whole
     # reclaim (leave the old, still-serving agent alone; claim_port fails loudly).
+    listeners = _our_listeners(role)
     to_kill: dict[int, "psutil.Process"] = {}
     for host, port, what in specs:
-        ours = list(_find_stale_backends(host, port, role))
+        ours = [proc for proc, conns in listeners if _holds(conns, host, port)]
         if ours:
             for proc in ours:
                 to_kill[proc.pid] = proc
-        elif not port_available(host, port):
+        elif not free[(host, port)]:
             log.warning(
                 "not reclaiming the %s ports: %s (%s:%d) is unavailable "
                 "and has no identified TaskPaw listener "
