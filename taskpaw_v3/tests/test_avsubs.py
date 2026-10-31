@@ -2705,11 +2705,12 @@ def test_an_unreachable_root_before_the_asr_stops_the_run_and_keeps_the_queue(
     assert st.metrics["queue_remaining"] == 3 and st.metrics["queue_skipped"] == 0
     tr = r.translators[0]
     assert tr.cancel_calls == 1 and tr.cancel_lock_free == [True]
-    assert not list(r.root.glob("*.srt"))
     n = len(r.evs)
     st = r.inst.check(r.emit)
     assert st.state == "error" and len(r.evs) == n  # later checks are silent
     monkeypatch.setattr(os, "scandir", real)  # the share is back
+    # Only now: pathlib.glob lists through os.scandir on Python 3.12 (CI caught it).
+    assert not list(r.root.glob("*.srt"))
     r.inst.stop(timeout=1)
     r.inst.start(r.emit)
     assert sorted(r.inst._jobs) == ["a.mp4", "b.mp4", "c.mp4"]
