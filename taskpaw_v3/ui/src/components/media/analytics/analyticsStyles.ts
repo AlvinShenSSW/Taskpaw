@@ -113,6 +113,7 @@ export const ANALYTICS_CSS = `
 .mw .an .th-btn .icon{width:14px;height:14px;opacity:.5}
 .mw .an th[aria-sort] .th-btn{color:var(--text)}
 .mw .an th[aria-sort] .th-btn .icon{opacity:1}
+.mw .an table.grid th .chip.tag{margin-left:5px;vertical-align:middle}
 .mw .an .mname strong{display:block;font-weight:600}
 .mw .an .mname span{font-size:11px;color:var(--muted)}
 .mw .an .sbar-cell{display:flex;align-items:center;gap:8px;min-width:190px}

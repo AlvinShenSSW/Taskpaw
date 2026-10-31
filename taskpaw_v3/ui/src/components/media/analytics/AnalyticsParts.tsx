@@ -51,13 +51,13 @@ export function AnalyticsPanel({ id, title, desc, badges, actions, chart, table 
   );
 }
 
-export interface Column { label: string; num?: boolean }
+export interface Column { label: string; num?: boolean; tag?: ReactNode } // tag: e.g. 「估算」 beside the header
 export function DataTable({ cols, rows, caption }: { cols: Column[]; rows: ReactNode[][]; caption: string }) {
   return (
     <div className="table-wrap">
       <table className="grid fit">
         <caption className="sr-only">{caption}</caption>
-        <thead><tr>{cols.map((c) => <th key={c.label} scope="col" className={c.num ? "num" : undefined}>{c.label}</th>)}</tr></thead>
+        <thead><tr>{cols.map((c) => <th key={c.label} scope="col" className={c.num ? "num" : undefined}>{c.label}{c.tag}</th>)}</tr></thead>
         <tbody>
           {rows.length
             ? rows.map((r, i) => <tr key={i}>{r.map((v, j) => <td key={j} className={cols[j]?.num ? "num" : undefined}>{v}</td>)}</tr>)

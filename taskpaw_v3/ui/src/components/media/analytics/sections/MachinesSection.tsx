@@ -9,7 +9,7 @@ import UnfoldMoreIcon from "@mui/icons-material/UnfoldMore";
 import { Fragment, useState, type KeyboardEvent } from "react";
 import type { WorkflowAnalytics } from "../../../../api";
 import { Icon, Notice } from "../../parts";
-import { AnalyticsPanel, Block, DataTable, Legend, MachineStateChip } from "../AnalyticsParts";
+import { AnalyticsPanel, Block, DataTable, EstimateChip, Legend, MachineStateChip } from "../AnalyticsParts";
 import { fH, fInt, fKwh, fMDHM, n1 } from "../analyticsFormat";
 import {
   ALL_MACHINES, bucketize, bucketShort, bucketTitle, devicesCoverRange, MACHINE_STATE_TEXT, machineRows, modelAverage, modelGroups,
@@ -23,6 +23,7 @@ const SORT_COLS: ReadonlyArray<readonly [MachineSortKey, string, boolean]> = [
   ["name", "机器", false], ["st", "状态", false], ["total", "修复影片", false], ["a4", "平均修复 4K", true], ["a1", "平均修复 1080P", true],
   ["min", "最短 / 最长", true], ["power", "平均功率", true], ["kwh", "用电", true], ["fails", "失败", true], ["eff", "修复效率", true],
 ];
+const ESTIMATED = new Set<MachineSortKey>(["power", "kwh"]); // OD4: energy figures are estimates, labelled 「估算」
 const DESC = "按归档完成时间统计每台机器修复的影片，同型号放在一起比较 · 点击一行只看这台机器";
 
 const nameOf = (r: MachineRow) => (r.m.kind === "controller" ? "本机" : r.m.name);
@@ -119,6 +120,7 @@ export function MachinesSection({ data, A, res, onMachine }: {
                     <button type="button" className="th-btn" onClick={() => toggleSort(k)}>
                       {label}<Icon of={on ? (sort.dir > 0 ? ArrowDropUpIcon : ArrowDropDownIcon) : UnfoldMoreIcon} />
                     </button>
+                    {ESTIMATED.has(k) && <EstimateChip />}
                   </th>
                 );
               })}
@@ -190,7 +192,7 @@ export function MachinesSection({ data, A, res, onMachine }: {
         cols={[{ label: "机型" }, { label: "机器" }, { label: "状态" }, { label: "4K", num: true }, { label: "1080P", num: true },
           ...(unknown ? [{ label: "未知分辨率", num: true }] : []), { label: "合计", num: true }, { label: "同型号平均", num: true },
           { label: "平均修复 4K", num: true }, { label: "平均修复 1080P", num: true }, { label: "最短", num: true }, { label: "最长", num: true },
-          { label: "平均功率", num: true }, { label: "用电 kWh", num: true }, { label: "失败", num: true }, { label: "修复效率", num: true }]}
+          { label: "平均功率", num: true, tag: <EstimateChip /> }, { label: "用电 kWh", num: true, tag: <EstimateChip /> }, { label: "失败", num: true }, { label: "修复效率", num: true }]}
         rows={ordered.map(({ r, ma }) => {
           const note = stateNote(r);
           return [r.m.model ?? "未识别型号", nameOf(r), `${MACHINE_STATE_TEXT[r.state]}${note ? `（${note}）` : ""}`, r.n4, r.n1,

@@ -99,6 +99,16 @@ describe("各 GPU 机器 (AC1, AC2)", () => {
     expect(within(rowOf("Birch")).getAllByRole("cell")[8]).toHaveTextContent(/^3$/);
   });
 
+  it("平均功率 and 用电 are labelled 「估算」 in both views (OD4)", async () => {
+    await mount();
+    const th = (table: HTMLElement, label: RegExp) => within(table).getAllByRole("columnheader").find((c) => label.test(c.textContent ?? ""))!;
+    for (const label of [/^平均功率/, /^用电/]) expect(within(th(machineTable(), label)).getByText("估算")).toHaveClass("chip");
+    view(machines(), "表格");
+    const t = within(machines()).getByRole("table", { name: "各 GPU 机器" });
+    for (const label of [/^平均功率/, /^用电 kWh/]) expect(within(th(t, label)).getByText("估算")).toHaveClass("chip");
+    expect(within(t).getAllByText("估算")).toHaveLength(2); // on the headers only, not in every cell
+  });
+
   it("a row click filters to that machine; 查看全部 GPU 机器 resets", async () => {
     await mount();
     fireEvent.click(rowOf("Dune"));
@@ -147,7 +157,7 @@ describe("各 GPU 机器 (AC1, AC2)", () => {
     view(machines(), "表格");
     const t = within(machines()).getByRole("table", { name: "各 GPU 机器" });
     expect(within(t).getAllByRole("columnheader").map((c) => c.textContent)).toEqual([
-      "机型", "机器", "状态", "4K", "1080P", "未知分辨率", "合计", "同型号平均", "平均修复 4K", "平均修复 1080P", "最短", "最长", "平均功率", "用电 kWh", "失败", "修复效率",
+      "机型", "机器", "状态", "4K", "1080P", "未知分辨率", "合计", "同型号平均", "平均修复 4K", "平均修复 1080P", "最短", "最长", "平均功率估算", "用电 kWh估算", "失败", "修复效率",
     ]);
     expect(within(t).getAllByRole("row")).toHaveLength(6);
     expect(within(t).getByRole("row", { name: /Cedar/ })).toHaveTextContent("停领（主控停领 · 10-31 11:00 起）");
