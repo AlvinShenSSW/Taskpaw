@@ -317,6 +317,9 @@ def create_control_app(
     from taskpaw_v3.agent.server.library_routes import register_library_routes
 
     register_library_routes(app, config.workflow, workflow_provider)  # #362 片库
+    from taskpaw_v3.agent.server.analytics_routes import register_analytics_routes
+
+    register_analytics_routes(app, config.workflow, workflow_provider)  # #389 数据分析
 
     from taskpaw_v3.agent.server.workflow_settings import register_workflow_settings
 

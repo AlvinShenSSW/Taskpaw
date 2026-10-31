@@ -1034,7 +1034,8 @@ def resolution(
 ) -> m.AssignmentResolution:
     """The resolving command of a settled attempt: its owner stopped (made
     by the controller), its outcome's evidence with the ledger digest, the
-    restore timing and the energy (PWR-2). Shared by both dispatch paths."""
+    restore timing, the energy (PWR-2) and a translate's cue count (#387).
+    Shared by both dispatch paths."""
     kind = (
         SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
     )
@@ -1059,6 +1060,7 @@ def resolution(
                 payload_digest=outcome.result_digest,
                 timing=outcome.timing,
                 energy=energy,
+                item_count=outcome.item_count,
             ),
         ),
         outcome="succeeded" if outcome.ok else "failed",

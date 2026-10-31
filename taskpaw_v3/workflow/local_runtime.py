@@ -303,6 +303,7 @@ class LocalRuntime:
         item_ids: tuple[str, ...] = (),
         timing: m.RestoreTiming | None = None,
         energy: m.AttemptEnergy | None = None,
+        item_count: int | None = None,
     ) -> m.EvidenceRef:
         """Passed evidence, signed by the operator unless another producer is named."""
         now = self.clock.now()
@@ -317,7 +318,11 @@ class LocalRuntime:
             or m.digest({"kind": kind, "note": note or ""}),
             status="passed",
             summary=m.EvidenceSummary(
-                note=note, item_ids=item_ids, timing=timing, energy=energy
+                note=note,
+                item_ids=item_ids,
+                item_count=item_count,
+                timing=timing,
+                energy=energy,
             ),
         )
 

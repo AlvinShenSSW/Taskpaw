@@ -435,7 +435,9 @@ failed; after that the stage stays failed. So for the two transient types, when 
 attempt's §7.2 outcome is `needs_action`, severity becomes **fail** and the label
 「临时失败（重试已用尽）」 (translate pause: 「翻译暂停（重试已用尽）」); the `type` code keeps
 its value and the response adds `"exhausted": true`. With any other outcome
-(`retrying`, `retried_ok`, `reassigned`) they stay warnings.
+(`retrying`, `retried_ok`, `reassigned`) they stay warnings. `exhausted` marks only
+the job's latest attempt: earlier transient attempts of that failed job have outcome
+`needs_action` but stay warnings (§10).
 | `machine_fault` | 应用程序控制拦截 | fail | kind `exec_failed:machine`, or note contains `WinError 4551` |
 | `missing_model` | 缺少模型文件 | fail | note contains `缺少 LTX 模型文件` |
 | `missing_ffprobe` | 缺少 ffprobe | fail | note contains `ffprobe` |
@@ -759,8 +761,9 @@ Acceptance criteria:
    transient → 临时失败, machine, note types, other), with `severity` per §7.3 and §7.2
    outcome; a transient-typed attempt whose outcome is `needs_action` (retries used up,
    `should_retry` false after `MAX_AUTO_RETRIES`) has `severity: fail`,
-   `exhausted: true`; every other failure has `exhausted: false`; worker-less stages
-   report the controller's machine id.
+   `exhausted: true` — only the job's latest attempt; its earlier transient attempts
+   are `needs_action` but stay `warn` (§10); every other failure has
+   `exhausted: false`; worker-less stages report the controller's machine id.
 7. `machines`: every enrolled worker plus 本机 and any retired worker referenced by a
    returned fact/failure/span; `model` from the latest probed capability formatted
    "RTX 5060 Ti 16GB"; `first_seen` = MIN `worker_boots.observed_at`; `state_now`

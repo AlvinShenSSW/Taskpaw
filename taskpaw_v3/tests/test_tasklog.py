@@ -731,3 +731,94 @@ def test_reconcile_started_session_spanning_days_and_step_specific_interrupt(tmp
     assert [(r["task"], r["film"], r["data"]["step"]) for r in inferred] == [
         ("a", "same", "translate")
     ]
+
+
+# ── EPIC #387 C2: one day's rows of some kinds, from a byte offset ─────────
+class _WatchedLock:
+    """Stands in for the store lock and remembers whether it is held."""
+
+    def __init__(self):
+        self.inner = threading.Lock()
+        self.held = False
+
+    def __enter__(self):
+        self.inner.acquire()
+        self.held = True
+        return self
+
+    def __exit__(self, *exc):
+        self.held = False
+        self.inner.release()
+
+
+def test_kind_rows_reads_from_the_offset_and_leaves_a_torn_tail(tmp_path):
+    store = TaskLog(tmp_path, clock=Clock())
+    record(store, kind="translate.provider_down", data={"model": "m"})
+    record(store, kind="task.started")
+    assert store.day == "20260926"
+    first = store.kind_rows("20260926", {"translate.provider_down"})
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    assert first.found and first.offset == path.stat().st_size
+    assert [r["id"] for r in first.rows] == ["20260926-1"]
+    assert first.rows[0]["data"] == {"model": "m"}
+    record(store, kind="translate.provider_up", data={"model": "m"})
+    kinds = {"translate.provider_down", "translate.provider_up"}
+    second = store.kind_rows("20260926", kinds, first.offset)
+    assert [r["kind"] for r in second.rows] == ["translate.provider_up"]
+    # a line still being written is not consumed: read again once complete
+    whole = json.dumps({**second.rows[0], "id": "20260926-9"}) + "\n"
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(whole[:20])
+    torn = store.kind_rows("20260926", kinds, second.offset)
+    assert torn.rows == [] and torn.offset == second.offset
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(whole[20:])
+    done = store.kind_rows("20260926", kinds, torn.offset)
+    assert [r["id"] for r in done.rows] == ["20260926-9"]
+    assert done.offset == path.stat().st_size
+    assert store.kind_rows("20260926", kinds, done.offset).rows == []
+
+
+def test_kind_rows_reads_the_file_outside_the_lock_and_copies_memory(
+    tmp_path, monkeypatch
+):
+    store = TaskLog(tmp_path, clock=Clock())
+    record(store, kind="translate.paused")
+    watched = _WatchedLock()
+    monkeypatch.setattr(store, "_lock", watched)
+    real_open = Path.open
+    opened = []
+
+    def open_(self, *args, **kwargs):
+        if self.name.startswith("tasklog-"):
+            opened.append(watched.held)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_)
+    result = store.kind_rows("20260926", {"translate.paused"})
+    assert opened == [False]  # read without the store lock, closed again
+    # the ring holds the written row too: callers merge by id
+    assert [r["id"] for r in result.memory] == ["20260926-1"]
+    assert [r["id"] for r in result.rows] == ["20260926-1"]
+
+
+def test_kind_rows_of_a_memory_only_log_and_a_missing_day(tmp_path):
+    memory = TaskLog(clock=Clock())
+    record(memory, kind="translate.paused")
+    record(memory, kind="task.started")
+    result = memory.kind_rows("20260926", {"translate.paused"})
+    assert not result.found and result.rows == [] and result.offset == 0
+    assert [r["kind"] for r in result.memory] == ["translate.paused"]
+    store = TaskLog(tmp_path, clock=Clock())
+    missing = store.kind_rows("20260920", {"translate.paused"})
+    assert missing == ([], 0, [], False)
+    with pytest.raises(ValueError):
+        store.kind_rows("2026-09-26", {"translate.paused"})
+
+
+def test_kind_rows_matches_a_kind_as_it_is_stored(tmp_path):
+    store = TaskLog(tmp_path, clock=Clock())
+    record(store, kind="翻译.暂停")  # stored \u-escaped (ensure_ascii)
+    record(store, kind="task.started", data={"note": "翻译.暂停"})
+    result = store.kind_rows("20260926", {"翻译.暂停"})
+    assert [r["id"] for r in result.rows] == ["20260926-1"]

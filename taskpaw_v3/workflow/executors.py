@@ -60,6 +60,8 @@ class ExecOutcome:
     result_digest: str | None = None
     # U1e: a restore's film timing, kept in the success evidence's summary
     timing: RestoreTiming | None = None
+    # EPIC #387 C1: a translate's cues written to `.zh.srt`, kept the same way
+    item_count: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -71,8 +73,9 @@ class ExecOutcome:
         message: str = "",
         result_digest: str | None = None,
         timing: RestoreTiming | None = None,
+        item_count: int | None = None,
     ) -> ExecOutcome:
-        return cls(None, message, result_digest, timing)
+        return cls(None, message, result_digest, timing, item_count)
 
     @classmethod
     def failed(cls, error_class: ErrorClass, message: str) -> ExecOutcome:
