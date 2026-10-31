@@ -369,6 +369,10 @@ fn open_backend_log() -> Option<std::fs::File> {
     }
 }
 
+/// Set on a Windows backend whose stdin is the shell's lifeline pipe (#377).
+#[cfg(windows)]
+const STDIN_LIFELINE_ENV: &str = "TASKPAW_STDIN_LIFELINE";
+
 fn spawn_backend(command: Option<(String, Vec<String>)>) -> Option<Child> {
     let (program, args) = command?;
     let mut command = Command::new(&program);
@@ -428,6 +432,11 @@ fn spawn_backend(command: Option<(String, Vec<String>)>) -> Option<Child> {
         // breakaway — using it made CreateProcess fail (os error 87) and crash
         // every launch (caught by Windows verification, #50).
         command.creation_flags(0x08000000 | 0x01000000);
+        // Stdin lifeline (#377): the shell cannot signal a Windows backend, so
+        // closing this pipe (terminate_child) is the stop request. The variable
+        // tells the backend the pipe is the shell's and safe to watch.
+        command.stdin(std::process::Stdio::piped());
+        command.env(STDIN_LIFELINE_ENV, "1");
         // The windowed (packaged) shell has no console — in RELEASE route backend
         // STDERR (its logs) to %APPDATA%\TaskPaw\taskpaw-backend-<role>.log so
         // production builds are debuggable (see open_backend_log: append, rolls at
@@ -529,10 +538,11 @@ fn signal_group(child: &Child, sig: libc::c_int) {
     }
 }
 
-/// Terminate the backend GRACEFULLY: SIGTERM (→ its GracefulShutdown stops the
-/// supervisor + managed children), wait up to a deadline, then force-kill. Shared
-/// by normal exit (kill_backend) and the Drop safety net so both honor the same
-/// graceful contract (Kimi).
+/// Terminate the backend GRACEFULLY: ask it to stop (Unix: SIGTERM to its group;
+/// Windows: close its stdin lifeline pipe, #377) so its GracefulShutdown stops the
+/// supervisor + managed children, wait up to 5 s for it to exit, then force-kill.
+/// Shared by normal exit (kill_backend) and the Drop safety net so both honor the
+/// same graceful contract (Kimi).
 fn terminate_child(child: &mut Child) {
     // #299 review IR6 (Unix): the leader is watched without being reaped, so
     // the final group SIGKILL (stragglers too) can never hit a reused id.
@@ -555,6 +565,8 @@ fn terminate_child(child: &mut Child) {
     }
     #[cfg(not(unix))]
     {
+        // Dropping the shell's only write end is the stop request (#377).
+        drop(child.stdin.take());
         if matches!(child.try_wait(), Ok(Some(_))) {
             return; // already gone
         }
@@ -1833,5 +1845,51 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
         assert_eq!(descriptor.base_url, "http://127.0.0.1:5681");
         assert_eq!(descriptor.boot_id, "0123456789abcdef0123456789abcdef");
         assert_eq!(descriptor.control_token, "fake-python-rust-interop-token");
+    }
+    /// #377: closing the backend's stdin is the Windows stop request, so a
+    /// backend that exits on EOF returns well before the 5 s grace and exits
+    /// cleanly (a kill exits with code 1).
+    #[cfg(windows)]
+    #[test]
+    fn terminate_returns_when_the_backend_exits_on_stdin_eof() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("node")
+            .args([
+                "-e",
+                "process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>process.exit(0),200))",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        super::terminate_child(&mut child);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "terminate waited {elapsed:?}"
+        );
+        assert!(matches!(child.try_wait(), Ok(Some(status)) if status.success()));
+    }
+    /// #377: a backend that ignores stdin EOF is still killed after the grace.
+    #[cfg(windows)]
+    #[test]
+    fn terminate_still_kills_a_backend_that_ignores_eof() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("node")
+            .args([
+                "-e",
+                "process.stdin.on('data',()=>{});process.stdin.on('end',()=>{});setInterval(()=>{},1000)",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        super::terminate_child(&mut child);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(4500),
+            "terminate returned after {elapsed:?}"
+        );
+        assert!(matches!(child.try_wait(), Ok(Some(status)) if !status.success()));
     }
 }

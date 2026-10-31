@@ -125,6 +125,25 @@ def _fake_ports_free(monkeypatch, occupied=()):
     monkeypatch.setattr(net, "port_available", lambda host, port: port not in occ)
 
 
+def _held_until_terminate(monkeypatch, log):
+    """Our stale backend holds its ports: unbindable until the fake terminate."""
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: any(entry[0] == "terminate" for entry in log),
+    )
+
+
+class _CountingPsutil(_FakePsutil):
+    def __init__(self, procs):
+        super().__init__(procs)
+        self.iterations = 0
+
+    def process_iter(self, attrs=None):
+        self.iterations += 1
+        return super().process_iter(attrs)
+
+
 def test_reclaims_stale_same_role_backend(monkeypatch):
     port = _free_port()  # real port is free → the post-kill wait returns at once
     log = _install(
@@ -383,7 +402,7 @@ def test_multiport_reclaims_when_both_ours(monkeypatch):
         conns=[_Conn(p1, 300), _Conn(p2, 300)],
     )
     monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
-    _fake_ports_free(monkeypatch)  # both bindable after the kill
+    _held_until_terminate(monkeypatch, log)  # both bindable after the kill
     assert net.reclaim_ports_from_stale_instance(
         [
             ("127.0.0.1", p1, "agent network API"),
@@ -392,6 +411,175 @@ def test_multiport_reclaims_when_both_ours(monkeypatch):
         role="agent",
     )
     assert ("terminate", 300) in log
+
+
+def test_multiport_all_ports_free_skips_process_enumeration(monkeypatch):
+    # The normal launch: every port binds, so no stale backend of ours can block
+    # startup — return without walking the process table (#377).
+    class _NoScan(_FakePsutil):
+        def process_iter(self, attrs=None):
+            raise AssertionError("process_iter must not run when every port is free")
+
+    monkeypatch.setattr(net, "psutil", _NoScan([]))
+    _fake_ports_free(monkeypatch)
+    assert (
+        net.reclaim_ports_from_stale_instance(
+            [
+                ("127.0.0.1", 5680, "agent network API"),
+                ("127.0.0.1", 5681, "agent control API"),
+                ("127.0.0.1", 5682, "worker API"),
+            ],
+            role="agent",
+        )
+        is False
+    )
+
+
+def test_fast_path_still_reclaims_across_the_loopback_pair(monkeypatch):
+    # Codex gate: our stale backend listens on 127.0.0.1 while the new config uses
+    # ::1 — the ::1 bind succeeds, but the old process still holds the state lease,
+    # so the fast path must not skip the scan.
+    log: list = []
+    proc = _FakeProc(
+        330,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5681, 330, ip="127.0.0.1")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    killed = lambda: any(entry[0] == "terminate" for entry in log)  # noqa: E731
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: host != "127.0.0.1" or killed(),
+    )
+    assert net.reclaim_ports_from_stale_instance(
+        [("::1", 5681, "agent control API")], role="agent"
+    )
+    assert ("terminate", 330) in log
+
+
+def test_an_unsupported_probe_family_falls_back_to_the_scan(monkeypatch):
+    # Codex gate: on an IPv4-only host the extra ::1 probe raises (EAFNOSUPPORT);
+    # startup must not abort — the scan decides instead.
+    fake = _CountingPsutil([])
+    monkeypatch.setattr(net, "psutil", fake)
+
+    def probe(host, port):
+        if host == "::1":
+            raise OSError(97, "Address family not supported by protocol")
+        return True
+
+    monkeypatch.setattr(net, "port_available", probe)
+    assert (
+        net.reclaim_ports_from_stale_instance(
+            [("127.0.0.1", 5681, "agent control API")], role="agent"
+        )
+        is False
+    )
+    assert fake.iterations == 1
+
+
+def test_localhost_always_scans_for_any_loopback_listener(monkeypatch):
+    # Codex gate: `localhost` conflicts with every loopback (127.0.0.2 too), which
+    # no bind probe covers — so it never takes the fast path.
+    log: list = []
+    proc = _FakeProc(
+        350,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5681, 350, ip="127.0.0.2")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: (
+            host != "127.0.0.2" or any(entry[0] == "terminate" for entry in log)
+        ),
+    )
+    assert net.reclaim_ports_from_stale_instance(
+        [("localhost", 5681, "agent control API")], role="agent"
+    )
+    assert ("terminate", 350) in log
+
+
+def test_a_port_taken_during_the_scan_keeps_the_old_agent(monkeypatch):
+    # Codex gate: a foreign service binds a previously free port while processes
+    # are enumerated — re-probe after the scan and leave the old agent running.
+    log: list = []
+    proc = _FakeProc(
+        340,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5680, 340)],
+    )
+    fake = _CountingPsutil([proc])
+    monkeypatch.setattr(net, "psutil", fake)
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: port == 5681 and fake.iterations == 0,
+    )
+    assert (
+        net.reclaim_ports_from_stale_instance(
+            [
+                ("127.0.0.1", 5680, "agent network API"),
+                ("127.0.0.1", 5681, "agent control API"),
+            ],
+            role="agent",
+        )
+        is False
+    )
+    assert ("terminate", 340) not in log
+
+
+def test_multiport_enumerates_processes_once_for_all_ports(monkeypatch):
+    # One stale backend of ours on all three ports: one enumeration, one terminate.
+    log: list = []
+    proc = _FakeProc(
+        320,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5680, 320), _Conn(5681, 320), _Conn(5682, 320)],
+    )
+    fake = _CountingPsutil([proc])
+    monkeypatch.setattr(net, "psutil", fake)
+    _held_until_terminate(monkeypatch, log)
+    assert net.reclaim_ports_from_stale_instance(
+        [
+            ("127.0.0.1", 5680, "agent network API"),
+            ("127.0.0.1", 5681, "agent control API"),
+            ("127.0.0.1", 5682, "worker API"),
+        ],
+        role="agent",
+    )
+    assert fake.iterations == 1
+    assert log == [("terminate", 320)]
+
+
+def test_multiport_foreign_port_enumerates_once_and_kills_nothing(monkeypatch):
+    # The last port is held by a foreign process, the others are free: one
+    # enumeration finds nothing of ours there, so nothing is killed.
+    log: list = []
+    ours = _FakeProc(321, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
+    fake = _CountingPsutil([ours])
+    monkeypatch.setattr(net, "psutil", fake)
+    _fake_ports_free(monkeypatch, occupied=[5682])
+    assert not net.reclaim_ports_from_stale_instance(
+        [
+            ("127.0.0.1", 5680, "agent network API"),
+            ("127.0.0.1", 5681, "agent control API"),
+            ("127.0.0.1", 5682, "worker API"),
+        ],
+        role="agent",
+    )
+    assert fake.iterations == 1
+    assert log == []
 
 
 def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
@@ -568,7 +756,7 @@ def test_multiport_distinct_loopbacks_are_bindable(monkeypatch):
         conns=[_Conn(p, 112, ip="127.0.0.1"), _Conn(p, 112, ip="127.0.0.2")],
     )
     monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
-    _fake_ports_free(monkeypatch)
+    _held_until_terminate(monkeypatch, log)
     assert net.reclaim_ports_from_stale_instance(
         [("127.0.0.1", p, "agent network API"), ("127.0.0.2", p, "agent control API")],
         role="agent",
