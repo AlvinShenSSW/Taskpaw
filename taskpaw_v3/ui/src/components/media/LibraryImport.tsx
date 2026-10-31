@@ -50,7 +50,7 @@ function ImportPane({ onClose, onView }: { onClose: () => void; onView: () => vo
               <div className="path-field">
                 <input id="import-path" className="input" value={path} placeholder="library.db 或它所在的目录"
                   onChange={(e) => setPath(e.target.value)} />
-                <button type="button" className="btn" disabled={!path.trim()} onClick={() => setSource(path.trim())}>重新读取</button>
+                <button type="button" className="btn" disabled={!path.trim()} onClick={() => { const next = path.trim(); if (next === source) void preview.refetch(); else setSource(next); }}>重新读取</button>
               </div>
             </label>
           </>
