@@ -37,6 +37,7 @@ from .energy import STAGES as ENERGY_STAGES
 from .exec_common import MISSING_LTX
 from .executors import ASR_DONE, INTERRUPTED_KIND, failed_kind
 from .models import AttemptEnergy
+from .route_store import _RESTORE_DONE
 from .store_core import parse_time
 
 if TYPE_CHECKING:
@@ -65,9 +66,12 @@ DOWN, UP, PAUSED = (
     "translate.provider_up",
     "translate.paused",
 )
+# a film translated: recorded only for the `translated` outcome, so the service
+# worked again (a paused or failed attempt records no finish)
+FINISHED = "translate.finished"
 # the translator's breaker state starts over with the agent
 BOUNDARIES = ("agent.started", "agent.stopping")
-OUTAGE_KINDS = frozenset({DOWN, UP, PAUSED, *BOUNDARIES})
+OUTAGE_KINDS = frozenset({DOWN, UP, PAUSED, FINISHED, *BOUNDARIES})
 NO_RECORDER = "设备记录未启动"
 
 _ASR_PREFIX = ASR_DONE.split("{summary}")[0]
@@ -185,6 +189,8 @@ def build_fact(
 
     def won(stage: str) -> tuple[Any, ...] | None:
         done = [a for a in by_stage.get(stage, ()) if a[1] == "succeeded"]
+        if stage == "restore" and done and _all_reused(done[-1]):
+            return None  # an already-restored input: no restore happened (§7.1)
         return done[-1] if done else None
 
     def took(stage: str) -> int | None:
@@ -195,7 +201,7 @@ def build_fact(
     starts = [a[3] for a in by_stage.get("restore", ()) if a[3]]
     queue = None
     plan = row["plan"]
-    if starts and plan is not None and not plan[1]:
+    if restore is not None and starts and plan is not None and not plan[1]:
         first = min(starts, key=parse_time)
         queue = _seconds(plan[0], first)
     translate_note = _summary(
@@ -267,6 +273,14 @@ def build_fact(
     }
     cues_at = _z(translate[4]) if translate and body["cues"] is not None else None
     return Fact(row["rowid"], accepted, body, energy_at, cues_at)
+
+
+def _all_reused(attempt: tuple[Any, ...]) -> bool:
+    """A restore success whose note (`RESTORE_DONE`) says no volume was
+    restored: every one was reused. Its energy, if read, still counts."""
+    last = json.loads(attempt[5]) if attempt[5] else None
+    done = _RESTORE_DONE.fullmatch(str(_summary(last).get("note") or ""))
+    return done is not None and int(done[1]) == 0
 
 
 def _library_reads(
@@ -386,9 +400,12 @@ def _day_start(day: str) -> str:
 
 def outage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pair the translator's events, oldest first, into outages: one starts
-    when a provider goes down (or a film pauses) with none open and ends when
-    no provider is down any more; an agent start or stop ends it, since the
-    translator starts over. `paused`: a film paused during it."""
+    when a provider goes down (or a film pauses) with none open and ends at
+    the first sign the service works again: no provider down any more, or a
+    film translated (each attempt has its own translator, so the instance that
+    saw a provider down may never report it up). An agent start or stop ends
+    it too, since the translator starts over. `paused`: a film paused during
+    it. Closing forgets which providers were down."""
     out: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     down: set[str] = set()
@@ -420,6 +437,10 @@ def outage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if current is not None and not down:
                 current["end"] = at
                 current = None
+        elif kind == FINISHED and current is not None:
+            current["end"] = at
+            current = None
+            down.clear()
     return out
 
 

@@ -418,6 +418,31 @@ def test_the_queue_wait_needs_a_confirmed_plan(world, plan, expected):
     assert read(rt)["films"][0]["queue_s"] == expected
 
 
+@pytest.mark.parametrize(
+    "note,expected",
+    [
+        ("修复完成：0 卷修复，2 卷复用", None),  # every volume reused: no restore
+        ("修复完成：1 卷修复，1 卷复用", "applied"),
+        (None, "applied"),  # a note this build does not parse: a restore
+    ],
+)
+def test_an_all_reused_restore_counts_as_no_restore(world, note, expected):
+    rt, s = world
+    gpu = s.worker("Alpha")
+    tries = standard(gpu)
+    tries[0].note = note
+    tries[0].energy = (3.0, 20.0)
+    s.film(plan=(1 * H, False), tries=tries)
+    (film,) = read(rt)["films"]
+    restore = (film["worker"], film["restore_s"], film["queue_s"])
+    if expected is None:
+        assert restore == (None, None, None)
+    else:
+        assert restore == (gpu, 14400, 3600)
+    # what the attempt drew is still the machine's energy
+    assert film["restore_wh"] == [[gpu, 3.0, 20.0]]
+
+
 def test_absent_stages_are_null_never_zero(world):
     rt, s = world
     s.film(
@@ -1345,6 +1370,80 @@ def test_outages_pair_provider_events_and_skip_other_tasks(world, tmp_path):
 
 def _s(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _at(clock: LogClock, minutes: int) -> datetime:
+    clock.now += timedelta(minutes=minutes)
+    return clock.now
+
+
+def test_a_translate_success_after_a_pause_closes_the_outage(world, tmp_path):
+    """Each translate attempt has its own translator, so after a pause the
+    provider_up of the instance that saw it down never comes (C2-F2)."""
+    rt, _ = world
+    clock = LogClock()
+    log = TaskLog(tmp_path / "agent", clock=clock)
+    start = clock.now
+    _event(log, an.DOWN, "m1")
+    _at(clock, 1)
+    _event(log, an.PAUSED)
+    _at(clock, 30)
+    _event(log, "translate.started")  # the next attempt, a new instance
+    _event(log, an.FINISHED, task="subs-other")  # another task: not ours
+    end = _at(clock, 5)
+    _event(log, an.FINISHED)
+    _at(clock, 5)
+    _event(log, an.DOWN, "m1")  # m1 down again: a new outage
+    again = clock.now
+    assert read(rt, task_log=log)["outages"] == [
+        {"start": _s(start), "end": _s(end), "paused": True},
+        {"start": _s(again), "end": None, "paused": False},
+    ]
+
+
+def test_a_paused_retry_does_not_close_the_outage(world, tmp_path):
+    rt, _ = world
+    clock = LogClock()
+    log = TaskLog(tmp_path / "agent", clock=clock)
+    start = clock.now
+    _event(log, an.DOWN, "m1")
+    _at(clock, 1)
+    _event(log, an.PAUSED)
+    _at(clock, 30)
+    _event(log, "translate.started")
+    _at(clock, 1)
+    _event(log, an.PAUSED)  # the retry paused as well
+    assert read(rt, task_log=log)["outages"] == [
+        {"start": _s(start), "end": None, "paused": True}
+    ]
+
+
+def test_an_outage_closes_when_no_model_is_down_and_forgets_them(world, tmp_path):
+    rt, _ = world
+    clock = LogClock()
+    log = TaskLog(tmp_path / "agent", clock=clock)
+    start = clock.now
+    _event(log, an.DOWN, "m1")
+    _event(log, an.DOWN, "m2")
+    _at(clock, 5)
+    _event(log, an.UP, "m1")  # m2 still down
+    end = _at(clock, 5)
+    _event(log, an.UP, "m2")
+    _at(clock, 5)
+    _event(log, an.DOWN, "m3")
+    second = clock.now
+    end2 = _at(clock, 5)
+    _event(log, an.FINISHED)  # closes, forgetting m3
+    _at(clock, 5)
+    _event(log, an.DOWN, "m1")
+    third = clock.now
+    end3 = _at(clock, 5)
+    _event(log, an.UP, "m1")  # m3 is not still counted as down
+    assert read(rt, task_log=log)["outages"] == [
+        {"start": _s(start), "end": _s(end), "paused": False},
+        {"start": _s(second), "end": _s(end2), "paused": False},
+        {"start": _s(third), "end": _s(end3), "paused": False},
+    ]
 
 
 def test_outage_days_closed_cached_today_incremental_and_rollover(
