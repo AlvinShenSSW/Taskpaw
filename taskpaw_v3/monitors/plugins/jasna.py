@@ -3174,8 +3174,14 @@ class JasnaInstance(MonitorInstance):
         # Retag BEFORE the rename, so the published file is never briefly the
         # unpreviewable `hev1` variant and a failure here costs nothing. A
         # missing staging file is reported by the os.replace below — don't add a
-        # second, more confusing line to the log.
-        if staging.exists():
+        # second, more confusing line to the log. An unreadable share (#380)
+        # reads as absent here, so the os.replace below reports it and a
+        # stop-time publish never skips the teardown after it.
+        try:
+            present = staging.exists()
+        except OSError:
+            present = False
+        if present:
             status = retag_hevc_hvc1(staging)
             if status == "patched":
                 log.info("jasna: %s retagged hev1 -> hvc1", staging.name)
