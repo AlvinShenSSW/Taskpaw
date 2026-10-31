@@ -187,6 +187,29 @@ def test_dispatch_failure_and_observer_share_key_and_cancel_is_silent(
     assert len(queue) == 2
 
 
+def test_a_machine_fault_notice_leaves_the_failure_key_unspent(observer, monkeypatch):
+    """Codex 4.0.2 P2: each requeue off a held worker is told once, and the
+    film's later failure on its replacement worker is still reported."""
+    sink, queue = observer
+    failed = film(stages=board_film({}, statuses={"restore": "failed"}).stages)
+    host, _ = host_for(monkeypatch, [failed])
+    job = SimpleNamespace(
+        film_id=failed.film_id, input_revision=1, stage="restore", version=3
+    )
+    sink.resolved(host.runtime, job, "Film", ExecOutcome.failed("machine", "A 停领"))
+    sink.resolved(host.runtime, job, "Film", ExecOutcome.failed("machine", "A 停领"))
+    job.version = 5  # the next attempt, on another held worker
+    sink.resolved(host.runtime, job, "Film", ExecOutcome.failed("machine", "B 停领"))
+    sink.resolved(
+        host.runtime, job, "Film", ExecOutcome.failed("needs_attention", "failure")
+    )
+    assert sorted(r["message"] for r in queue.recent()) == [
+        "Film A 停领",
+        "Film B 停领",
+        "Film failure",
+    ]
+
+
 def test_translated_uses_existing_summary_and_keeps_tasklog(observer, monkeypatch):
     sink, queue = observer
     translated = board_film(
