@@ -27,6 +27,17 @@ from .intake_snapshot import validate_snapshot
 from .manifest import observation_digest
 from .store_core import Clock, Mutation, parse_time, timestamp
 
+# What an unchanged rescan rewrites besides the version (#376).
+_RESCAN_FIELDS = frozenset({"observed_at", "last_complete_scan_at", "observation_json"})
+# Intake-adapter command history nothing reads back; pruned once old (#376).
+_ADAPTER_KINDS = (
+    "observe_intake",
+    "mark_intake_scan_seen",
+    "begin_intake_root_scan",
+    "finish_intake_root_scan",
+)
+_PRUNE_BATCH = 1000
+
 
 def _path_parts(value: str) -> tuple[str, ...]:
     path = PureWindowsPath(value)
@@ -296,7 +307,7 @@ class IntakeCommands(ApprovalCommands):
             if old
             else None
         )
-        changed = bool(old) and (
+        changed = old is not None and (
             old["observation_digest"] != command.observation_digest
             or old["root_config_revision"] != command.root_config_revision
             or old["relative_path"] != command.relative_path
@@ -486,6 +497,43 @@ class IntakeCommands(ApprovalCommands):
             return Mutation(command.package_id, version, values["state"])
 
         return self._execute(auth, meta, command, "observe_intake", apply)
+
+    def intake_observation_unchanged(
+        self, auth: AuthProof, command: im.IntakeObservation
+    ) -> bool:
+        """True when `observe_intake` would only advance the observation times.
+
+        Such a rescan is skipped (#376): no command, no audit row. A package in
+        waiting_stability is never unchanged; admission reads its scan time.
+        """
+        command = im.IntakeObservation.model_validate(command)
+        with self._lock:
+            try:
+                now = self._observe_time()
+                principal = self._check_auth(auth, now)
+                authority = self._one("SELECT * FROM authority WHERE singleton=1")
+                if authority["activation_state"] != "active":
+                    return False
+                root, old = self._observation_target(principal, command, now)
+                new_identity = native_identity_key(command.package_native_identity)
+                if old is None or (
+                    old["native_identity_key"]
+                    and new_identity
+                    and old["native_identity_key"] != new_identity
+                ):
+                    return False
+                values, changed = self._observation_values(command, root, old)
+            except m.WorkflowError:
+                return False
+            return (
+                not changed
+                and values["state"] != "waiting_stability"
+                and all(
+                    value == old[key]
+                    for key, value in values.items()
+                    if key not in _RESCAN_FIELDS
+                )
+            )
 
     @staticmethod
     def _check_intake_grouping(
@@ -752,6 +800,7 @@ class IntakeCommands(ApprovalCommands):
         *,
         after_package_id: str | None = None,
         limit: int = 200,
+        seen: frozenset[str] = frozenset(),
     ) -> im.IntakePage:
         if type(limit) is not int or not 1 <= limit <= 200:
             raise m.WorkflowError("invalid_page_limit")
@@ -773,11 +822,53 @@ class IntakeCommands(ApprovalCommands):
                 (root_id, scan_id, after_package_id, after_package_id, limit + 1),
             ).fetchall()
             return im.IntakePage(
-                items=tuple(self._intake_view(principal, row) for row in rows[:limit]),
+                # `seen`: packages this scan visited but skipped as unchanged.
+                items=tuple(
+                    self._intake_view(principal, row)
+                    for row in rows[:limit]
+                    if row["package_id"] not in seen
+                ),
                 next_package_id=rows[limit - 1]["package_id"]
                 if len(rows) > limit
                 else None,
             )
+
+    def prune_intake_history(self, auth: AuthProof, *, before: datetime) -> int:
+        """Delete one batch of intake-adapter history older than `before`.
+
+        Returns the number of request/audit pairs deleted. Foreign keys are off
+        for this batch only: the RESTRICT check on audit would scan the
+        unindexed request_results per row. Children go first, so nothing orphans.
+        """
+        with self._lock:
+            try:
+                principal = self._check_auth(auth, self._observe_time())
+                if principal["role"] != "intake_adapter":
+                    raise m.WorkflowError("forbidden")
+                self._conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    rows = self._conn.execute(
+                        "SELECT rowid,audit_seq FROM request_results WHERE command_kind IN "
+                        "(?,?,?,?) AND created_at<? LIMIT ?",
+                        (*_ADAPTER_KINDS, timestamp(before), _PRUNE_BATCH),
+                    ).fetchall()
+                    self._conn.executemany(
+                        "DELETE FROM request_results WHERE rowid=?",
+                        ((row[0],) for row in rows),
+                    )
+                    self._conn.executemany(
+                        "DELETE FROM audit WHERE seq=?", ((row[1],) for row in rows)
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+                finally:
+                    self._conn.execute("PRAGMA foreign_keys=ON")
+                return len(rows)
+            except sqlite3.Error as exc:
+                raise m.WorkflowError("authority_unavailable") from exc
 
     def record_intake_source_notice(
         self, auth: AuthProof, meta: m.CommandMeta, command: IntakeSourceNotice

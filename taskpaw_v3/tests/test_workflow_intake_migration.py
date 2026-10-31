@@ -176,3 +176,31 @@ def test_v1_wal_commits_are_in_backup_before_upgrade(tmp_path):
         with sqlite3.connect(backups[0]) as backup:
             assert backup.execute("SELECT epoch FROM authority").fetchone()[0] == 2
             assert backup.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_backup_deadline_scales_with_database_and_wal_size(tmp_path):
+    path = tmp_path / "workflow.db"
+    path.write_bytes(b"x" * 4096)
+    assert schema._backup_deadline(path) == 5.0
+    with path.open("r+b") as db:
+        db.truncate(80_000_000)
+    assert schema._backup_deadline(path) == 8.0
+    with path.with_name(path.name + "-wal").open("wb") as wal:
+        wal.truncate(40_000_000)
+    assert schema._backup_deadline(path) == 12.0
+
+
+def test_upgrade_passes_the_scaled_deadline_to_the_backup(tmp_path, monkeypatch):
+    path = tmp_path / "workflow.db"
+    legacy_database(path)
+    original = schema._snapshot_database
+    deadlines = []
+
+    def snapshot(source, *, deadline_seconds):
+        deadlines.append(deadline_seconds)
+        return original(source, deadline_seconds=deadline_seconds)
+
+    monkeypatch.setattr(schema, "_backup_deadline", lambda source: 123.0)
+    monkeypatch.setattr(schema, "_snapshot_database", snapshot)
+    schema.connect_existing(path).close()
+    assert deadlines == [123.0]
