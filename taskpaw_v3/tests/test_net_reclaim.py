@@ -460,6 +460,52 @@ def test_fast_path_still_reclaims_across_the_loopback_pair(monkeypatch):
     assert ("terminate", 330) in log
 
 
+def test_an_unsupported_probe_family_falls_back_to_the_scan(monkeypatch):
+    # Codex gate: on an IPv4-only host the extra ::1 probe raises (EAFNOSUPPORT);
+    # startup must not abort — the scan decides instead.
+    fake = _CountingPsutil([])
+    monkeypatch.setattr(net, "psutil", fake)
+
+    def probe(host, port):
+        if host == "::1":
+            raise OSError(97, "Address family not supported by protocol")
+        return True
+
+    monkeypatch.setattr(net, "port_available", probe)
+    assert (
+        net.reclaim_ports_from_stale_instance(
+            [("127.0.0.1", 5681, "agent control API")], role="agent"
+        )
+        is False
+    )
+    assert fake.iterations == 1
+
+
+def test_localhost_always_scans_for_any_loopback_listener(monkeypatch):
+    # Codex gate: `localhost` conflicts with every loopback (127.0.0.2 too), which
+    # no bind probe covers — so it never takes the fast path.
+    log: list = []
+    proc = _FakeProc(
+        350,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(5681, 350, ip="127.0.0.2")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    monkeypatch.setattr(
+        net,
+        "port_available",
+        lambda host, port: (
+            host != "127.0.0.2" or any(entry[0] == "terminate" for entry in log)
+        ),
+    )
+    assert net.reclaim_ports_from_stale_instance(
+        [("localhost", 5681, "agent control API")], role="agent"
+    )
+    assert ("terminate", 350) in log
+
+
 def test_a_port_taken_during_the_scan_keeps_the_old_agent(monkeypatch):
     # Codex gate: a foreign service binds a previously free port while processes
     # are enumerated — re-probe after the scan and leave the old agent running.

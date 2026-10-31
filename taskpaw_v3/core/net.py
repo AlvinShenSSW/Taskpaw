@@ -308,11 +308,26 @@ def _loopback_equiv(a: str, b: str) -> bool:
         return a == b
 
 
-def _probe_hosts(host: str) -> tuple[str, ...]:
-    """`host`, plus the canonical loopback pair when it is a loopback (#377)."""
-    if bind_is_loopback(_norm_host(host)):
-        return (host, "127.0.0.1", "::1")
-    return (host,)
+def _all_free(specs) -> bool:
+    """The reclaim fast path (#377): True only when no backend of ours can be
+    holding any of these ports, so the process scan can be skipped.
+
+    A loopback port must also be free on its 127.0.0.1/::1 partner (an old backend
+    there still holds the state lease although the new bind succeeds); `localhost`
+    conflicts with every loopback, which no probe covers, so it always scans; a
+    probe that cannot run (no IPv6 on this host) means scan, never a failed start.
+    """
+    for host, port, _what in specs:
+        norm = _norm_host(host)
+        if norm == "localhost":
+            return False
+        hosts = (host, "127.0.0.1", "::1") if bind_is_loopback(norm) else (host,)
+        try:
+            if not all(port_available(h, port) for h in hosts):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
@@ -482,12 +497,8 @@ def reclaim_ports_from_stale_instance(
                 )
                 return False
     # Fast path — every port binds with startup's own semantics, so nothing of ours
-    # holds one: skip the process scan (about 0.7 s per enumeration on Windows). A
-    # loopback port must also be free on its 127.0.0.1/::1 partner: an old backend
-    # there still holds the state lease even though the new bind succeeds.
-    if all(
-        port_available(h, port) for host, port, _w in specs for h in _probe_hosts(host)
-    ):
+    # holds one: skip the process scan (about 0.7 s per enumeration on Windows).
+    if _all_free(specs):
         return False
     # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
     # sockets without root (macOS), so a port that is neither ours nor bindable is
