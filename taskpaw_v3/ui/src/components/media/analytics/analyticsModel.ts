@@ -2,8 +2,10 @@
 // rangeDef / compute / bucketize / stats / slices (design-system/taskpaw-v3/preview/media-analytics-v1.html).
 // The backend sends per-film facts and the browser aggregates (D2); buckets are the controller's
 // local time (§7.1). No React here.
-import type { AnalyticsFailure, AnalyticsFilm, AnalyticsMachine, AnalyticsSpan, WorkflowAnalytics } from "../../../api";
-import { DAY, fHM, fMD, fMDHM, fWk, fYM, HOUR, pad } from "./analyticsFormat";
+import type {
+  AnalyticsFailure, AnalyticsFailureType, AnalyticsFilm, AnalyticsInbox, AnalyticsMachine, AnalyticsSpan, AnalyticsStateReason, WorkflowAnalytics,
+} from "../../../api";
+import { DAY, fHM, fMD, fMDHM, fSpan, fWk, fYM, HOUR, pad } from "./analyticsFormat";
 
 export type RangeKey = "24h" | "7d" | "30d" | "90d" | "all";
 export type ResFilter = "all" | "4K" | "1080p";
@@ -237,13 +239,16 @@ export const hasEnergyReading = (f: AnalyticsFilm, ctrl: boolean) => f.controlle
  *  `partial` = measured films with `energy_partial` (§7.1: some attempt lacked energy): their readings are
  *  summed but the total is incomplete. `kwh` is null when no film has a reading. The KPI and C5's 用电
  *  panel share this rule. */
-export function energyReading(films: AnalyticsFilm[], ctrl: boolean): { kwh: number | null; measured: number; missing: number; partial: number } {
+export interface EnergyReading { kwh: number | null; measured: number; missing: number; partial: number }
+export function energyReading(films: AnalyticsFilm[], ctrl: boolean): EnergyReading {
   const read = films.filter((f) => hasEnergyReading(f, ctrl));
   return {
     kwh: read.length ? sum(read.map((f) => filmKwh(f, ctrl))) : null,
     measured: read.length, missing: films.length - read.length, partial: read.filter((f) => f.energy_partial).length,
   };
 }
+/** Every film of the period has a full reading: only then may two periods be compared. */
+export const energyComplete = (r: EnergyReading | null) => r !== null && r.kwh !== null && r.missing === 0 && r.partial === 0;
 
 /** D14: a machine is 「新加入」 iff it first booted after the first 10 % of the effective range. */
 export function isNewMachine(m: AnalyticsMachine, R: RangeDef, now: number): boolean {
@@ -301,8 +306,7 @@ export function kpiFigures(A: Analysis): KpiFigures {
   const leadH = leadHours;
   const en = energyReading(cur, ctrl);
   const enPrev = prev ? energyReading(prev, ctrl) : null;
-  const complete = (r: ReturnType<typeof energyReading> | null) => r !== null && r.kwh !== null && r.missing === 0 && r.partial === 0;
-  const comparable = complete(en) && complete(enPrev);
+  const comparable = energyComplete(en) && energyComplete(enPrev);
   const fails = A.failures.filter(isFail).length;
   const prevFails = A.failuresPrev ? A.failuresPrev.filter(isFail).length : null;
   return {
@@ -530,7 +534,7 @@ const minutesOf = (vals: Array<number | null>) => nums(vals.map((s) => (s == nul
 const stage = (mins: number[], n = mins.length): StageFigure => ({ n, avg: avg(mins), max: amax(mins) });
 
 export function controllerFigures(data: WorkflowAnalytics, A: Analysis): ControllerFigures {
-  const c = A.cur, tr = c.filter((f) => f.translated);
+  const c = A.cur, tr = c.filter((f) => f.translated === true); // null = unknown, never 无需翻译 (§7.1)
   const cuesCover = data.coverage.cues ? Date.parse(data.coverage.cues) : null;
   const count = (k: AnalyticsFilm["target"]) => c.filter((f) => f.target === k).length;
   return {
@@ -584,7 +588,7 @@ export interface DurationFigures { hours: DurationRow[]; minutes: DurationRow[];
  * restore follows the 本机 rule of `restoreHours`. The share is each stage's average in hours.
  */
 export function durationFigures(A: Analysis): DurationFigures {
-  const c = A.cur, tr = c.filter((f) => f.translated);
+  const c = A.cur, tr = c.filter((f) => f.translated === true); // null = unknown, never 无需翻译 (§7.1)
   const queue = nums(c.map((f) => hours(f.queue_s))), lead = leadHours(c);
   const r4 = restoreHours(A, c.filter((f) => f.res === "4K")), r1 = restoreHours(A, c.filter((f) => f.res === "1080p"));
   const hoursRows: DurationRow[] = [{ key: "queue", label: "排队等待", st: stats(queue) }];
@@ -608,5 +612,311 @@ export function durationFigures(A: Analysis): DurationFigures {
       { key: "asr", label: "ASR", hours: h(asr) }, { key: "translate", label: "翻译", hours: h(trans) },
       { key: "scrape", label: "刮削", hours: h(scrape) }, { key: "archive", label: "归档", hours: h(archive) },
     ],
+  };
+}
+
+// ---- 用电 (§8.4 item 6; C5 AC1) ----
+export interface EnergyBucket { kwh: number; films: number; missing: number; partial: number }
+export interface EnergyGroup { key: string; label: string; kwh: number | null; partial: boolean }
+export interface EnergyFigures {
+  reading: EnergyReading; // the films in range, by C3's rule (energyReading)
+  buckets: EnergyBucket[]; // kWh of the films with a reading, and how many had none / only part of one
+  prev: number[] | null; // the aligned previous period, only when both periods are fully measured
+  perFilm: number | null;
+  most: AnalyticsFilm | null; // ranked among films with a reading (a partial sum is a lower bound, still high)
+  least: AnalyticsFilm | null; // among complete readings only: a lower bound cannot claim to be the least
+  top: AnalyticsFilm[]; // the 5 highest readings
+  byRes: Array<{ series: ResSeries; avg: number | null; films: number; measured: number }>;
+  byMachine: EnergyGroup[]; // restore energy per machine from restore_wh, then 本机's post-processing
+}
+export function energyFigures(data: WorkflowAnalytics, A: Analysis, res: ResFilter): EnergyFigures {
+  const { cur, ctrl } = A;
+  const kwhOf = (f: AnalyticsFilm) => filmKwh(f, ctrl);
+  const reading = energyReading(cur, ctrl);
+  const buckets = Array.from({ length: A.R.n }, (): EnergyBucket => ({ kwh: 0, films: 0, missing: 0, partial: 0 }));
+  for (const f of cur) {
+    const b = buckets[bucketIndex(A.R, filmTime(f))];
+    if (!b) continue;
+    b.films += 1;
+    if (!hasEnergyReading(f, ctrl)) b.missing += 1;
+    else { b.kwh += kwhOf(f); if (f.energy_partial) b.partial += 1; }
+  }
+  const comparable = energyComplete(reading) && energyComplete(A.prev ? energyReading(A.prev, ctrl) : null);
+  const ranked = cur.filter((f) => hasEnergyReading(f, ctrl)).sort((a, b) => kwhOf(b) - kwhOf(a));
+  const complete = ranked.filter((f) => !f.energy_partial);
+  const byRes = shownResSeries(res, cur).map((series) => {
+    const films = cur.filter((f) => f.res === series.res), read = films.filter((f) => hasEnergyReading(f, ctrl));
+    return { series, films: films.length, measured: read.length, avg: avg(read.map(kwhOf)) };
+  });
+  // restore_wh holds every restore attempt with energy, so a machine's sum includes its failed attempts on
+  // films another machine finished (machineRows); under the 本机 filter only the post-processing counts
+  const machines: EnergyGroup[] = ctrl ? [] : machineRows(data, A).map((r) => ({
+    key: r.m.id, label: r.m.kind === "controller" ? "本机（修复）" : r.m.name, kwh: r.kwh, partial: r.kwhPartial > 0,
+  }));
+  const post = cur.filter((f) => f.controller_wh != null);
+  machines.push({
+    key: "post", label: "本机（后处理）", kwh: post.length ? sum(post.map((f) => f.controller_wh!)) / 1000 : null,
+    partial: cur.some((f) => f.controller_wh == null || f.energy_partial),
+  });
+  return {
+    reading, buckets, prev: comparable ? bucketize(A, A.prev!, kwhOf, true) : null,
+    perFilm: reading.kwh !== null ? reading.kwh / reading.measured : null,
+    most: ranked[0] ?? null, least: complete[complete.length - 1] ?? null, top: ranked.slice(0, 5), byRes, byMachine: machines,
+  };
+}
+
+// ---- 设备在线 (§8.4 item 7; C5 AC2) ----
+export type LaneState = "online" | "paused" | "offline" | "none"; // none = 无记录 (no span: 主控未运行或未收到心跳)
+export interface LaneSegment { s: number; e: number; state: LaneState; reason: AnalyticsStateReason; open: boolean }
+export interface UptimeLane {
+  m: AnalyticsMachine;
+  isNew: boolean;
+  from: number; // the range start, or first_seen for a 新加入 machine (D14)
+  to: number; // now, or the range end
+  segs: LaneSegment[]; // contiguous from `from` to `to`; gaps are 无记录
+  online: number; paused: number; offline: number; none: number; // ms
+  rate: number | null; // 在线率 %: (online + 停领) ÷ recorded time; null without any record
+}
+const overlaps = (s: number, e: number, a: number, b: number) => s < b && e > a;
+const spanEnd = (sp: AnalyticsSpan, now: number) => (sp.open ? now : Date.parse(sp.end)); // an open span runs to now (machineDays)
+
+/** The machines of the 设备在线 panel: the GPU fleet in scope (retired ones only with a span in range), then 本机. */
+function laneMachines(data: WorkflowAnalytics, A: Analysis): AnalyticsMachine[] {
+  if (A.ctrl) return A.controller ? [A.controller] : [];
+  if (A.machine !== ALL_MACHINES) return A.fleet;
+  const byName = (a: AnalyticsMachine, b: AnalyticsMachine) => a.name.localeCompare(b.name);
+  const seen = (m: AnalyticsMachine) => data.devices.spans.some((sp) => sp.machine === m.id
+    && overlaps(Date.parse(sp.start), spanEnd(sp, A.now), A.R.start, A.visEnd));
+  const retired = data.machines.filter((m) => m.kind === "gpu" && m.retired && seen(m)).sort(byName);
+  return [...[...A.fleet].sort(byName), ...retired, ...(A.controller ? [A.controller] : [])];
+}
+
+export function uptimeLanes(data: WorkflowAnalytics, A: Analysis): UptimeLane[] {
+  const to = A.visEnd;
+  return laneMachines(data, A).map((m) => {
+    const isNew = isNewMachine(m, A.R, A.now);
+    const from = isNew && m.first_seen ? Math.max(A.R.start, Date.parse(m.first_seen)) : A.R.start;
+    const segs: LaneSegment[] = [];
+    const tot = { online: 0, paused: 0, offline: 0, none: 0 };
+    const push = (s: number, e: number, state: LaneState, reason: AnalyticsStateReason = "", open = false) => {
+      if (e <= s) return;
+      segs.push({ s, e, state, reason, open });
+      tot[state] += e - s;
+    };
+    if (to > from) {
+      const spans = data.devices.spans.filter((sp) => sp.machine === m.id).sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+      let at = from;
+      for (const sp of spans) {
+        const a = Math.max(at, Date.parse(sp.start)), b = Math.min(to, spanEnd(sp, A.now));
+        if (b <= a) continue;
+        push(at, a, "none");
+        push(a, b, sp.state, sp.reason, sp.open && b === to);
+        at = b;
+      }
+      push(at, to, "none");
+    }
+    const recorded = tot.online + tot.paused + tot.offline;
+    return { m, isNew, from, to, segs, ...tot, rate: recorded > 0 ? ((tot.online + tot.paused) / recorded) * 100 : null };
+  });
+}
+
+// ---- 异常与报警 (§8.4 item 8, §7.2, §7.3, D5, D6, D16; C5 AC3) ----
+export type Severity = AnalyticsFailure["severity"];
+const FAILURE_TYPE: Record<AnalyticsFailureType, { label: string; hint: string }> = {
+  machine_fault: { label: "应用程序控制拦截", hint: "WinError 4551 · 机器故障，自动停领并改派" },
+  missing_model: { label: "缺少模型文件", hint: "工作机缺少 LTX 模型文件，需要补齐" },
+  missing_ffprobe: { label: "缺少 ffprobe", hint: "工作机缺少 ffprobe，需要补装" },
+  ltx_failed: { label: "LTX 失败", hint: "修复进程异常退出" },
+  scrape_whitelist: { label: "刮削白名单", hint: "刮削遇到白名单以外的文件" },
+  other: { label: "其他失败", hint: "其他失败，见说明" },
+  interrupted: { label: "运行中断", hint: "运行被中断（如重启），自动重新运行" },
+  stopped: { label: "已停止", hint: "手动停止或判定已停止，已重新排队" },
+  translate_paused: { label: "翻译暂停", hint: "翻译服务暂停，恢复后自动继续" },
+  transient: { label: "临时失败（自动重试）", hint: "临时错误，自动重试" },
+};
+const EXHAUSTED: Partial<Record<AnalyticsFailureType, { label: string; hint: string }>> = {
+  transient: { label: "临时失败（重试已用尽）", hint: "临时错误的自动重试已用尽，需要处理" },
+  translate_paused: { label: "翻译暂停（重试已用尽）", hint: "翻译暂停的自动重试已用尽，需要处理" },
+};
+const CLIENT_TYPE = {
+  offline: { label: "设备离线", hint: "工作机失联（超过 60 秒没有心跳）" },
+  outage: { label: "翻译服务中断", hint: "翻译服务无响应，恢复后自动继续" },
+} as const;
+const failureType = (f: AnalyticsFailure) => (f.exhausted && EXHAUSTED[f.type]) || FAILURE_TYPE[f.type];
+const typeKey = (f: AnalyticsFailure) => `${f.type}${f.exhausted && EXHAUSTED[f.type] ? ":x" : ""}`;
+const TYPE_ORDER = [
+  "machine_fault", "missing_model", "missing_ffprobe", "ltx_failed", "scrape_whitelist", "transient:x", "translate_paused:x", "other",
+  "interrupted", "stopped", "translate_paused", "transient", "offline", "outage",
+];
+
+export type OutcomeTone = "green" | "blue" | "amber" | "red" | "neutral";
+const OUTCOME: Record<AnalyticsFailure["outcome"], [string, OutcomeTone]> = {
+  retried_ok: ["已重试成功", "green"], reassigned: ["已自动改派", "blue"], retrying: ["重试中", "neutral"], needs_action: ["需要处理", "amber"],
+};
+
+export interface Burst { machine: string; rows: AnalyticsFailure[]; start: number; end: number; banner: boolean }
+const BURST_MIN = 3;
+/**
+ * D16: ≥ 3 machine_fault failures on one machine within any 1 h window; overlapping windows merge into one
+ * burst. Its rows are always highlighted; the banner only when it ended in the last 24 h or has a
+ * needs_action row. Newest burst first.
+ */
+export function failureBursts(failures: AnalyticsFailure[], now: number): Burst[] {
+  const by = new Map<string, AnalyticsFailure[]>();
+  for (const f of failures) if (f.type === "machine_fault" && isFail(f)) by.set(f.machine, [...(by.get(f.machine) ?? []), f]);
+  const out: Burst[] = [];
+  for (const [machine, fs] of by) {
+    const s = [...fs].sort((a, b) => failureTime(a) - failureTime(b)), t = s.map(failureTime);
+    const hit = s.map(() => false);
+    for (let i = 0, j = 0; i < s.length; i++) {
+      if (j < i) j = i;
+      while (j + 1 < s.length && t[j + 1] - t[i] <= HOUR) j++;
+      if (j - i + 1 >= BURST_MIN) for (let k = i; k <= j; k++) hit[k] = true;
+    }
+    let rows: AnalyticsFailure[] = [];
+    const flush = () => {
+      if (!rows.length) return;
+      const start = failureTime(rows[0]), end = failureTime(rows[rows.length - 1]);
+      out.push({ machine, rows, start, end, banner: end >= now - DAY || rows.some((r) => r.outcome === "needs_action") });
+      rows = [];
+    };
+    s.forEach((f, k) => {
+      if (!hit[k] || (rows.length && t[k] - failureTime(rows[rows.length - 1]) > HOUR)) flush();
+      if (hit[k]) rows.push(f);
+    });
+    flush();
+  }
+  return out.sort((a, b) => b.end - a.end);
+}
+
+export interface AlertEvent {
+  key: string; at: number; machine: string; kind: "failure" | "offline" | "outage";
+  label: string; severity: Severity; code: string | null; outcome: string; tone: OutcomeTone; note: string; burst: boolean;
+}
+export interface AlertType { key: string; label: string; severity: Severity; hint: string; n: number }
+export interface AlertFigures {
+  events: AlertEvent[]; // failures and warnings, offline spans and outages, newest first
+  types: AlertType[]; // types that occurred: failures first, then warnings
+  perMachine: Array<{ id: string; label: string; n: number }>; // severity fail only
+  bursts: Burst[];
+  fails: number; warns: number; offline: number; outages: number; // warns = failure rows of severity warn
+}
+
+export function alertFigures(data: WorkflowAnalytics, A: Analysis): AlertFigures {
+  const ctrlId = A.controller?.id;
+  const bursts = failureBursts(A.failures, A.now);
+  const inBurst = new Set(bursts.flatMap((b) => b.rows));
+  const events: AlertEvent[] = [];
+  const types = new Map<string, AlertType>();
+  const count = (key: string, label: string, hint: string, severity: Severity) => {
+    const t = types.get(key) ?? { key, label, hint, severity, n: 0 };
+    t.n += 1;
+    if (severity === "fail") t.severity = "fail";
+    types.set(key, t);
+  };
+  A.failures.forEach((f, i) => {
+    const ty = failureType(f), [outcome, tone] = OUTCOME[f.outcome];
+    count(typeKey(f), ty.label, ty.hint, f.severity);
+    events.push({
+      key: `f${i}`, at: failureTime(f), machine: f.machine, kind: "failure", label: ty.label, severity: f.severity, code: f.code,
+      outcome, tone, note: f.note || ty.hint, burst: inBurst.has(f),
+    });
+  });
+  // offline spans of the machines in scope; outages belong to 本机 (hidden under a GPU-machine filter)
+  const scope = A.ctrl ? new Set(ctrlId ? [ctrlId] : []) : A.machine === ALL_MACHINES ? null : new Set([A.machine]);
+  const end = Math.min(A.R.end, A.now);
+  let offline = 0;
+  data.devices.spans.forEach((sp, i) => {
+    const s = Date.parse(sp.start), e = spanEnd(sp, A.now);
+    if (sp.state !== "offline" || (scope && !scope.has(sp.machine)) || !overlaps(s, e, A.R.start, end)) return;
+    offline += 1;
+    count("offline", CLIENT_TYPE.offline.label, CLIENT_TYPE.offline.hint, "warn");
+    events.push({
+      key: `d${i}`, at: s, machine: sp.machine, kind: "offline", label: CLIENT_TYPE.offline.label, severity: "warn", code: null,
+      outcome: sp.open ? "仍离线" : "已恢复", tone: sp.open ? "red" : "neutral", note: `离线 ${fSpan(e - s)}${sp.open ? "，至今" : ""}`, burst: false,
+    });
+  });
+  const outages = scope === null || A.ctrl ? outageFigures(data, A).items : [];
+  outages.forEach((o, i) => {
+    count("outage", CLIENT_TYPE.outage.label, CLIENT_TYPE.outage.hint, "warn");
+    events.push({
+      key: `o${i}`, at: o.start, machine: ctrlId ?? "", kind: "outage", label: CLIENT_TYPE.outage.label, severity: "warn", code: null,
+      outcome: o.open ? "尚未恢复" : "已自动恢复", tone: o.open ? "amber" : "neutral",
+      note: `${o.paused ? "翻译暂停" : "翻译服务无响应"} · ${fSpan(o.ms)}${o.open ? "，至今" : ""}`, burst: false,
+    });
+  });
+  events.sort((a, b) => b.at - a.at || a.key.localeCompare(b.key));
+  const rank = (t: AlertType) => (t.severity === "fail" ? 0 : 1) * 100 + TYPE_ORDER.indexOf(t.key);
+  // failures per machine: the fleet in scope (zero included), any other machine that failed, then 本机
+  const fails = A.failures.filter(isFail);
+  const byName = (a: string, b: string) => machineName(data, a).localeCompare(machineName(data, b));
+  let ids: string[];
+  if (A.ctrl) ids = ctrlId ? [ctrlId] : [];
+  else if (A.machine !== ALL_MACHINES) ids = [A.machine];
+  else {
+    const fleet = A.fleet.map((m) => m.id).sort(byName);
+    const others = [...new Set(fails.map((f) => f.machine))].filter((id) => id !== ctrlId && !fleet.includes(id)).sort(byName);
+    ids = [...fleet, ...others, ...(ctrlId ? [ctrlId] : [])];
+  }
+  return {
+    events, types: [...types.values()].sort((a, b) => rank(a) - rank(b)),
+    perMachine: ids.map((id) => ({ id, label: machineName(data, id), n: fails.filter((f) => f.machine === id).length })),
+    bursts, fails: fails.length, warns: A.failures.length - fails.length, offline, outages: outages.length,
+  };
+}
+
+// ---- 片源与片库 (§8.4 item 9, D9; C5 AC4) ----
+export interface Histogram { labels: string[]; counts: number[]; missing: number }
+/** Bins split at `edges`, the last one open-ended (「40+」); the first starts at 0 or, `openLow`, is 「<edge」. */
+export function histogram(vals: Array<number | null>, edges: number[], fmt: (v: number) => string, openLow = false): Histogram {
+  const labels = [
+    openLow ? `<${fmt(edges[0])}` : `0–${fmt(edges[0])}`,
+    ...edges.slice(1).map((e, i) => `${fmt(edges[i])}–${fmt(e)}`),
+    `${fmt(edges[edges.length - 1])}+`,
+  ];
+  const counts = labels.map(() => 0);
+  let missing = 0;
+  for (const v of vals) {
+    if (v == null || !Number.isFinite(v)) { missing += 1; continue; }
+    const i = edges.findIndex((e) => v < e);
+    counts[i < 0 ? edges.length : i] += 1;
+  }
+  return { labels, counts, missing };
+}
+export const GB = 1e9; // decimal, as the drive is sold (the 1 TB INBOX)
+const SIZE_EDGES = [5, 10, 15, 20, 25, 30, 35, 40]; // GB
+const LENGTH_EDGES = [1.5, 2, 2.5, 3, 3.5]; // hours
+export const MARKS: ReadonlyArray<readonly [string, string]> = [
+  ["chinese_subtitles", "中文字幕"], ["uncensored", "无码"], ["4k", "4K"], ["restored", "修复"],
+];
+export interface SourceFigures {
+  size: Histogram; duration: Histogram;
+  actors: Array<[string, number]>; // the 8 actors with most films archived into their folder
+  marks: Array<{ key: string; label: string; n: number }>;
+  total: number;
+}
+export function sourceFigures(A: Analysis): SourceFigures {
+  const c = A.cur, by = new Map<string, number>();
+  for (const f of c) if (f.actor) by.set(f.actor, (by.get(f.actor) ?? 0) + 1);
+  return {
+    size: histogram(c.map((f) => (f.input_bytes == null ? null : f.input_bytes / GB)), SIZE_EDGES, String),
+    duration: histogram(c.map((f) => (f.duration_s == null ? null : f.duration_s / 3600)), LENGTH_EDGES, (v) => v.toFixed(1), true),
+    actors: [...by.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 8),
+    marks: MARKS.map(([key, label]) => ({ key, label, n: c.filter((f) => f.marks.includes(key)).length })),
+    total: c.length,
+  };
+}
+export interface InboxFigures {
+  total: number; free: number; used: number; pending: number; other: number; pendingFilms: number;
+  freedPerDay: number; avgInput: number;
+  canNow: number | null; // 现在还可放入约 N 部 (估算): free space ÷ the 7-day average size; no projection (D9)
+}
+export function inboxFigures(x: AnalyticsInbox | null): InboxFigures | null {
+  if (!x) return null;
+  return {
+    total: x.total_bytes, free: x.free_bytes, used: x.used_bytes, pending: x.pending_bytes,
+    other: Math.max(0, x.used_bytes - x.pending_bytes), pendingFilms: x.pending_films,
+    freedPerDay: x.freed_bytes_per_day_7d, avgInput: x.avg_input_bytes_7d,
+    canNow: x.avg_input_bytes_7d > 0 ? Math.floor(x.free_bytes / x.avg_input_bytes_7d) : null,
   };
 }

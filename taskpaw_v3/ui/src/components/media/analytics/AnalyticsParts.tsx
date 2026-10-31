@@ -68,12 +68,17 @@ export function DataTable({ cols, rows, caption }: { cols: Column[]; rows: React
   );
 }
 
-/** A chart legend: colour keys with text (identity is never colour alone). */
-export function Legend({ items }: { items: Array<{ label: string; color: string; kind?: "rect" | "line" | "tick" }> }) {
+/** A chart legend: colour keys with text, optionally an icon (identity is never colour alone). */
+export function Legend({ items }: {
+  items: Array<{ label: string; color: string; kind?: "rect" | "line" | "tick"; icon?: SvgIconComponent; iconColor?: string }>;
+}) {
   return (
     <div className="lgd">
       {items.map((it) => (
-        <span className="lgd-i" key={it.label}><span className={`lgd-k ${it.kind ?? "rect"}`} style={{ background: it.color }} />{it.label}</span>
+        <span className="lgd-i" key={it.label}>
+          {it.icon && <span className="lgd-ic" style={{ color: it.iconColor ?? "var(--muted)" }}><Icon of={it.icon} /></span>}
+          <span className={`lgd-k ${it.kind ?? "rect"}`} style={{ background: it.color }} />{it.label}
+        </span>
       ))}
     </div>
   );

@@ -1,7 +1,7 @@
 // 数据分析 (EPIC 2026-10-31 §8): what the media pipeline has done — never progress against a total,
 // a remaining count or a forecast (OD1). One query per range; machine / resolution / compare recompute
 // locally over the cached response (D2). Filters live in page state only (D15). Sections follow the
-// preview order and read the same `Analysis`; C5 adds its sections after 耗时分布.
+// preview order and read the same `Analysis`.
 import AutorenewIcon from "@mui/icons-material/Autorenew";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { GlobalStyles } from "@mui/material";
@@ -17,11 +17,15 @@ import {
 } from "./analyticsModel";
 import { ANALYTICS_CSS } from "./analyticsStyles";
 import { ChartTooltipProvider } from "./charts";
+import { AlertsSection } from "./sections/AlertsSection";
 import { ControllerSection } from "./sections/ControllerSection";
 import { DurationsSection } from "./sections/DurationsSection";
+import { EnergySection } from "./sections/EnergySection";
 import { KpiRow } from "./sections/KpiRow";
 import { MachinesSection } from "./sections/MachinesSection";
 import { ProductionSection } from "./sections/ProductionSection";
+import { SourcesSection } from "./sections/SourcesSection";
+import { UptimeSection } from "./sections/UptimeSection";
 
 // OD6 / D3: no global refetchInterval (#379); archives land ~16/day, so one cheap incremental read a
 // minute keeps 「最后刷新」 honest. TanStack pauses it while the document is hidden and refetches on focus.
@@ -136,6 +140,11 @@ export function AnalyticsPage() {
           <MachinesSection data={data} A={A} res={res} onMachine={setMachine} />
           <ControllerSection data={data} A={A} />
           <DurationsSection A={A} />
+          <EnergySection data={data} A={A} res={res} compare={compare} />
+          <UptimeSection data={data} A={A} />
+          {/* keyed by the filters, so a new filter starts the event list at 14 rows again */}
+          <AlertsSection key={`${viewRange}|${machineNow}|${res}`} data={data} A={A} />
+          <SourcesSection data={data} A={A} />
         </div>
         <div className="sr-only" aria-live="polite">
           {`已更新：${R.name} · ${machineName(data, machineNow)} · ${resLabel} · 完成 ${A.cur.length} 部`}

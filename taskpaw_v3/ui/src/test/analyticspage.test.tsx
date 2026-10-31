@@ -287,10 +287,13 @@ describe("OD1 guard: no progress against a total, no remaining count, no forecas
   };
   const assertClean = () => { const all = texts(); for (const [name, re] of BANNED) expect(all, name).not.toMatch(re); };
 
-  it("holds on every range, filter and view, and keeps the 「GPU 在线 N / M」 device-count tile", async () => {
+  it("holds on every range, filter and view, and keeps the 「GPU 在线 N / M」 device-count tile and 「可用」 INBOX space", async () => {
     mount();
     await screen.findByRole("group", { name: /^完成影片/ });
     expect(tile("GPU 在线")).toHaveTextContent(/\d+ \/ \d+/);
+    // free INBOX space is 「可用」 (D9; C5 AC6), so the 「剩余」 ban below also covers the INBOX card
+    expect(screen.getByRole("meter", { name: "INBOX 已用空间" }).getAttribute("aria-valuetext")).toMatch(/可用 \d+ GB/);
+    expect(screen.getByText(/^已用 \d+ GB · 可用 \d+ GB（共 .+）$/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "对比上一周期" }));
     for (const label of ["24 小时", "7 天", "30 天", "90 天", "全部"]) {
       range(label);
@@ -305,7 +308,7 @@ describe("OD1 guard: no progress against a total, no remaining count, no forecas
     const select = screen.getByRole("combobox", { name: "机器" });
     for (const value of ["w-ctrl-0001", "w-gpu-ember"]) { fireEvent.change(select, { target: { value } }); assertClean(); }
     expect(screen.getAllByText(/共 \d+ 部/).length).toBeGreaterThan(0); // totals of what happened stay allowed
-  }, 20_000); // walks every range × view × panel (about 1.3 s alone; slower under the full parallel suite)
+  }, 20_000); // walks every range × view × all 9 panels: about 1.9 s alone, 5.7 s under the full parallel suite (C5)
 });
 
 describe("sticky filter bar (approved preview)", () => {

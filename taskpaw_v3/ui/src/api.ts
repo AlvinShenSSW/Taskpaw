@@ -679,7 +679,7 @@ export interface AnalyticsFilm {
   duration_s: number | null; input_bytes: number | null;
   worker: string | null; // the succeeded restore's worker; null = no restore
   queue_s: number | null; restore_s: number | null; asr_s: number | null; translate_s: number | null;
-  translated: boolean; cues: number | null;
+  translated: boolean | null; cues: number | null; // true 翻译完成 · false 无需翻译 · null unknown (no success yet / unrecognised note)
   subtitles: Partial<Record<AnalyticsSubtitleDecision, number>>;
   scrape_s: number | null; archive_s: number | null; lead_s: number | null;
   restore_wh: Array<[worker: string, wh: number, seconds: number]>; // failed attempts included

@@ -1,7 +1,7 @@
 // Hand-rolled SVG chart primitives of the 数据分析 page (EPIC 2026-10-31 §8.2, OD5: no chart library),
 // ported from the approved preview. Every chart: role="img" + aria-label, one focusable item in the tab
 // order with arrow / Home / End roving, and one shared tooltip that follows the pointer and the focus
-// (Escape hides it). C5 adds LaneChart beside these, reusing chartKit (useChartWidth, useRoving,
+// (Escape hides it). LaneChart (C5) reuses the same chartKit plumbing (useChartWidth, useRoving,
 // tipHandlers, niceTicks, the path helpers).
 import type { SvgIconComponent } from "@mui/icons-material";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -380,6 +380,83 @@ function StripSvg({ start, end, items, ticks, label, uncovUntil, trackFrom = sta
           <g key={it.key} {...rove(i)} {...(it.tip ? tipHandlers(tipApi, it.tip) : {})}>
             <rect x={xa + w / 2 - hw / 2} y={0} width={hw} height={y0 + bh + 8} className="hit" />
             <rect x={xa} y={y0} width={w} height={bh} rx={1} className="mk strip-mk" />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---- LaneChart: one row per lane, coloured state segments on a shared time axis (设备在线) ----
+export interface LaneSeg { key: string; s: number; e: number; color: string; tip?: () => TipContent }
+export interface Lane {
+  key: string;
+  label: string;
+  from: number;
+  to: number; // the lane's own span inside the domain (a machine that joined later starts later)
+  segs: LaneSeg[];
+  value?: string; // text right of the lane (「在线 97%」)
+  tip?: () => TipContent; // the lane summary, on its label
+  empty?: string; // shown when the lane has no span (from ≥ to)
+}
+export interface LaneChartProps {
+  start: number;
+  end: number; // the time domain (epoch ms)
+  lanes: Lane[];
+  ticks: Array<{ t: number; label: string }>; // candidate labels; thinned to ≥ 58 px apart
+  label: string;
+}
+const laneHeight = (n: number) => 6 + n * 34 + 22;
+export function LaneChart(props: LaneChartProps) {
+  const [ref, width] = useChartWidth();
+  const height = laneHeight(props.lanes.length);
+  return <div className="an-chart" ref={ref} style={{ minHeight: height }}>{width >= 10 && <LaneSvg {...props} W={width} H={height} />}</div>;
+}
+
+function LaneSvg({ start, end, lanes, ticks, label, W, H }: LaneChartProps & { W: number; H: number }) {
+  const tipApi = useChartTip();
+  const live = (l: Lane) => l.to > l.from;
+  const rove = useRoving(lanes.reduce((a, l) => a + (live(l) ? 1 + l.segs.length : 0), 0));
+  const narrow = W < 520, lw = narrow ? 96 : 132, rw = narrow ? 64 : 84, rowH = 34, top = 6, bh = 14;
+  const pw = Math.max(40, W - lw - rw), yb = top + lanes.length * rowH;
+  const x = (t: number) => lw + ((t - start) / (end - start || 1)) * pw;
+  const shown = thinTicks(ticks.map((t) => ({ ...t, px: x(t.t) })));
+  let k = 0; // the running roving index: each lane's summary, then its segments
+  return (
+    <svg className="chart-svg" viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={label}>
+      {shown.map((t) => (
+        <g key={t.t}>
+          <line x1={t.px} x2={t.px} y1={top} y2={yb} className="grid" />
+          <text x={clamp(t.px, lw + 14, W - rw - 6)} y={H - 6} textAnchor="middle" className="tick">{t.label}</text>
+        </g>
+      ))}
+      {lanes.map((ln, li) => {
+        const cy = top + li * rowH + rowH / 2;
+        if (!live(ln)) {
+          return (
+            <g key={ln.key} className="lane">
+              <text x={0} y={cy + 4} className="rlabel">{ln.label}</text>
+              <text x={lw + 6} y={cy + 4} className="tick">{ln.empty ?? "没有记录"}</text>
+            </g>
+          );
+        }
+        return (
+          <g key={ln.key} className="lane">
+            <g {...rove(k++)} {...(ln.tip ? tipHandlers(tipApi, ln.tip) : {})}>
+              <rect x={0} y={cy - rowH / 2 + 2} width={lw - 4} height={rowH - 4} className="hit" />
+              <text x={0} y={cy + 4} className="rlabel">{ln.label}</text>
+              <rect x={x(ln.from)} y={cy - bh / 2} width={Math.max(0, x(ln.to) - x(ln.from))} height={bh} rx={2} className="strip-track" />
+            </g>
+            {ln.segs.map((z) => {
+              const xa = x(Math.max(z.s, ln.from)), w = Math.max(2, x(Math.min(z.e, ln.to)) - xa), hw = Math.max(12, w);
+              return (
+                <g key={z.key} {...rove(k++)} {...(z.tip ? tipHandlers(tipApi, z.tip) : {})}>
+                  <rect x={xa + w / 2 - hw / 2} y={cy - rowH / 2 + 2} width={hw} height={rowH - 4} className="hit" />
+                  <rect x={xa} y={cy - bh / 2} width={w} height={bh} rx={1} className="mk" style={{ fill: z.color }} />
+                </g>
+              );
+            })}
+            {ln.value && <text x={W - rw + 10} y={cy + 4} className="vt1">{ln.value}</text>}
           </g>
         );
       })}

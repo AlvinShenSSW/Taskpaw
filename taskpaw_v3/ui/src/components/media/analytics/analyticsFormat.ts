@@ -38,3 +38,7 @@ export const fKwh = (v: number | null | undefined) =>
 export const fPct = (v: number | null | undefined) => (!finite(v) ? "—" : `${v < 10 ? n1(v) : Math.round(v)}%`);
 /** Axis tick: 1200 → 「1.2K」. */
 export const tickFmt = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(v % 1000 ? 1 : 0)}K` : String(+v.toFixed(2)));
+/** Bytes in decimal GB (the drive's own unit): 「590」. */
+export const fGB = (b: number | null | undefined) => (finite(b) ? fInt(b / 1e9) : "—");
+/** Bytes in decimal TB: 「1 TB」 / 「1.5 TB」. */
+export const fTB = (b: number) => `${+(b / 1e12).toFixed(1)} TB`;
