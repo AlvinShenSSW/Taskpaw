@@ -121,6 +121,7 @@ function mikoText(state: WorkflowSettingsState, unchanged: (k: string) => boolea
 }
 
 function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSaved: () => void }) {
+  const qc = useQueryClient();
   const [form, setForm] = useState<Form>(() => formOf(state.saved));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [refused, setRefused] = useState<{ text: string; drain: boolean } | null>(null);
@@ -148,6 +149,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     onSuccess: (_, { key }) => {
       setErrors((p) => { const n = { ...p }; delete n[key]; return n; });
       setMade(`已创建 ${LABELS[key]}`);
+      qc.invalidateQueries({ queryKey: ["dirFacts"] }); // the 目录不存在 warning re-reads the folder
       onSaved();
     },
     onError: (e, { key }) => {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from typing_extensions import Self
 
@@ -25,6 +26,17 @@ from .intake_discovery_models import (
 from .intake_snapshot import validate_snapshot
 from .manifest import observation_digest
 from .store_core import Clock, Mutation, parse_time, timestamp
+
+# What an unchanged rescan rewrites besides the version (#376).
+_RESCAN_FIELDS = frozenset({"observed_at", "last_complete_scan_at", "observation_json"})
+# Intake-adapter command history nothing reads back; pruned once old (#376).
+_ADAPTER_KINDS = (
+    "observe_intake",
+    "mark_intake_scan_seen",
+    "begin_intake_root_scan",
+    "finish_intake_root_scan",
+)
+_PRUNE_BATCH = 1000
 
 
 def _path_parts(value: str) -> tuple[str, ...]:
@@ -245,39 +257,166 @@ class IntakeCommands(ApprovalCommands):
             return "needs_attention", "ambiguous_grouping"
         return "waiting_stability", "observed"
 
+    def _observation_target(
+        self, principal: sqlite3.Row, command: im.IntakeObservation, now: datetime
+    ) -> tuple[sqlite3.Row, sqlite3.Row | None]:
+        root = self._root(command.root_id)
+        self._intake_access(principal, root, write=True)
+        if root["config_revision"] != command.root_config_revision:
+            raise m.WorkflowError("binding_changed")
+        if not root["enabled"]:
+            raise m.WorkflowError("intake_disabled")
+        old = self._conn.execute(
+            "SELECT * FROM intake_packages WHERE package_id=?",
+            (command.package_id,),
+        ).fetchone()
+        if (old["version"] if old else 0) != command.expected_package_version:
+            raise m.WorkflowError("cas_conflict")
+        if old and old["root_id"] != command.root_id:
+            raise m.WorkflowError("binding_changed")
+        if old and not old["current"]:
+            raise m.WorkflowError("package_replaced")
+        if command.observed_at > now or (
+            old and command.observed_at < parse_time(old["observed_at"])
+        ):
+            raise m.WorkflowError("observation_time_invalid")
+        if (
+            observation_digest(
+                command.members,
+                parent_context=command.parent_context,
+                grouping=command.grouping,
+            )
+            != command.observation_digest
+        ):
+            raise m.WorkflowError("observation_digest_mismatch")
+        return root, old
+
+    def _observation_values(
+        self,
+        command: im.IntakeObservation,
+        root: sqlite3.Row,
+        old: sqlite3.Row | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """The row `observe_intake` writes, and whether its source changed."""
+        if command.grouping:
+            self._check_intake_grouping(command.grouping, command)
+        config = im.IntakeRootPut.model_validate_json(root["body_json"])
+        state, reason = self._observation_state(command, config)
+        previous = (
+            im.IntakeObservation.model_validate_json(old["observation_json"])
+            if old
+            else None
+        )
+        changed = old is not None and (
+            old["observation_digest"] != command.observation_digest
+            or old["root_config_revision"] != command.root_config_revision
+            or old["relative_path"] != command.relative_path
+            or previous is not None
+            and native_identity_key(previous.package_native_identity)
+            != native_identity_key(command.package_native_identity)
+            or state != "waiting_stability"
+        )
+        generation = old["source_generation"] + int(changed) if old else 1
+        stable_since = old["stable_since"] if old and not changed else None
+        if state == "waiting_stability" and stable_since is None:
+            stable_since = timestamp(command.observed_at)
+        if state != "waiting_stability":
+            stable_since = None
+        if (
+            old
+            and not changed
+            and old["state"]
+            in (
+                "snapshotting",
+                "snapshot_ready",
+                "operational_ready",
+                "unknown_owner",
+            )
+        ):
+            state, reason = old["state"], old["reason"]
+        restored_snapshot = None
+        if (
+            old
+            and not changed
+            and old["active_snapshot_id"]
+            and old["active_operation_id"] is None
+            and state != "unknown_owner"
+        ):
+            stored = self._one(
+                "SELECT body_json FROM intake_snapshots WHERE snapshot_id=?",
+                (old["active_snapshot_id"],),
+            )
+            candidate = im.PackageSnapshot.model_validate_json(stored[0])
+            if (
+                candidate.admission.source_generation == generation
+                and candidate.admission.root_config_revision
+                == command.root_config_revision
+                and candidate.admission.observation_digest == command.observation_digest
+                and candidate.grouping == command.grouping
+            ):
+                # A dirty notification alone does not create a new input.
+                # Existing approvals invalidated by the hint stay invalid.
+                restored_snapshot = candidate
+                state = (
+                    "operational_ready"
+                    if candidate.eligibility.decision == "eligible"
+                    else "blocked"
+                )
+                reason = candidate.eligibility.reason
+                stable_since = None
+        if (
+            old
+            and (changed or old["dirty"])
+            and self._intake_archived(command.package_id)
+            and restored_snapshot is None
+        ):
+            state, reason, stable_since = (
+                "needs_attention",
+                "recovery_required",
+                None,
+            )
+        if old and not changed and old["reason"] == "publication_blocked":
+            # A complete unchanged scan cannot make a rejected film policy
+            # compatible, nor should it repeatedly copy the same package.
+            state, reason, stable_since = "blocked", "publication_blocked", None
+        values = dict(
+            root_id=command.root_id,
+            root_config_revision=command.root_config_revision,
+            relative_path=command.relative_path,
+            path_key=command.relative_path.casefold(),
+            native_identity_key=native_identity_key(command.package_native_identity),
+            parent_context=command.parent_context,
+            source_generation=generation,
+            state=state,
+            reason=reason,
+            dirty=0
+            if restored_snapshot is not None
+            else 1
+            if changed or not old
+            else old["dirty"],
+            observation_digest=command.observation_digest,
+            observed_at=timestamp(command.observed_at),
+            last_complete_scan_at=timestamp(command.observed_at)
+            if command.coverage == "complete"
+            else old["last_complete_scan_at"]
+            if old
+            else None,
+            stable_since=stable_since,
+            observation_json=m.canonical_json(command),
+            grouping_json=m.canonical_json(command.grouping)
+            if command.grouping
+            else None,
+            grouping_revision=command.grouping.grouping_revision
+            if command.grouping
+            else None,
+        )
+        return values, changed
+
     def observe_intake(
         self, auth: AuthProof, meta: m.CommandMeta, command: im.IntakeObservation
     ) -> m.CommandResult:
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
-            root = self._root(command.root_id)
-            self._intake_access(principal, root, write=True)
-            if root["config_revision"] != command.root_config_revision:
-                raise m.WorkflowError("binding_changed")
-            if not root["enabled"]:
-                raise m.WorkflowError("intake_disabled")
-            old = self._conn.execute(
-                "SELECT * FROM intake_packages WHERE package_id=?",
-                (command.package_id,),
-            ).fetchone()
-            if (old["version"] if old else 0) != command.expected_package_version:
-                raise m.WorkflowError("cas_conflict")
-            if old and old["root_id"] != command.root_id:
-                raise m.WorkflowError("binding_changed")
-            if old and not old["current"]:
-                raise m.WorkflowError("package_replaced")
-            if command.observed_at > now or (
-                old and command.observed_at < parse_time(old["observed_at"])
-            ):
-                raise m.WorkflowError("observation_time_invalid")
-            if (
-                observation_digest(
-                    command.members,
-                    parent_context=command.parent_context,
-                    grouping=command.grouping,
-                )
-                != command.observation_digest
-            ):
-                raise m.WorkflowError("observation_digest_mismatch")
+            root, old = self._observation_target(principal, command, now)
             new_identity = native_identity_key(command.package_native_identity)
             if (
                 old
@@ -336,123 +475,9 @@ class IntakeCommands(ApprovalCommands):
                     # Discovery does not replace established film/member IDs. The
                     # service rereads this canonical package before its next CAS.
                     return Mutation(existing["package_id"], version, "existing_package")
-            if command.grouping:
-                self._check_intake_grouping(command.grouping, command)
-            config = im.IntakeRootPut.model_validate_json(root["body_json"])
-            state, reason = self._observation_state(command, config)
-            previous = (
-                im.IntakeObservation.model_validate_json(old["observation_json"])
-                if old
-                else None
-            )
-            changed = bool(old) and (
-                old["observation_digest"] != command.observation_digest
-                or old["root_config_revision"] != command.root_config_revision
-                or old["relative_path"] != command.relative_path
-                or previous is not None
-                and native_identity_key(previous.package_native_identity)
-                != native_identity_key(command.package_native_identity)
-                or state != "waiting_stability"
-            )
-            generation = old["source_generation"] + int(changed) if old else 1
+            values, changed = self._observation_values(command, root, old)
             if changed:
                 self._invalidate_intake_dependents(command.package_id)
-            stable_since = old["stable_since"] if old and not changed else None
-            if state == "waiting_stability" and stable_since is None:
-                stable_since = timestamp(command.observed_at)
-            if state != "waiting_stability":
-                stable_since = None
-            if (
-                old
-                and not changed
-                and old["state"]
-                in (
-                    "snapshotting",
-                    "snapshot_ready",
-                    "operational_ready",
-                    "unknown_owner",
-                )
-            ):
-                state, reason = old["state"], old["reason"]
-            restored_snapshot = None
-            if (
-                old
-                and not changed
-                and old["active_snapshot_id"]
-                and old["active_operation_id"] is None
-                and state != "unknown_owner"
-            ):
-                stored = self._one(
-                    "SELECT body_json FROM intake_snapshots WHERE snapshot_id=?",
-                    (old["active_snapshot_id"],),
-                )
-                candidate = im.PackageSnapshot.model_validate_json(stored[0])
-                if (
-                    candidate.admission.source_generation == generation
-                    and candidate.admission.root_config_revision
-                    == command.root_config_revision
-                    and candidate.admission.observation_digest
-                    == command.observation_digest
-                    and candidate.grouping == command.grouping
-                ):
-                    # A dirty notification alone does not create a new input.
-                    # Existing approvals invalidated by the hint stay invalid.
-                    restored_snapshot = candidate
-                    state = (
-                        "operational_ready"
-                        if candidate.eligibility.decision == "eligible"
-                        else "blocked"
-                    )
-                    reason = candidate.eligibility.reason
-                    stable_since = None
-            if (
-                old
-                and (changed or old["dirty"])
-                and self._intake_archived(command.package_id)
-                and restored_snapshot is None
-            ):
-                state, reason, stable_since = (
-                    "needs_attention",
-                    "recovery_required",
-                    None,
-                )
-            if old and not changed and old["reason"] == "publication_blocked":
-                # A complete unchanged scan cannot make a rejected film policy
-                # compatible, nor should it repeatedly copy the same package.
-                state, reason, stable_since = "blocked", "publication_blocked", None
-            values = dict(
-                root_id=command.root_id,
-                root_config_revision=command.root_config_revision,
-                relative_path=command.relative_path,
-                path_key=command.relative_path.casefold(),
-                native_identity_key=native_identity_key(
-                    command.package_native_identity
-                ),
-                parent_context=command.parent_context,
-                source_generation=generation,
-                state=state,
-                reason=reason,
-                dirty=0
-                if restored_snapshot is not None
-                else 1
-                if changed or not old
-                else old["dirty"],
-                observation_digest=command.observation_digest,
-                observed_at=timestamp(command.observed_at),
-                last_complete_scan_at=timestamp(command.observed_at)
-                if command.coverage == "complete"
-                else old["last_complete_scan_at"]
-                if old
-                else None,
-                stable_since=stable_since,
-                observation_json=m.canonical_json(command),
-                grouping_json=m.canonical_json(command.grouping)
-                if command.grouping
-                else None,
-                grouping_revision=command.grouping.grouping_revision
-                if command.grouping
-                else None,
-            )
             if old:
                 version = self._update(
                     "intake_packages",
@@ -469,9 +494,46 @@ class IntakeCommands(ApprovalCommands):
                     version=version,
                     **values,
                 )
-            return Mutation(command.package_id, version, state)
+            return Mutation(command.package_id, version, values["state"])
 
         return self._execute(auth, meta, command, "observe_intake", apply)
+
+    def intake_observation_unchanged(
+        self, auth: AuthProof, command: im.IntakeObservation
+    ) -> bool:
+        """True when `observe_intake` would only advance the observation times.
+
+        Such a rescan is skipped (#376): no command, no audit row. A package in
+        waiting_stability is never unchanged; admission reads its scan time.
+        """
+        command = im.IntakeObservation.model_validate(command)
+        with self._lock:
+            try:
+                now = self._observe_time()
+                principal = self._check_auth(auth, now)
+                authority = self._one("SELECT * FROM authority WHERE singleton=1")
+                if authority["activation_state"] != "active":
+                    return False
+                root, old = self._observation_target(principal, command, now)
+                new_identity = native_identity_key(command.package_native_identity)
+                if old is None or (
+                    old["native_identity_key"]
+                    and new_identity
+                    and old["native_identity_key"] != new_identity
+                ):
+                    return False
+                values, changed = self._observation_values(command, root, old)
+            except m.WorkflowError:
+                return False
+            return (
+                not changed
+                and values["state"] != "waiting_stability"
+                and all(
+                    value == old[key]
+                    for key, value in values.items()
+                    if key not in _RESCAN_FIELDS
+                )
+            )
 
     @staticmethod
     def _check_intake_grouping(
@@ -738,6 +800,7 @@ class IntakeCommands(ApprovalCommands):
         *,
         after_package_id: str | None = None,
         limit: int = 200,
+        seen: frozenset[str] = frozenset(),
     ) -> im.IntakePage:
         if type(limit) is not int or not 1 <= limit <= 200:
             raise m.WorkflowError("invalid_page_limit")
@@ -759,11 +822,53 @@ class IntakeCommands(ApprovalCommands):
                 (root_id, scan_id, after_package_id, after_package_id, limit + 1),
             ).fetchall()
             return im.IntakePage(
-                items=tuple(self._intake_view(principal, row) for row in rows[:limit]),
+                # `seen`: packages this scan visited but skipped as unchanged.
+                items=tuple(
+                    self._intake_view(principal, row)
+                    for row in rows[:limit]
+                    if row["package_id"] not in seen
+                ),
                 next_package_id=rows[limit - 1]["package_id"]
                 if len(rows) > limit
                 else None,
             )
+
+    def prune_intake_history(self, auth: AuthProof, *, before: datetime) -> int:
+        """Delete one batch of intake-adapter history older than `before`.
+
+        Returns the number of request/audit pairs deleted. Foreign keys are off
+        for this batch only: the RESTRICT check on audit would scan the
+        unindexed request_results per row. Children go first, so nothing orphans.
+        """
+        with self._lock:
+            try:
+                principal = self._check_auth(auth, self._observe_time())
+                if principal["role"] != "intake_adapter":
+                    raise m.WorkflowError("forbidden")
+                self._conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    rows = self._conn.execute(
+                        "SELECT rowid,audit_seq FROM request_results WHERE command_kind IN "
+                        "(?,?,?,?) AND created_at<? LIMIT ?",
+                        (*_ADAPTER_KINDS, timestamp(before), _PRUNE_BATCH),
+                    ).fetchall()
+                    self._conn.executemany(
+                        "DELETE FROM request_results WHERE rowid=?",
+                        ((row[0],) for row in rows),
+                    )
+                    self._conn.executemany(
+                        "DELETE FROM audit WHERE seq=?", ((row[1],) for row in rows)
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+                finally:
+                    self._conn.execute("PRAGMA foreign_keys=ON")
+                return len(rows)
+            except sqlite3.Error as exc:
+                raise m.WorkflowError("authority_unavailable") from exc
 
     def record_intake_source_notice(
         self, auth: AuthProof, meta: m.CommandMeta, command: IntakeSourceNotice

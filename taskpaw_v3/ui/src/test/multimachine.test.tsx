@@ -641,15 +641,23 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
       miko: "partial",
     }));
     const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
+    let created = false;
+    const facts = vi.spyOn(api, "inspectDirectory").mockImplementation(async (path) =>
+      ({ exists: path !== "E:\\TODO" || created, free_bytes: null, volume: "E:", local: true }));
+    create.mockImplementation(async () => { created = true; return { ok: true, created: true }; });
     wrap(<WorkflowSettingsSection />);
     await screen.findByLabelText("INBOX 目录");
     expect(screen.getByText("INBOX 目录不存在")).toBeInTheDocument();
+    await waitFor(() => expect(facts).toHaveBeenCalledWith("E:\\TODO"));
+    const factsBefore = facts.mock.calls.filter(([p]) => p === "E:\\TODO").length;
     expect(screen.getByLabelText("Jasna")).toHaveAccessibleDescription("已找到");
     expect(screen.getByText(/缺少 Miko 目录、Miko 配置/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "创建此目录" }));
     await waitFor(() => expect(create).toHaveBeenCalledWith("E:\\TODO"));
     expect(await screen.findByText("已创建 INBOX 目录")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "创建此目录" })).toBeNull();
+    // #379: with no default polling the directory facts must re-read after creating it
+    await waitFor(() => expect(facts.mock.calls.filter(([p]) => p === "E:\\TODO").length).toBeGreaterThan(factsBefore));
   });
 
   it("IR3: 「创建此目录」 after a 422 「目录不存在」, and the backend's refusal on the field", async () => {

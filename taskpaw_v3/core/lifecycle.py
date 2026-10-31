@@ -9,12 +9,23 @@ port" problem (design §1.3#7, §7.1): one stop path that always fully releases.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
+import sys
 import threading
+import time
 from typing import Callable
 
 log = logging.getLogger("taskpaw.lifecycle")
+
+# Set by the Windows desktop shell when our stdin is its lifeline pipe (#377).
+STDIN_LIFELINE_ENV = "TASKPAW_STDIN_LIFELINE"
+_STDIN_POLL_INTERVAL = 0.5
+# NUL behind STD_INPUT_HANDLE once the lifeline is hidden from children. Opened
+# once and never closed: a registry can be collected while a straggler thread
+# still spawns, and a closed std handle breaks every later spawn (WinError 6).
+_STDIN_NUL_FD: int | None = None
 
 
 class GracefulShutdown:
@@ -86,7 +97,8 @@ class GracefulShutdown:
             self._children.append((name, proc))
 
     def install_signal_handlers(self) -> None:
-        """Trigger shutdown on SIGTERM/SIGINT (service mode / Ctrl-C)."""
+        """Trigger shutdown on SIGTERM/SIGINT (service mode / Ctrl-C), and on
+        Windows when the desktop shell closes our stdin (watch_parent_stdin)."""
 
         def _handler(signum, _frame):
             log.info("Received signal %s → graceful shutdown", signum)
@@ -98,6 +110,83 @@ class GracefulShutdown:
             except (ValueError, OSError) as e:
                 # Not on the main thread, or unsupported — non-fatal.
                 log.debug("Could not install handler for %s: %s", sig, e)
+        self.watch_parent_stdin()
+
+    def watch_parent_stdin(self, fd: int = 0) -> bool:
+        """Windows desktop: stop gracefully once the shell closes our stdin pipe.
+
+        The shell cannot signal a Windows backend, so it pipes our stdin, sets
+        TASKPAW_STDIN_LIFELINE=1, and closes the pipe on quit. A daemon thread
+        only PEEKS the pipe: a pending read makes Python grandchildren hang at
+        startup. A broken pipe runs shutdown() on a non-daemon thread, as
+        restart.request does. Children get NUL, never the pipe, as their stdin.
+        Returns whether the watcher started.
+        """
+        global _STDIN_NUL_FD
+        if os.environ.pop(STDIN_LIFELINE_ENV, None) != "1":
+            return False
+        if sys.platform != "win32":
+            return False
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        peek = kernel.PeekNamedPipe
+        peek.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        peek.restype = wintypes.BOOL
+        kernel.GetFileType.argtypes = [wintypes.HANDLE]
+        kernel.GetFileType.restype = wintypes.DWORD
+        kernel.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+        kernel.SetStdHandle.restype = wintypes.BOOL
+        try:
+            handle = msvcrt.get_osfhandle(fd)
+        except OSError as e:
+            log.warning("Stdin lifeline disabled: no stdin handle (%s)", e)
+            return False
+        kind = kernel.GetFileType(handle)
+        if kind != 3:  # FILE_TYPE_PIPE
+            log.warning("Stdin lifeline disabled: stdin is not a pipe (type %d)", kind)
+            return False
+        # Hide the pipe: subprocess hands stdin=None children GetStdHandle's NUL.
+        # Never dup2 over fd 0 or close the pipe (that breaks frozen spawns).
+        if _STDIN_NUL_FD is None:
+            _STDIN_NUL_FD = os.open(os.devnull, os.O_RDONLY)
+        std_input = 0xFFFFFFF6  # (DWORD)-10, STD_INPUT_HANDLE
+        if not kernel.SetStdHandle(std_input, msvcrt.get_osfhandle(_STDIN_NUL_FD)):
+            log.warning(
+                "Stdin lifeline: could not hide the pipe from children (error %d)",
+                ctypes.get_last_error(),
+            )
+        avail = wintypes.DWORD()
+
+        def poll() -> None:
+            while not self.is_stopping and peek(
+                handle, None, 0, None, ctypes.byref(avail), None
+            ):
+                time.sleep(_STDIN_POLL_INTERVAL)
+            if self.is_stopping:
+                return  # already stopping; never start a thread late
+            log.info(
+                "Desktop shell closed stdin (error %d) → graceful shutdown",
+                ctypes.get_last_error(),
+            )
+            # Explicitly non-daemon: a thread started here would inherit daemon.
+            threading.Thread(
+                target=self.shutdown, name="taskpaw-stdin-eof", daemon=False
+            ).start()
+
+        threading.Thread(
+            target=poll, name="taskpaw-stdin-lifeline", daemon=True
+        ).start()
+        return True
 
     def shutdown(self) -> None:
         """Run all cleanups + terminate children. Idempotent; safe to call twice."""

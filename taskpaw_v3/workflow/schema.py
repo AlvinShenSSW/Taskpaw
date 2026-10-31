@@ -9,6 +9,7 @@ The caller must hold its FileLease before connecting, and retain it until close.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -29,6 +30,10 @@ SUPPORTED_VERSIONS = (1, 2, 3, SCHEMA_VERSION)
 # workflow LTX preset's `standard` profile restores with this tier.
 BACKFILL_LTX_MODEL = "standard"
 BUSY_TIMEOUT_MS = 5000
+# Open-time VACUUM only when free pages are at least half the file and this big.
+RECLAIM_MIN_FREE_BYTES = 64 * 1024 * 1024
+
+log = logging.getLogger("taskpaw.workflow.schema")
 
 
 class SchemaError(ValueError):
@@ -512,7 +517,9 @@ def connect_existing(path: Path) -> sqlite3.Connection:
         conn.close()
         conn = None
         if version != SCHEMA_VERSION:
-            _backup_version(path, version=version, deadline_seconds=5.0)
+            _backup_version(
+                path, version=version, deadline_seconds=_backup_deadline(path)
+            )
         conn = _connect(path, "rw")
         validate_schema(conn, version=version)
         if version != SCHEMA_VERSION:
@@ -523,6 +530,31 @@ def connect_existing(path: Path) -> sqlite3.Connection:
         if conn is not None:
             conn.close()
         raise
+
+
+def _backup_deadline(path: Path) -> float:
+    """At least 5 s, plus 1 s per 10 MB of database and WAL (#376)."""
+    wal = path.with_name(path.name + "-wal")
+    size = path.stat().st_size + (wal.stat().st_size if wal.is_file() else 0)
+    return max(5.0, size / 10_000_000)
+
+
+def reclaim_free_pages(conn: sqlite3.Connection) -> None:
+    """VACUUM once when free pages dominate the file, e.g. after a history prune.
+
+    Runs outside any transaction on an otherwise unused connection. A failed
+    VACUUM leaves the file as it was; the store still opens.
+    """
+    try:
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+        if free * 2 < pages or free * size < RECLAIM_MIN_FREE_BYTES:
+            return
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        log.warning("workflow free-page reclaim failed", exc_info=True)
 
 
 def configure_connection(conn: sqlite3.Connection) -> None:

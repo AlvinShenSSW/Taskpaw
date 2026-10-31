@@ -1119,6 +1119,36 @@ def test_stop_after_the_child_exited_leaves_the_staging_file(tmp_path, monkeypat
     assert not [e for e in _evs if e[0] == "done"]
 
 
+def test_stop_frees_the_gpu_when_the_output_share_refuses_the_publish(
+    tmp_path, monkeypatch
+):
+    """#380 (Codex gate): the unreachable-library self-stop runs exactly when
+    the share is gone; a stop-time publish whose staging check raises must not
+    skip the GPU release."""
+    from pathlib import Path
+
+    from taskpaw_v3.core import gpu_lease
+
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])  # exited 0, not yet handled
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert gpu_lease.holder() is not None
+    real_exists = Path.exists
+
+    def exists(self, *a, **k):
+        if self.name.endswith(".tmp.mp4"):
+            raise PermissionError(13, "share gone")
+        return real_exists(self, *a, **k)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    inst.stop(timeout=0.5)
+    assert gpu_lease.holder() is None
+
+
 def test_exit_branch_publishes_a_clean_exit_while_stopping(tmp_path, monkeypatch):
     # The other half of C-4: _stopping is already set when check() sees rc 0
     # (stop() set the flag but has not taken the lock yet) → publish, no

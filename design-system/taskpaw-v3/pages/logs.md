@@ -44,6 +44,7 @@ replaces the agent Events tab. The Hub retains its own Events tab.
 - Empty results explain that no entries match. Failures show a localized alert
   with retry; existing rows remain readable after a failed poll or older-page fetch.
 - Disable paging while a request is active, and export while loading/exporting.
+- Today keeps the newest 200 rows; older rows return through Load earlier.
 - Export fetches the whole filtered selected day, up to 20,000 rows, as localized
   UTF-8 text via a download link. Surface the cap, export failure, or restart.
 - Boot changes discard stale entries and cursors. Filter changes and unmounts
